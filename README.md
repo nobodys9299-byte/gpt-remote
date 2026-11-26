@@ -1,33 +1,28 @@
-# Mi TV Remote (`gpt-remote`)
+# GPT Remote (`gpt-remote`)
 
-Android remote control app for **Xiaomi Mi Android TV** (and other Android TV / Google TV devices) using **Bluetooth HID** as the primary transport and **Wi-Fi Android TV Remote v2** as a built-in fallback.
+Universal Android remote hub for **Xiaomi Mi Android TV** (and any Android TV / Google TV) **plus Windows, macOS, and Linux Laptops/PCs** over **Bluetooth HID** or **Wi-Fi**, featuring hardware **vibration haptics** and a customizable **Device Hub** home screen.
 
 ## Features
 
-- **Bluetooth HID Remote (Primary — no TV app or Wi-Fi required)**
-  - Emulates a composite Bluetooth HID Keyboard + Consumer Control + Mouse (`BluetoothHidDevice`, Android 9+ / API 28+).
-  - **D-Pad & Navigation**: Up, Down, Left, Right (with hold-to-repeat), OK, Back, Home, Menu, Power.
-  - **Volume, Channel & Media**: Volume +/-, Mute, Channel +/-, Play/Pause, Next, Previous, Stop.
-  - **HID Mouse Touchpad**: Drag cursor, tap to click, double-tap for right-click, vertical scroll strip, adjustable sensitivity (`1x`, `1.5x`, `2.2x`).
-  - **TV Keyboard & Numpad**: Full text typing (including live typing mode), Enter, Backspace, Search, and `0–9` numpad.
-  - **Foreground Service**: Keeps the Bluetooth HID connection alive cleanly while using the remote.
+- **Customizable Device Hub Home Screen**
+  - Filter devices by **All**, **Android TV**, or **Laptop / PC**.
+  - Pin & customize saved electronics (custom nicknames, device categories, custom icons, 1-tap reconnect, or manual IP addition).
+  - Live nearby discovery across **Bluetooth HID**, **Wi-Fi Android TVs**, and **Wi-Fi PCs**.
 
-- **Wi-Fi Android TV Remote v2 (Fallback)**
-  - Auto-discovers TVs via mDNS (`_androidtvremote2._tcp.`) or manual IP entry.
-  - TLS pairing (`port 6467`) with 6-character hex PIN verification and persistent client RSA-2048 credentials in `AndroidKeyStore`.
-  - Encrypted remote control (`port 6466`) for navigation, volume, media, and IME text input (plus swipe-to-D-pad gesture fallback on the touchpad).
+- **Bluetooth HID Mode (TV & Laptop/PC — no companion app required)**
+  - Emulates a Bluetooth HID Keyboard + Consumer Control + Mouse (`BluetoothHidDevice`, Android 9+ / API 28+).
+  - Switchable **TV Remote Profile** (`SUBCLASS2_REMOTE_CONTROL`) and **PC / Laptop Combo Profile** (`SUBCLASS1_COMBO`).
+  - Smooth ~80Hz background-throttled **Touchpad** (sub-pixel cursor, instant click, 2-finger right-click, 2-finger & edge scroll, `1x` / `1.5x` / `2.2x` sensitivity).
 
-## How to Pair with Mi Android TV (Bluetooth)
+- **Wi-Fi Modes**
+  - **Android TV Remote v2**: Auto-discovers `_androidtvremote2._tcp.`, pairs via TLS (`port 6467`) with 6-char hex PIN, and controls via `port 6466`.
+  - **Wi-Fi PC Companion**: Run [`pc-companion/gpt_remote_pc.py`](pc-companion/gpt_remote_pc.py) on your laptop (zero extra dependencies on Windows!) for Wi-Fi mouse, keyboard, and PC shortcuts (`Alt+Tab`, `Copy`, `Paste`, `Desktop`, `Win`).
 
-1. Open **Mi TV Remote** on your Android phone and grant Bluetooth permissions.
-2. Tap **Connect TV** at the top of the screen.
-3. On your Mi Android TV, open **Settings → Remotes & Accessories → Add accessory**.
-4. In the app, tap **Discoverable** (or **Scan TVs**), select your Mi TV, and accept the pairing prompt on both devices.
+- **Hardware Vibration Haptics**
+  - Configurable strength (**Off**, **Subtle**, **Crisp**, **Strong**) pulsing on D-pad presses, clicks, volume, and scroll ticks.
 
 ## Build & Test
 
 ```bash
 ./gradlew testDebugUnitTest assembleDebug
 ```
-
-The debug APK is generated at `app/build/outputs/apk/debug/app-debug.apk`.

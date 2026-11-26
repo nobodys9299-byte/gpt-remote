@@ -2,6 +2,7 @@ package com.gptremote.mitv.bluetooth
 
 import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
+import com.gptremote.mitv.wifi.WifiPcRemoteClient
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -58,12 +59,17 @@ class HidDescriptorTest {
     @Test
     fun allRemoteButtonsMapToValidHidAction() {
         for (button in RemoteButton.entries) {
-            val action = HidDescriptor.buttonToHidAction(button)
-            assertNotNull("Missing mapping for $button", action)
+            val tvAction = HidDescriptor.buttonToHidAction(button, isPcMode = false)
+            val pcAction = HidDescriptor.buttonToHidAction(button, isPcMode = true)
+            assertNotNull("Missing TV mapping for $button", tvAction)
+            assertNotNull("Missing PC mapping for $button", pcAction)
         }
-        assertEquals(HidDescriptor.HidAction.Consumer(0x0041), HidDescriptor.buttonToHidAction(RemoteButton.DPAD_CENTER))
-        assertEquals(HidDescriptor.HidAction.Consumer(0x0183), HidDescriptor.buttonToHidAction(RemoteButton.SETTINGS))
-        assertEquals(HidDescriptor.HidAction.Consumer(0x0089), HidDescriptor.buttonToHidAction(RemoteButton.TV_INPUT))
+        assertEquals(HidDescriptor.HidAction.Consumer(0x0041), HidDescriptor.buttonToHidAction(RemoteButton.DPAD_CENTER, isPcMode = false))
+        assertEquals(HidDescriptor.HidAction.Keyboard(0x28), HidDescriptor.buttonToHidAction(RemoteButton.DPAD_CENTER, isPcMode = true))
+        assertEquals(HidDescriptor.HidAction.Consumer(0x0183), HidDescriptor.buttonToHidAction(RemoteButton.SETTINGS, isPcMode = false))
+        assertEquals(HidDescriptor.HidAction.Consumer(0x0089), HidDescriptor.buttonToHidAction(RemoteButton.TV_INPUT, isPcMode = false))
+        assertEquals("alt_tab", WifiPcRemoteClient.buttonToPcKeyName(RemoteButton.PC_ALT_TAB))
+        assertEquals("desktop", WifiPcRemoteClient.buttonToPcKeyName(RemoteButton.PC_SHOW_DESKTOP))
     }
 
     @Test

@@ -1,7 +1,7 @@
 package com.gptremote.mitv.model
 
 /**
- * Unified remote control commands supported across Bluetooth HID and Wi-Fi Android TV Remote v2.
+ * Unified remote control commands supported across TV (BT HID / Wi-Fi v2) and PC/Laptop (BT HID / Wi-Fi Companion).
  */
 enum class RemoteButton {
     DPAD_UP,
@@ -37,7 +37,14 @@ enum class RemoteButton {
     DIGIT_9,
     BACKSPACE,
     ENTER,
-    ESCAPE
+    ESCAPE,
+    // PC / Laptop convenience actions
+    TAB,
+    PC_WIN_KEY,
+    PC_ALT_TAB,
+    PC_COPY,
+    PC_PASTE,
+    PC_SHOW_DESKTOP
 }
 
 enum class MouseButton {
@@ -48,5 +55,11 @@ enum class MouseButton {
 
 enum class TransportMode {
     BLUETOOTH_HID,
-    WIFI_ANDROID_TV
+    WIFI_ANDROID_TV,
+    WIFI_PC
+}
+
+enum class DeviceCategory(val label: String) {
+    ANDROID_TV("Android TV"),
+    LAPTOP_PC("Laptop / PC")
 }

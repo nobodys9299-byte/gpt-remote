@@ -3,9 +3,12 @@ package com.gptremote.mitv.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.gptremote.mitv.data.RemoteRepository
+import com.gptremote.mitv.haptic.HapticStrength
+import com.gptremote.mitv.model.DeviceCategory
 import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
+import com.gptremote.mitv.model.SavedDevice
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
 import kotlinx.coroutines.flow.StateFlow
@@ -22,11 +25,15 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         repository.initializeBluetooth()
     }
 
+    fun setHapticStrength(strength: HapticStrength) = repository.setHapticStrength(strength)
+
+    fun setBluetoothPcProfile(enabled: Boolean) = repository.setBluetoothPcProfile(enabled)
+
     fun selectTransport(mode: TransportMode) = repository.selectTransport(mode)
 
-    fun startBluetoothScan() = repository.startBluetoothScan()
+    fun scanAllDevices() = repository.scanAllDevices()
 
-    fun stopBluetoothScan() = repository.stopBluetoothScan()
+    fun startBluetoothScan() = repository.startBluetoothScan()
 
     fun refreshPairedBluetooth() = repository.refreshPairedBluetooth()
 
@@ -34,18 +41,29 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun startWifiScan() = repository.startWifiScan()
 
-    fun stopWifiScan() = repository.stopWifiScan()
+    fun startWifiPcScan() = repository.startWifiPcScan()
 
     fun connectWifi(device: TvDevice.WifiTv, forcePair: Boolean = false) =
         repository.connectWifi(device, forcePair)
 
-    fun connectWifiManual(host: String) = repository.connectWifiManual(host)
+    fun connectWifiPc(device: TvDevice.WifiPc) = repository.connectWifiPc(device)
+
+    fun connectSavedDevice(saved: SavedDevice) = repository.connectSavedDevice(saved)
+
+    fun addAndConnectManualWifi(host: String, nickname: String, category: DeviceCategory) =
+        repository.addAndConnectManualWifi(host, nickname, category)
+
+    fun customizeSavedDevice(id: String, nickname: String, category: DeviceCategory, iconKey: String) =
+        repository.customizeSavedDevice(id, nickname, category, iconKey)
+
+    fun removeSavedDevice(id: String) = repository.removeSavedDevice(id)
 
     fun submitWifiPin(pin: String) = repository.submitWifiPin(pin)
 
     fun disconnect() = repository.disconnect()
 
-    fun pressButton(button: RemoteButton) = repository.sendButton(button)
+    fun pressButton(button: RemoteButton, strongHaptic: Boolean = false) =
+        repository.sendButton(button, strongHaptic)
 
     fun sendText(text: String) = repository.sendText(text)
 

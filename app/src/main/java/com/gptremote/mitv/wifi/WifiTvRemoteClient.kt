@@ -388,6 +388,12 @@ class WifiTvRemoteClient(
             RemoteButton.BACKSPACE -> KeyEvent.KEYCODE_DEL
             RemoteButton.ENTER -> KeyEvent.KEYCODE_ENTER
             RemoteButton.ESCAPE -> KeyEvent.KEYCODE_ESCAPE
+            RemoteButton.TAB -> KeyEvent.KEYCODE_TAB
+            RemoteButton.PC_COPY -> KeyEvent.KEYCODE_COPY
+            RemoteButton.PC_PASTE -> KeyEvent.KEYCODE_PASTE
+            RemoteButton.PC_WIN_KEY,
+            RemoteButton.PC_ALT_TAB,
+            RemoteButton.PC_SHOW_DESKTOP -> null
         }
     }
 }

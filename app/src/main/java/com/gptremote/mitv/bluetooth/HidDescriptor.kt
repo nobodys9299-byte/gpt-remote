@@ -14,7 +14,10 @@ object HidDescriptor {
     const val REPORT_ID_CONSUMER: Int = 2
     const val REPORT_ID_MOUSE: Int = 3
 
+    const val MOD_LEFT_CTRL: Byte = 0x01
     const val MOD_LEFT_SHIFT: Byte = 0x02
+    const val MOD_LEFT_ALT: Byte = 0x04
+    const val MOD_LEFT_GUI: Byte = 0x08
 
     val DESCRIPTOR: ByteArray = byteArrayOf(
         // ---- Keyboard (Report ID 1) ----
@@ -140,15 +143,31 @@ object HidDescriptor {
         MouseButton.MIDDLE -> 0x04
     }
 
-    fun buttonToHidAction(button: RemoteButton): HidAction = when (button) {
+    fun buttonToHidAction(button: RemoteButton, isPcMode: Boolean = false): HidAction = when (button) {
         RemoteButton.DPAD_UP -> HidAction.Keyboard(0x52)
         RemoteButton.DPAD_DOWN -> HidAction.Keyboard(0x51)
         RemoteButton.DPAD_LEFT -> HidAction.Keyboard(0x50)
         RemoteButton.DPAD_RIGHT -> HidAction.Keyboard(0x4F)
-        RemoteButton.DPAD_CENTER -> HidAction.Consumer(0x0041) // Menu Pick -> KEY_SELECT -> DPAD_CENTER
-        RemoteButton.BACK -> HidAction.Consumer(0x0224)        // AC Back -> KEY_BACK
-        RemoteButton.HOME -> HidAction.Consumer(0x0223)        // AC Home -> KEY_HOMEPAGE
-        RemoteButton.MENU -> HidAction.Consumer(0x0040)        // Menu -> KEY_MENU
+        RemoteButton.DPAD_CENTER -> if (isPcMode) {
+            HidAction.Keyboard(0x28) // Enter
+        } else {
+            HidAction.Consumer(0x0041) // Menu Pick -> KEY_SELECT -> DPAD_CENTER
+        }
+        RemoteButton.BACK -> if (isPcMode) {
+            HidAction.Keyboard(0x29) // Escape
+        } else {
+            HidAction.Consumer(0x0224) // AC Back -> KEY_BACK
+        }
+        RemoteButton.HOME -> if (isPcMode) {
+            HidAction.Keyboard(0x00, MOD_LEFT_GUI) // Win / Super
+        } else {
+            HidAction.Consumer(0x0223) // AC Home -> KEY_HOMEPAGE
+        }
+        RemoteButton.MENU -> if (isPcMode) {
+            HidAction.Keyboard(0x65) // Context Menu
+        } else {
+            HidAction.Consumer(0x0040) // Menu -> KEY_MENU
+        }
         RemoteButton.POWER -> HidAction.Consumer(0x0030)       // Power -> KEY_POWER
         RemoteButton.VOLUME_UP -> HidAction.Consumer(0x00E9)   // Volume Increment
         RemoteButton.VOLUME_DOWN -> HidAction.Consumer(0x00EA) // Volume Decrement
@@ -160,7 +179,11 @@ object HidDescriptor {
         RemoteButton.MEDIA_PREVIOUS -> HidAction.Consumer(0x00B6)   // Scan Previous Track
         RemoteButton.MEDIA_STOP -> HidAction.Consumer(0x00B7)       // Stop
         RemoteButton.SEARCH -> HidAction.Consumer(0x0221)           // AC Search
-        RemoteButton.SETTINGS -> HidAction.Consumer(0x0183)         // AL Consumer Config -> KEY_CONFIG -> SETTINGS
+        RemoteButton.SETTINGS -> if (isPcMode) {
+            HidAction.Keyboard(0x0C, MOD_LEFT_GUI) // Win + I (Settings)
+        } else {
+            HidAction.Consumer(0x0183) // AL Consumer Config -> KEY_CONFIG -> SETTINGS
+        }
         RemoteButton.TV_INPUT -> HidAction.Consumer(0x0089)         // Media Select TV -> KEY_TV
         RemoteButton.DIGIT_1 -> HidAction.Keyboard(0x1E)
         RemoteButton.DIGIT_2 -> HidAction.Keyboard(0x1F)
@@ -175,6 +198,12 @@ object HidDescriptor {
         RemoteButton.BACKSPACE -> HidAction.Keyboard(0x2A)
         RemoteButton.ENTER -> HidAction.Keyboard(0x28)
         RemoteButton.ESCAPE -> HidAction.Keyboard(0x29)
+        RemoteButton.TAB -> HidAction.Keyboard(0x2B)
+        RemoteButton.PC_WIN_KEY -> HidAction.Keyboard(0x00, MOD_LEFT_GUI)
+        RemoteButton.PC_ALT_TAB -> HidAction.Keyboard(0x2B, MOD_LEFT_ALT)
+        RemoteButton.PC_COPY -> HidAction.Keyboard(0x06, MOD_LEFT_CTRL)
+        RemoteButton.PC_PASTE -> HidAction.Keyboard(0x19, MOD_LEFT_CTRL)
+        RemoteButton.PC_SHOW_DESKTOP -> HidAction.Keyboard(0x07, MOD_LEFT_GUI) // Win + D
     }
 
     /**

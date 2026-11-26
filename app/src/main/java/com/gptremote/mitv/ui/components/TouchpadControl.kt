@@ -58,8 +58,9 @@ fun TouchpadControl(
     var sensitivity by remember { mutableFloatStateOf(1.5f) }
     var isTouching by remember { mutableStateOf(false) }
 
-    val isBluetoothHid = transportMode == TransportMode.BLUETOOTH_HID
-    val latestIsBt by rememberUpdatedState(isBluetoothHid)
+    val isCursorMode = transportMode == TransportMode.BLUETOOTH_HID ||
+        transportMode == TransportMode.WIFI_PC
+    val latestIsCursor by rememberUpdatedState(isCursorMode)
     val latestSensitivity by rememberUpdatedState(sensitivity)
 
     Column(
@@ -72,13 +73,17 @@ fun TouchpadControl(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = if (isBluetoothHid) "HID Mouse Touchpad" else "Swipe Pad (Wi-Fi D-Pad)",
+                text = when (transportMode) {
+                    TransportMode.BLUETOOTH_HID -> "Bluetooth HID Touchpad"
+                    TransportMode.WIFI_PC -> "Wi-Fi PC Touchpad"
+                    TransportMode.WIFI_ANDROID_TV -> "Swipe Pad (Wi-Fi D-Pad)"
+                },
                 color = TextSecondary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium
             )
 
-            if (isBluetoothHid) {
+            if (isCursorMode) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(1.0f to "1x", 1.5f to "1.5x", 2.2f to "2.2x").forEach { (factor, label) ->
                         FilterChip(
@@ -147,7 +152,7 @@ fun TouchpadControl(
                                     break
                                 }
 
-                                if (activeChanges.size >= 2 && latestIsBt) {
+                                if (activeChanges.size >= 2 && latestIsCursor) {
                                     // Two-finger vertical drag -> smooth mouse wheel scroll
                                     val avgDeltaY = activeChanges
                                         .map { it.positionChange().y }
@@ -176,7 +181,7 @@ fun TouchpadControl(
                                             movedBeyondTap = true
                                         }
 
-                                        if (latestIsBt) {
+                                        if (latestIsCursor) {
                                             val factor = latestSensitivity
                                             remX += delta.x * factor
                                             remY += delta.y * factor
@@ -216,15 +221,15 @@ fun TouchpadControl(
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = if (isBluetoothHid) "Drag to move cursor" else "Swipe to navigate",
+                        text = if (isCursorMode) "Drag to move cursor" else "Swipe to navigate",
                         color = TextSecondary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = if (isBluetoothHid) {
-                            "Tap = Click • 2-finger tap = Back • 2-finger drag = Scroll"
+                        text = if (isCursorMode) {
+                            "Tap = Click • 2-finger tap = Right-click • 2-finger drag = Scroll"
                         } else {
                             "Tap = OK • 2-finger tap = Back"
                         },
@@ -234,8 +239,8 @@ fun TouchpadControl(
                 }
             }
 
-            // Dedicated vertical scroll strip for Bluetooth HID
-            if (isBluetoothHid) {
+            // Dedicated vertical scroll strip for cursor mode
+            if (isCursorMode) {
                 Box(
                     modifier = Modifier
                         .width(44.dp)
@@ -285,14 +290,14 @@ fun TouchpadControl(
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(14.dp)
             ) {
-                Text(if (isBluetoothHid) "Left Click" else "OK / Select")
+                Text(if (isCursorMode) "Left Click" else "OK / Select")
             }
             OutlinedButton(
                 onClick = { onMouseClick(MouseButton.RIGHT) },
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(14.dp)
             ) {
-                Text(if (isBluetoothHid) "Right Click / Back" else "Back")
+                Text(if (isCursorMode) "Right Click" else "Back")
             }
         }
     }

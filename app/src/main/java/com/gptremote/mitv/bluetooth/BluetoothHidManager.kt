@@ -16,6 +16,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 import com.gptremote.mitv.model.ConnectionStatus
+import com.gptremote.mitv.model.DeviceCategory
 import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.TransportMode
@@ -58,7 +59,11 @@ class BluetoothHidManager(private val context: Context) {
     private var hidDevice: BluetoothHidDevice? = null
     private var connectedHost: BluetoothDevice? = null
     private var pendingConnectAddress: String? = null
+    private var connectedCategory: DeviceCategory = DeviceCategory.ANDROID_TV
     private var receiverRegistered = false
+
+    private val _isPcProfile = MutableStateFlow(false)
+    val isPcProfile: StateFlow<Boolean> = _isPcProfile.asStateFlow()
 
     // Serialized queue for discrete key/consumer/click/text actions
     private val actionQueue = Channel<suspend () -> Unit>(Channel.UNLIMITED)
@@ -204,7 +209,8 @@ class BluetoothHidManager(private val context: Context) {
                     TvDevice.BluetoothTv(
                         id = activeHost.address,
                         name = name,
-                        isBonded = true
+                        isBonded = true,
+                        category = if (_isPcProfile.value) DeviceCategory.LAPTOP_PC else TvDevice.inferCategory(name)
                     )
                 )
                 RemoteHidService.start(context, name)
@@ -218,8 +224,18 @@ class BluetoothHidManager(private val context: Context) {
                     pendingConnectAddress = null
                     val address = device?.address ?: "unknown"
                     val name = safeDeviceName(device)
+                    val resolvedCategory = if (_isPcProfile.value) {
+                        DeviceCategory.LAPTOP_PC
+                    } else {
+                        connectedCategory
+                    }
                     _connectionStatus.value = ConnectionStatus.Connected(
-                        TvDevice.BluetoothTv(id = address, name = name, isBonded = true)
+                        TvDevice.BluetoothTv(
+                            id = address,
+                            name = name,
+                            isBonded = true,
+                            category = resolvedCategory
+                        )
                     )
                     RemoteHidService.start(context, name)
                 }
@@ -345,15 +361,28 @@ class BluetoothHidManager(private val context: Context) {
         }
     }
 
+    fun setPcProfile(enabled: Boolean) {
+        if (_isPcProfile.value == enabled) return
+        _isPcProfile.value = enabled
+        connectedCategory = if (enabled) DeviceCategory.LAPTOP_PC else DeviceCategory.ANDROID_TV
+        val hid = hidDevice
+        if (hid != null && hasConnectPermission() && connectedHost == null) {
+            runCatching { hid.unregisterApp() }
+            _isAppRegistered.value = false
+            registerHidApp()
+        }
+    }
+
     private fun registerHidApp() {
         val hid = hidDevice ?: return
         if (!hasConnectPermission()) return
 
+        val pcMode = _isPcProfile.value
         val sdpSettings = BluetoothHidDeviceAppSdpSettings(
-            "Mi TV Remote",
-            "Bluetooth HID Remote Control for Android TV",
+            if (pcMode) "GPT Remote (PC)" else "Mi TV Remote",
+            if (pcMode) "Bluetooth HID Keyboard & Mouse" else "Bluetooth HID Remote Control for Android TV",
             "GPT Remote",
-            BluetoothHidDevice.SUBCLASS2_REMOTE_CONTROL,
+            if (pcMode) BluetoothHidDevice.SUBCLASS1_COMBO else BluetoothHidDevice.SUBCLASS2_REMOTE_CONTROL,
             HidDescriptor.DESCRIPTOR
         )
 
@@ -404,7 +433,7 @@ class BluetoothHidManager(private val context: Context) {
         _isScanning.value = false
     }
 
-    fun connect(address: String) {
+    fun connect(address: String, category: DeviceCategory = DeviceCategory.ANDROID_TV) {
         val adapter = bluetoothAdapter ?: return
         if (!adapter.isEnabled || !hasConnectPermission()) {
             _connectionStatus.value = ConnectionStatus.Error(
@@ -415,6 +444,11 @@ class BluetoothHidManager(private val context: Context) {
         }
 
         stopDiscovery()
+        connectedCategory = category
+        val shouldBePc = category == DeviceCategory.LAPTOP_PC
+        if (_isPcProfile.value != shouldBePc) {
+            setPcProfile(shouldBePc)
+        }
         val device = adapter.getRemoteDevice(address)
         val hid = hidDevice
         if (hid == null || !_isAppRegistered.value) {
@@ -460,7 +494,8 @@ class BluetoothHidManager(private val context: Context) {
         actionQueue.trySend {
             val host = connectedHost ?: return@trySend
             val hid = hidDevice ?: return@trySend
-            when (val action = HidDescriptor.buttonToHidAction(button)) {
+            val isPc = _isPcProfile.value || connectedCategory == DeviceCategory.LAPTOP_PC
+            when (val action = HidDescriptor.buttonToHidAction(button, isPcMode = isPc)) {
                 is HidDescriptor.HidAction.Keyboard -> {
                     hid.sendReport(
                         host,

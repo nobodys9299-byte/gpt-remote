@@ -3,6 +3,7 @@ package com.gptremote.mitv.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,11 +26,13 @@ import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.Gamepad
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.TouchApp
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
@@ -53,28 +56,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.gptremote.mitv.haptic.HapticStrength
 import com.gptremote.mitv.model.ConnectionStatus
+import com.gptremote.mitv.model.DeviceCategory
 import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.model.TransportMode
-import com.gptremote.mitv.model.TvDevice
 import com.gptremote.mitv.ui.components.DPadControl
-import com.gptremote.mitv.ui.components.DeviceConnectSheet
 import com.gptremote.mitv.ui.components.KeyboardSheet
 import com.gptremote.mitv.ui.components.MediaVolumeBar
+import com.gptremote.mitv.ui.components.SettingsSheet
 import com.gptremote.mitv.ui.components.TouchpadControl
 import com.gptremote.mitv.ui.theme.ConnectedGreen
 import com.gptremote.mitv.ui.theme.MiOrange
 import com.gptremote.mitv.ui.theme.RemoteBg
 import com.gptremote.mitv.ui.theme.RemoteBorder
-import com.gptremote.mitv.ui.theme.RemoteSurface
 import com.gptremote.mitv.ui.theme.RemoteSurfaceElevated
 import com.gptremote.mitv.ui.theme.TextPrimary
 import com.gptremote.mitv.ui.theme.TextSecondary
@@ -88,29 +89,25 @@ private enum class PadMode {
 @Composable
 fun RemoteScreen(
     uiState: RemoteUiState,
-    hasBluetoothPermissions: Boolean,
-    onRequestBluetoothPermissions: () -> Unit,
-    onMakeDiscoverable: () -> Unit,
-    onSelectTransport: (TransportMode) -> Unit,
-    onScanBluetooth: () -> Unit,
-    onConnectBluetooth: (TvDevice.BluetoothTv) -> Unit,
-    onScanWifi: () -> Unit,
-    onConnectWifi: (TvDevice.WifiTv, Boolean) -> Unit,
-    onConnectWifiManual: (String) -> Unit,
-    onSubmitWifiPin: (String) -> Unit,
-    onDisconnect: () -> Unit,
-    onButtonPress: (RemoteButton) -> Unit,
+    onNavigateBackToHub: () -> Unit,
+    onButtonPress: (RemoteButton, Boolean) -> Unit,
     onSendText: (String) -> Unit,
     onMouseMove: (dx: Int, dy: Int, wheel: Int) -> Unit,
     onMouseClick: (MouseButton) -> Unit,
+    onSelectHapticStrength: (HapticStrength) -> Unit,
+    onToggleBluetoothPcProfile: (Boolean) -> Unit,
     onClearBanner: () -> Unit
 ) {
-    val haptic = LocalHapticFeedback.current
     val snackbarHostState = remember { SnackbarHostState() }
+    val isPcDevice = uiState.connectedCategory == DeviceCategory.LAPTOP_PC ||
+        uiState.activeTransport == TransportMode.WIFI_PC ||
+        (uiState.activeTransport == TransportMode.BLUETOOTH_HID && uiState.bluetoothPcProfile)
 
-    var padMode by remember { mutableStateOf(PadMode.DPAD) }
-    var showConnectSheet by remember { mutableStateOf(false) }
+    var padMode by remember(isPcDevice) {
+        mutableStateOf(if (isPcDevice) PadMode.TOUCHPAD else PadMode.DPAD)
+    }
     var showKeyboardSheet by remember { mutableStateOf(false) }
+    var showSettingsSheet by remember { mutableStateOf(false) }
 
     val statusError = (uiState.status as? ConnectionStatus.Error)?.message
     val bannerMessage = uiState.lastStatusBanner ?: statusError
@@ -118,12 +115,6 @@ fun RemoteScreen(
         if (!bannerMessage.isNullOrBlank()) {
             snackbarHostState.showSnackbar(bannerMessage)
             onClearBanner()
-        }
-    }
-
-    LaunchedEffect(uiState.status) {
-        if (uiState.status is ConnectionStatus.AwaitingWifiPin) {
-            showConnectSheet = true
         }
     }
 
@@ -138,28 +129,25 @@ fun RemoteScreen(
                 .statusBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Top Bar: Power + Connection Pill + Keyboard
             TopControlBar(
                 uiState = uiState,
-                onPowerClick = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onButtonPress(RemoteButton.POWER)
-                },
-                onConnectionClick = { showConnectSheet = true },
+                isPcDevice = isPcDevice,
+                onBackToHub = onNavigateBackToHub,
+                onPowerClick = { onButtonPress(RemoteButton.POWER, true) },
+                onSettingsClick = { showSettingsSheet = true },
                 onKeyboardClick = { showKeyboardSheet = true }
             )
 
-            // Mode Switcher: D-Pad vs Touchpad
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                 SegmentedButton(
                     selected = padMode == PadMode.DPAD,
                     onClick = { padMode = PadMode.DPAD },
                     shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                     icon = { Icon(Icons.Rounded.Gamepad, contentDescription = null) },
-                    label = { Text("D-Pad") }
+                    label = { Text(if (isPcDevice) "Arrow Keys" else "D-Pad") }
                 )
                 SegmentedButton(
                     selected = padMode == PadMode.TOUCHPAD,
@@ -170,26 +158,29 @@ fun RemoteScreen(
                 )
             }
 
-            // Primary Control Surface
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 4.dp),
+                    .padding(vertical = 2.dp),
                 contentAlignment = Alignment.Center
             ) {
                 when (padMode) {
-                    PadMode.DPAD -> DPadControl(onButtonPress = onButtonPress)
+                    PadMode.DPAD -> DPadControl(
+                        onButtonPress = { btn ->
+                            onButtonPress(btn, btn == RemoteButton.DPAD_CENTER)
+                        }
+                    )
                     PadMode.TOUCHPAD -> TouchpadControl(
                         transportMode = (uiState.status as? ConnectionStatus.Connected)?.device?.transport
                             ?: uiState.activeTransport,
                         onMouseMove = onMouseMove,
                         onMouseClick = onMouseClick,
-                        onButtonFallback = onButtonPress
+                        onButtonFallback = { btn -> onButtonPress(btn, false) }
                     )
                 }
             }
 
-            // Core Navigation Row: Back / Home / Menu / Keyboard
+            // Core Navigation Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
@@ -197,28 +188,19 @@ fun RemoteScreen(
             ) {
                 NavCircleButton(
                     icon = Icons.AutoMirrored.Rounded.ArrowBack,
-                    label = "Back",
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        onButtonPress(RemoteButton.BACK)
-                    }
+                    label = if (isPcDevice) "Esc" else "Back",
+                    onClick = { onButtonPress(RemoteButton.BACK, false) }
                 )
                 NavCircleButton(
-                    icon = Icons.Rounded.Home,
-                    label = "Home",
+                    icon = if (isPcDevice) Icons.Rounded.Laptop else Icons.Rounded.Home,
+                    label = if (isPcDevice) "Start" else "Home",
                     highlight = true,
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onButtonPress(RemoteButton.HOME)
-                    }
+                    onClick = { onButtonPress(RemoteButton.HOME, true) }
                 )
                 NavCircleButton(
                     icon = Icons.Rounded.Menu,
                     label = "Menu",
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        onButtonPress(RemoteButton.MENU)
-                    }
+                    onClick = { onButtonPress(RemoteButton.MENU, false) }
                 )
                 NavCircleButton(
                     icon = Icons.Rounded.Keyboard,
@@ -227,10 +209,36 @@ fun RemoteScreen(
                 )
             }
 
-            // Volume, Channel & Media Controls
-            MediaVolumeBar(onButtonPress = onButtonPress)
+            if (isPcDevice) {
+                // Dedicated Laptop / PC Shortcuts Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        RemoteButton.PC_ALT_TAB to "Alt+Tab",
+                        RemoteButton.TAB to "Tab",
+                        RemoteButton.PC_COPY to "Copy",
+                        RemoteButton.PC_PASTE to "Paste",
+                        RemoteButton.PC_SHOW_DESKTOP to "Desktop",
+                        RemoteButton.ENTER to "Enter"
+                    ).forEach { (btn, label) ->
+                        FilledTonalButton(
+                            onClick = { onButtonPress(btn, false) },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(label, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
 
-            // Quick Utility Shortcuts
+            MediaVolumeBar(
+                onButtonPress = { btn -> onButtonPress(btn, btn == RemoteButton.MUTE) }
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -238,48 +246,42 @@ fun RemoteScreen(
                 QuickShortcutButton(
                     icon = Icons.Rounded.Search,
                     label = "Search",
-                    onClick = { onButtonPress(RemoteButton.SEARCH) },
+                    onClick = { onButtonPress(RemoteButton.SEARCH, false) },
                     modifier = Modifier.weight(1f)
                 )
-                QuickShortcutButton(
-                    icon = Icons.AutoMirrored.Rounded.Input,
-                    label = "Input",
-                    onClick = { onButtonPress(RemoteButton.TV_INPUT) },
-                    modifier = Modifier.weight(1f)
-                )
+                if (!isPcDevice) {
+                    QuickShortcutButton(
+                        icon = Icons.AutoMirrored.Rounded.Input,
+                        label = "Input",
+                        onClick = { onButtonPress(RemoteButton.TV_INPUT, false) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
                 QuickShortcutButton(
                     icon = Icons.Rounded.Settings,
-                    label = "Settings",
-                    onClick = { onButtonPress(RemoteButton.SETTINGS) },
+                    label = if (isPcDevice) "PC Settings" else "TV Settings",
+                    onClick = { onButtonPress(RemoteButton.SETTINGS, false) },
                     modifier = Modifier.weight(1f)
                 )
             }
         }
     }
 
-    if (showConnectSheet) {
-        DeviceConnectSheet(
-            uiState = uiState,
-            hasBluetoothPermissions = hasBluetoothPermissions,
-            onRequestBluetoothPermissions = onRequestBluetoothPermissions,
-            onMakeDiscoverable = onMakeDiscoverable,
-            onSelectTransport = onSelectTransport,
-            onScanBluetooth = onScanBluetooth,
-            onConnectBluetooth = onConnectBluetooth,
-            onScanWifi = onScanWifi,
-            onConnectWifi = onConnectWifi,
-            onConnectWifiManual = onConnectWifiManual,
-            onSubmitWifiPin = onSubmitWifiPin,
-            onDisconnect = onDisconnect,
-            onDismiss = { showConnectSheet = false }
-        )
-    }
-
     if (showKeyboardSheet) {
         KeyboardSheet(
             onSendText = onSendText,
-            onButtonPress = onButtonPress,
+            onButtonPress = { btn -> onButtonPress(btn, false) },
             onDismiss = { showKeyboardSheet = false }
+        )
+    }
+
+    if (showSettingsSheet) {
+        SettingsSheet(
+            hapticStrength = uiState.hapticStrength,
+            bluetoothPcProfile = uiState.bluetoothPcProfile,
+            onSelectHapticStrength = onSelectHapticStrength,
+            onToggleBluetoothPcProfile = onToggleBluetoothPcProfile,
+            onDismiss = { showSettingsSheet = false }
         )
     }
 }
@@ -287,8 +289,10 @@ fun RemoteScreen(
 @Composable
 private fun TopControlBar(
     uiState: RemoteUiState,
+    isPcDevice: Boolean,
+    onBackToHub: () -> Unit,
     onPowerClick: () -> Unit,
-    onConnectionClick: () -> Unit,
+    onSettingsClick: () -> Unit,
     onKeyboardClick: () -> Unit
 ) {
     Row(
@@ -297,97 +301,95 @@ private fun TopControlBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         FilledTonalIconButton(
-            onClick = onPowerClick,
-            modifier = Modifier.size(48.dp),
-            shape = CircleShape,
-            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                containerColor = Color(0xFF341A1D),
-                contentColor = Color(0xFFF87171)
-            )
-        ) {
-            Icon(Icons.Rounded.PowerSettingsNew, contentDescription = "Power")
-        }
-
-        val (statusText, dotColor, transportIcon) = when (val st = uiState.status) {
-            is ConnectionStatus.Connected -> {
-                val icon = if (st.device.transport == TransportMode.BLUETOOTH_HID) {
-                    Icons.Rounded.Bluetooth
-                } else {
-                    Icons.Rounded.Wifi
-                }
-                Triple(st.device.name, ConnectedGreen, icon)
-            }
-            is ConnectionStatus.Connecting -> {
-                val icon = if (st.transport == TransportMode.BLUETOOTH_HID) {
-                    Icons.Rounded.Bluetooth
-                } else {
-                    Icons.Rounded.Wifi
-                }
-                Triple("Connecting...", MiOrange, icon)
-            }
-            is ConnectionStatus.AwaitingWifiPin -> {
-                Triple("Enter TV PIN", WifiBlue, Icons.Rounded.Wifi)
-            }
-            is ConnectionStatus.Error -> {
-                Triple("Connect TV", Color(0xFFF87171), Icons.Rounded.Bluetooth)
-            }
-            ConnectionStatus.Disconnected -> {
-                val icon = if (uiState.activeTransport == TransportMode.BLUETOOTH_HID) {
-                    Icons.Rounded.Bluetooth
-                } else {
-                    Icons.Rounded.Wifi
-                }
-                Triple("Connect TV", TextSecondary, icon)
-            }
-        }
-
-        Row(
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 12.dp)
-                .height(46.dp)
-                .clip(RoundedCornerShape(23.dp))
-                .background(RemoteSurfaceElevated)
-                .border(1.dp, RemoteBorder, RoundedCornerShape(23.dp))
-                .clickable(onClick = onConnectionClick)
-                .padding(horizontal = 14.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(9.dp)
-                    .clip(CircleShape)
-                    .background(dotColor)
-            )
-            Spacer(modifier = Modifier.size(8.dp))
-            Icon(
-                imageVector = transportIcon,
-                contentDescription = null,
-                tint = dotColor,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.size(6.dp))
-            Text(
-                text = statusText,
-                color = TextPrimary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-
-        FilledTonalIconButton(
-            onClick = onKeyboardClick,
-            modifier = Modifier.size(48.dp),
+            onClick = onBackToHub,
+            modifier = Modifier.size(44.dp),
             shape = CircleShape,
             colors = IconButtonDefaults.filledTonalIconButtonColors(
                 containerColor = RemoteSurfaceElevated,
                 contentColor = TextPrimary
             )
         ) {
-            Icon(Icons.Rounded.Keyboard, contentDescription = "Keyboard")
+            Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back to Hub")
+        }
+
+        val (statusText, dotColor, transportIcon) = when (val st = uiState.status) {
+            is ConnectionStatus.Connected -> {
+                val icon = when (st.device.transport) {
+                    TransportMode.BLUETOOTH_HID -> Icons.Rounded.Bluetooth
+                    TransportMode.WIFI_ANDROID_TV, TransportMode.WIFI_PC -> Icons.Rounded.Wifi
+                }
+                Triple(st.device.name, ConnectedGreen, icon)
+            }
+            is ConnectionStatus.Connecting -> Triple("Connecting...", MiOrange, Icons.Rounded.Bluetooth)
+            is ConnectionStatus.AwaitingWifiPin -> Triple("Enter PIN", WifiBlue, Icons.Rounded.Wifi)
+            is ConnectionStatus.Error -> Triple("Tap for Hub", Color(0xFFF87171), Icons.Rounded.Bluetooth)
+            ConnectionStatus.Disconnected -> Triple("Pick Device", TextSecondary, Icons.Rounded.Bluetooth)
+        }
+
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp)
+                .height(44.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(RemoteSurfaceElevated)
+                .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
+                .clickable(onClick = onBackToHub)
+                .padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(dotColor)
+            )
+            Spacer(modifier = Modifier.size(6.dp))
+            Icon(
+                imageVector = transportIcon,
+                contentDescription = null,
+                tint = dotColor,
+                modifier = Modifier.size(15.dp)
+            )
+            Spacer(modifier = Modifier.size(6.dp))
+            Text(
+                text = statusText,
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilledTonalIconButton(
+                onClick = onSettingsClick,
+                modifier = Modifier.size(44.dp),
+                shape = CircleShape,
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = RemoteSurfaceElevated,
+                    contentColor = TextPrimary
+                )
+            ) {
+                Icon(Icons.Rounded.Tune, contentDescription = "Haptics & Settings")
+            }
+
+            FilledTonalIconButton(
+                onClick = onPowerClick,
+                modifier = Modifier.size(44.dp),
+                shape = CircleShape,
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = Color(0xFF341A1D),
+                    contentColor = Color(0xFFF87171)
+                )
+            ) {
+                Icon(
+                    Icons.Rounded.PowerSettingsNew,
+                    contentDescription = if (isPcDevice) "Lock / Power" else "Power"
+                )
+            }
         }
     }
 }
