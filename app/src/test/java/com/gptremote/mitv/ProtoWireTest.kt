@@ -1,0 +1,74 @@
+package com.gptremote.mitv.wifi
+
+import com.gptremote.mitv.wifi.TvCertificateManager.Companion.toUnsignedBigEndianBytes
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.math.BigInteger
+
+class ProtoWireTest {
+
+    @Test
+    fun frameRoundTripPreservesPayload() {
+        val payload = ProtoWire.Writer().apply {
+            writeVarintField(1, 2)
+            writeVarintField(2, 200)
+            writeMessageField(10) {
+                writeStringField(1, "com.gptremote.mitv")
+                writeStringField(2, "Mi TV Remote")
+            }
+        }.toByteArray()
+
+        val out = ByteArrayOutputStream()
+        ProtoWire.writeFrame(out, payload)
+
+        val decodedFrame = ProtoWire.readFrame(out.toByteArray().inputStream())
+        assertArrayEquals(payload, decodedFrame)
+
+        val fields = ProtoWire.parseFields(decodedFrame)
+        assertEquals(2L, fields.first { it.number == 1 }.varint)
+        assertEquals(200L, fields.first { it.number == 2 }.varint)
+        val nested = ProtoWire.parseFields(fields.first { it.number == 10 }.bytes)
+        assertEquals("com.gptremote.mitv", nested.first { it.number == 1 }.bytes.toString(Charsets.UTF_8))
+        assertEquals("Mi TV Remote", nested.first { it.number == 2 }.bytes.toString(Charsets.UTF_8))
+    }
+
+    @Test
+    fun keyInjectAndImeBatchEditEncodeExpectedFieldNumbers() {
+        val keyMsg = WifiTvRemoteClient.buildKeyInject(keyCode = 19, direction = 3)
+        val topFields = ProtoWire.parseFields(keyMsg)
+        assertEquals(10, topFields.single().number)
+        val nested = ProtoWire.parseFields(topFields.single().bytes)
+        assertEquals(19L, nested.first { it.number == 1 }.varint)
+        assertEquals(3L, nested.first { it.number == 2 }.varint)
+
+        val imeMsg = WifiTvRemoteClient.buildImeBatchEdit(1, 2, "netflix")
+        val imeTop = ProtoWire.parseFields(imeMsg)
+        assertEquals(21, imeTop.single().number)
+    }
+
+    @Test
+    fun unsignedBigEndianStripsLeadingZeroSignByte() {
+        val highBit = BigInteger(1, byteArrayOf(0x80.toByte(), 0x01))
+        assertEquals(3, highBit.toByteArray().size) // BigInteger adds leading 0x00
+        assertArrayEquals(byteArrayOf(0x80.toByte(), 0x01), highBit.toUnsignedBigEndianBytes())
+
+        val lowBit = BigInteger(1, byteArrayOf(0x7F, 0x01))
+        assertArrayEquals(byteArrayOf(0x7F, 0x01), lowBit.toUnsignedBigEndianBytes())
+    }
+
+    @Test
+    fun pairingDigestProduces32ByteSha256() {
+        val digest = TvCertificateManager.computePairingDigest(
+            clientMod = byteArrayOf(1, 2, 3),
+            clientExp = byteArrayOf(1, 0, 1),
+            serverMod = byteArrayOf(4, 5, 6),
+            serverExp = byteArrayOf(1, 0, 1),
+            nonce = TvCertificateManager.hexToBytes("A1B2")
+        )
+        assertEquals(32, digest.size)
+        assertTrue(digest.any { it != 0.toByte() })
+    }
+}
