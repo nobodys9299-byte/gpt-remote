@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -32,6 +31,7 @@ import androidx.compose.material.icons.rounded.Kitchen
 import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.LocalLaundryService
+import androidx.compose.material.icons.rounded.PhonelinkSetup
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Speaker
@@ -138,173 +138,174 @@ fun HomeHubScreen(
         containerColor = RemoteBg,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
     ) { innerPadding ->
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .statusBarsPadding(),
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            item(span = { GridItemSpan(2) }) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            // Fixed clean top header (never collides or clips under status bar during grid scroll)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "GPT Remote",
+                        color = TextPrimary,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (draggedProduct != null) {
+                            "Drag to place card anywhere"
+                        } else {
+                            "Tap a device • Hold & drag to reorder"
+                        },
+                        color = if (draggedProduct != null) MiOrange else TextSecondary,
+                        fontSize = 13.sp
+                    )
+                }
+                FilledTonalIconButton(
+                    onClick = { showSettings = true },
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = RemoteSurfaceElevated,
+                        contentColor = TextPrimary
+                    )
                 ) {
-                    Column {
-                        Text(
-                            text = "GPT Remote",
-                            color = TextPrimary,
-                            fontSize = 26.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = if (draggedProduct != null) {
-                                "Drag to place card anywhere"
-                            } else {
-                                "Tap a device • Hold & drag to reorder"
-                            },
-                            color = if (draggedProduct != null) MiOrange else TextSecondary,
-                            fontSize = 13.sp
-                        )
-                    }
-                    FilledTonalIconButton(
-                        onClick = { showSettings = true },
-                        colors = IconButtonDefaults.filledTonalIconButtonColors(
-                            containerColor = RemoteSurfaceElevated,
-                            contentColor = TextPrimary
-                        )
-                    ) {
-                        Icon(Icons.Rounded.Settings, contentDescription = "Settings")
-                    }
+                    Icon(Icons.Rounded.Settings, contentDescription = "Settings")
                 }
             }
 
-            // Show active connection card only when connected
-            val connected = uiState.status as? ConnectionStatus.Connected
-            if (connected != null) {
-                item(span = { GridItemSpan(2) }) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(
-                                Brush.linearGradient(
-                                    colors = listOf(RemoteSurfaceElevated, Color(0xFF1A2838))
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                val connected = uiState.status as? ConnectionStatus.Connected
+                if (connected != null) {
+                    item(span = { GridItemSpan(2) }) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(
+                                    Brush.linearGradient(
+                                        colors = listOf(RemoteSurfaceElevated, Color(0xFF1A2838))
+                                    )
                                 )
-                            )
-                            .border(1.5.dp, ConnectedGreen.copy(alpha = 0.65f), RoundedCornerShape(20.dp))
-                            .clickable(onClick = onOpenActiveRemote)
-                            .padding(14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Connected: ${connected.device.name}",
-                                color = ConnectedGreen,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "Tap to return to remote",
-                                color = TextSecondary,
-                                fontSize = 12.sp
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = onOpenActiveRemote,
-                            colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
-                            shape = RoundedCornerShape(12.dp)
+                                .border(1.5.dp, ConnectedGreen.copy(alpha = 0.65f), RoundedCornerShape(20.dp))
+                                .clickable(onClick = onOpenActiveRemote)
+                                .padding(14.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Open")
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
-                        }
-                        Spacer(modifier = Modifier.width(6.dp))
-                        OutlinedButton(
-                            onClick = onDisconnect,
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Off")
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Connected: ${connected.device.name}",
+                                    color = ConnectedGreen,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "Tap to open remote",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = onOpenActiveRemote,
+                                colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Open")
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            OutlinedButton(
+                                onClick = onDisconnect,
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Off")
+                            }
                         }
                     }
                 }
-            }
 
-            items(productOrder, key = { it.name }) { product ->
-                val isDragged = draggedProduct == product
-                val currentRect = itemBounds[product]
-                val delta = if (isDragged && currentRect != null) {
-                    pointerRoot - currentRect.topLeft - touchAnchorInItem
-                } else {
-                    Offset.Zero
-                }
+                items(productOrder, key = { it.name }) { product ->
+                    val isDragged = draggedProduct == product
+                    val currentRect = itemBounds[product]
+                    val delta = if (isDragged && currentRect != null) {
+                        pointerRoot - currentRect.topLeft - touchAnchorInItem
+                    } else {
+                        Offset.Zero
+                    }
 
-                ProductCard(
-                    product = product,
-                    isDragged = isDragged,
-                    modifier = Modifier
-                        .zIndex(if (isDragged) 10f else 0f)
-                        .graphicsLayer {
-                            translationX = delta.x
-                            translationY = delta.y
-                            scaleX = if (isDragged) 1.05f else 1f
-                            scaleY = if (isDragged) 1.05f else 1f
-                        }
-                        .onGloballyPositioned { coords ->
-                            itemBounds[product] = coords.boundsInRoot()
-                        }
-                        .pointerInput(product) {
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = { startOffset ->
-                                    val rect = itemBounds[product] ?: return@detectDragGesturesAfterLongPress
-                                    draggedProduct = product
-                                    touchAnchorInItem = startOffset
-                                    pointerRoot = rect.topLeft + startOffset
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    pointerRoot += dragAmount
-                                    val now = System.currentTimeMillis()
-                                    if (now - lastSwapMs >= 140L) {
-                                        val hit = itemBounds.entries.firstOrNull { (other, rect) ->
-                                            other != product && rect.contains(pointerRoot)
-                                        }?.key
-                                        if (hit != null) {
-                                            val fromIdx = productOrder.indexOf(product)
-                                            val toIdx = productOrder.indexOf(hit)
-                                            if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
-                                                val mutable = productOrder.toMutableList()
-                                                mutable.add(toIdx, mutable.removeAt(fromIdx))
-                                                productOrder = mutable
-                                                lastSwapMs = now
-                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    ProductCard(
+                        product = product,
+                        isDragged = isDragged,
+                        modifier = Modifier
+                            .zIndex(if (isDragged) 10f else 0f)
+                            .graphicsLayer {
+                                translationX = delta.x
+                                translationY = delta.y
+                                scaleX = if (isDragged) 1.05f else 1f
+                                scaleY = if (isDragged) 1.05f else 1f
+                            }
+                            .onGloballyPositioned { coords ->
+                                itemBounds[product] = coords.boundsInRoot()
+                            }
+                            .pointerInput(product) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = { startOffset ->
+                                        val rect = itemBounds[product] ?: return@detectDragGesturesAfterLongPress
+                                        draggedProduct = product
+                                        touchAnchorInItem = startOffset
+                                        pointerRoot = rect.topLeft + startOffset
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        pointerRoot += dragAmount
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastSwapMs >= 140L) {
+                                            val hit = itemBounds.entries.firstOrNull { (other, rect) ->
+                                                other != product && rect.contains(pointerRoot)
+                                            }?.key
+                                            if (hit != null) {
+                                                val fromIdx = productOrder.indexOf(product)
+                                                val toIdx = productOrder.indexOf(hit)
+                                                if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
+                                                    val mutable = productOrder.toMutableList()
+                                                    mutable.add(toIdx, mutable.removeAt(fromIdx))
+                                                    productOrder = mutable
+                                                    lastSwapMs = now
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                }
                                             }
                                         }
+                                    },
+                                    onDragEnd = {
+                                        draggedProduct = null
+                                        saveProductOrder(context, productOrder)
+                                    },
+                                    onDragCancel = {
+                                        draggedProduct = null
+                                        saveProductOrder(context, productOrder)
                                     }
-                                },
-                                onDragEnd = {
-                                    draggedProduct = null
-                                    saveProductOrder(context, productOrder)
-                                },
-                                onDragCancel = {
-                                    draggedProduct = null
-                                    saveProductOrder(context, productOrder)
-                                }
-                            )
-                        },
-                    onClick = { onSelectProduct(product) }
-                )
+                                )
+                            },
+                        onClick = { onSelectProduct(product) }
+                    )
+                }
             }
         }
     }
@@ -382,6 +383,7 @@ fun productVisuals(product: ProductType): Pair<ImageVector, Color> = when (produ
     ProductType.PROJECTOR -> Icons.Rounded.Videocam to Color(0xFFFB923C)
     ProductType.CEILING_FAN -> Icons.Rounded.Air to Color(0xFF2DD4BF)
     ProductType.SMART_BULB -> Icons.Rounded.Lightbulb to Color(0xFFFDE047)
+    ProductType.PHONE_TO_PHONE -> Icons.Rounded.PhonelinkSetup to Color(0xFF22D3EE)
 }
 
 private const val PRODUCT_ORDER_PREFS = "gpt_product_order"

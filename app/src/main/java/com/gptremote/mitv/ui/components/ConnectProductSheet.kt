@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.Lightbulb
+import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SettingsRemote
 import androidx.compose.material.icons.rounded.Tv
@@ -31,6 +33,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -93,6 +96,7 @@ fun ConnectProductSheet(
     onScanWifiPc: () -> Unit,
     onConnectWifiPc: (TvDevice.WifiPc) -> Unit,
     onConnectManualIp: (host: String, category: DeviceCategory) -> Unit,
+    onQrScanned: (String) -> Unit,
     onScanBulbs: () -> Unit,
     onSelectBulb: (DiscoveredSmartBulb) -> Unit,
     onConnectManualBulb: (String) -> Unit,
@@ -111,7 +115,8 @@ fun ConnectProductSheet(
             if (brand.productType == ProductType.SMART_BULB) add(ConnectTab.WIFI_SMART_BULB)
             if (brand.productType.supportsWifiSmart &&
                 !brand.supportsWifiTv &&
-                brand.productType != ProductType.SMART_BULB
+                brand.productType != ProductType.SMART_BULB &&
+                brand.productType != ProductType.PHONE_TO_PHONE
             ) {
                 add(ConnectTab.WIFI_APPLIANCE)
             }
@@ -147,6 +152,21 @@ fun ConnectProductSheet(
         )
     }
     var pinInput by remember { mutableStateOf("") }
+    var showQrScanner by remember { mutableStateOf(false) }
+    var showAllBluetooth by remember(brand) { mutableStateOf(false) }
+
+    if (showQrScanner) {
+        QrScannerDialog(
+            title = "Scan PC QR Code",
+            subtitle = "Open GPT Remote PC on Windows -> click 'Show QR Code'",
+            onScanned = { payload ->
+                showQrScanner = false
+                onQrScanned(payload)
+                onDismiss()
+            },
+            onDismiss = { showQrScanner = false }
+        )
+    }
 
     val awaitingPin = uiState.status as? ConnectionStatus.AwaitingWifiPin
     if (awaitingPin != null) {
@@ -218,7 +238,7 @@ fun ConnectProductSheet(
                         fontSize = 12.sp
                     )
                 }
-                if (uiState.isConnected || uiState.irActive || uiState.connectedBulb != null) {
+                if (uiState.isConnectedForBrand(brand) || uiState.irActive || uiState.connectedBulb != null) {
                     TextButton(onClick = onDisconnect) {
                         Text("Disconnect", color = Color(0xFFF87171))
                     }
@@ -265,6 +285,14 @@ fun ConnectProductSheet(
                             Text("Grant Bluetooth Permissions")
                         }
                     } else {
+                        val filteredBt = remember(uiState.bluetoothDevices, brand.productType, showAllBluetooth) {
+                            if (showAllBluetooth) {
+                                uiState.bluetoothDevices
+                            } else {
+                                uiState.bluetoothDevices.filter { it.matchesProduct(brand.productType) }
+                            }
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -293,24 +321,53 @@ fun ConnectProductSheet(
                             }
                         }
 
+                        if (uiState.bluetoothDevices.size > filteredBt.size || showAllBluetooth) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (showAllBluetooth) {
+                                        "Showing all ${uiState.bluetoothDevices.size} paired devices"
+                                    } else {
+                                        "Showing ${brand.productType.title} devices (${filteredBt.size})"
+                                    },
+                                    color = TextSecondary,
+                                    fontSize = 11.sp
+                                )
+                                FilterChip(
+                                    selected = showAllBluetooth,
+                                    onClick = { showAllBluetooth = !showAllBluetooth },
+                                    label = {
+                                        Text(
+                                            text = if (showAllBluetooth) "Filter" else "Show all (${uiState.bluetoothDevices.size})",
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                )
+                            }
+                        }
+
                         LazyColumn(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(210.dp),
+                                .heightIn(min = 140.dp, max = 280.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (uiState.bluetoothDevices.isEmpty()) {
+                            if (filteredBt.isEmpty()) {
                                 item {
                                     Text(
-                                        text = "Tap Scan or pair your phone from ${brand.name} Bluetooth settings.",
+                                        text = "No matching ${brand.productType.title} found. Tap Scan, Discoverable, or 'Show all'.",
                                         color = TextSecondary,
                                         fontSize = 13.sp,
                                         modifier = Modifier.padding(vertical = 8.dp)
                                     )
                                 }
                             } else {
-                                items(uiState.bluetoothDevices, key = { it.id }) { dev ->
-                                    val connected = (uiState.status as? ConnectionStatus.Connected)?.device?.id == dev.id
+                                items(filteredBt, key = { it.id }) { dev ->
+                                    val connected = uiState.isConnectedForBrand(brand) &&
+                                        (uiState.status as? ConnectionStatus.Connected)?.device?.id == dev.id
                                     ConnectRow(
                                         title = dev.name,
                                         subtitle = "${dev.id} • ${if (dev.isBonded) "Paired" else "Available"}",
@@ -408,6 +465,19 @@ fun ConnectProductSheet(
                 }
 
                 ConnectTab.WIFI_PC -> {
+                    Button(
+                        onClick = { showQrScanner = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.QrCodeScanner, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Scan PC QR Code", fontWeight = FontWeight.Bold)
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -444,11 +514,6 @@ fun ConnectProductSheet(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(if (uiState.isScanningWifiPc) "Scanning Network..." else "Scan Wi-Fi PCs")
                     }
-                    Text(
-                        text = "Install GptRemotePC-Setup.exe on Windows to control mouse, mirror screens, and share files.",
-                        color = TextSecondary,
-                        fontSize = 12.sp
-                    )
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -474,10 +539,23 @@ fun ConnectProductSheet(
 
                 ConnectTab.WIFI_SMART_BULB -> {
                     Text(
-                        text = "Discover WiZ / Yeelight bulbs on local Wi-Fi or enter your bulb IP.",
+                        text = "Auto-discovers Philips WiZ & Mi/Yeelight bulbs on local Wi-Fi. For Wipro / Syska bulbs without LAN IP, connect via Bluetooth/IR or check bulb IP in your router.",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
+                    FilledTonalButton(
+                        onClick = onScanBulbs,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        if (uiState.isScanningBulbs) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Rounded.Lightbulb, contentDescription = null, modifier = Modifier.size(18.dp))
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (uiState.isScanningBulbs) "Scanning Wi-Fi Bulbs..." else "Auto-Discover Smart Bulbs")
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -486,7 +564,7 @@ fun ConnectProductSheet(
                         OutlinedTextField(
                             value = manualIp,
                             onValueChange = { manualIp = it },
-                            label = { Text("Smart Bulb IP (e.g. 192.168.1.55)") },
+                            label = { Text("Optional Bulb IP") },
                             singleLine = true,
                             modifier = Modifier.weight(1f)
                         )
@@ -501,23 +579,10 @@ fun ConnectProductSheet(
                             Text("Go")
                         }
                     }
-                    FilledTonalButton(
-                        onClick = onScanBulbs,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        if (uiState.isScanningBulbs) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        } else {
-                            Icon(Icons.Rounded.Lightbulb, contentDescription = null, modifier = Modifier.size(18.dp))
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(if (uiState.isScanningBulbs) "Scanning Bulbs..." else "Scan Smart Bulbs (WiZ)")
-                    }
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(160.dp),
+                            .height(140.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(uiState.smartBulbs, key = { it.host }) { bulb ->

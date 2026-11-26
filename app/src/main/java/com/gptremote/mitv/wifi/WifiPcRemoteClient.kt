@@ -12,6 +12,7 @@ import android.provider.OpenableColumns
 import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
+import com.gptremote.mitv.model.TransferProgress
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
 import kotlinx.coroutines.CoroutineScope
@@ -89,6 +90,9 @@ class WifiPcRemoteClient {
 
     private val _isTransferringFile = MutableStateFlow(false)
     val isTransferringFile: StateFlow<Boolean> = _isTransferringFile.asStateFlow()
+
+    private val _transferProgress = MutableStateFlow<TransferProgress?>(null)
+    val transferProgress: StateFlow<TransferProgress?> = _transferProgress.asStateFlow()
 
     private var socket: Socket? = null
     private var writer: BufferedWriter? = null
@@ -444,12 +448,13 @@ class WifiPcRemoteClient {
                 val resolver = context.contentResolver
                 val filename = resolveFileName(context, uri)
                 val size = resolveFileSize(context, uri)
+                _transferProgress.value = TransferProgress(filename, 0L, size.coerceAtLeast(0L), isUpload = true)
                 val encodedName = URLEncoder.encode(filename, "UTF-8").replace("+", "%20")
 
                 val conn = (URL("http://$host:$FILE_HTTP_PORT/upload").openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
                     connectTimeout = 5000
-                    readTimeout = 30_000
+                    readTimeout = 60_000
                     doOutput = true
                     setRequestProperty("X-Filename", encodedName)
                     if (size > 0) {
@@ -459,9 +464,23 @@ class WifiPcRemoteClient {
                     }
                 }
 
+                var sent = 0L
+                val buf = ByteArray(32768)
                 resolver.openInputStream(uri)?.use { input ->
                     conn.outputStream.use { out ->
-                        input.copyTo(out, bufferSize = 65536)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n <= 0) break
+                            out.write(buf, 0, n)
+                            sent += n
+                            _transferProgress.value = TransferProgress(
+                                fileName = filename,
+                                bytesDone = sent,
+                                totalBytes = maxOf(size, sent),
+                                isUpload = true
+                            )
+                        }
+                        out.flush()
                     }
                 } ?: throw IllegalStateException("Cannot read selected file")
 
@@ -472,11 +491,20 @@ class WifiPcRemoteClient {
                     throw IllegalStateException("Upload failed (HTTP $code)")
                 }
                 val savedAs = runCatching { JSONObject(resp).optString("savedAs", filename) }.getOrDefault(filename)
+                _transferProgress.value = TransferProgress(
+                    fileName = savedAs,
+                    bytesDone = maxOf(size, sent),
+                    totalBytes = maxOf(size, sent),
+                    isUpload = true,
+                    isComplete = true
+                )
                 refreshSharedFiles()
                 onComplete("Sent '$savedAs' to PC (Downloads/GptRemote).")
+                delay(1400)
             } catch (e: Exception) {
                 onComplete("File send failed: ${e.message ?: "error"}")
             } finally {
+                _transferProgress.value = null
                 _isTransferringFile.value = false
             }
         }
@@ -494,12 +522,16 @@ class WifiPcRemoteClient {
                 val encoded = URLEncoder.encode(fileName, "UTF-8")
                 val conn = (URL("http://$host:$FILE_HTTP_PORT/download?name=$encoded").openConnection() as HttpURLConnection).apply {
                     connectTimeout = 5000
-                    readTimeout = 30_000
+                    readTimeout = 60_000
                 }
                 if (conn.responseCode !in 200..299) {
                     throw IllegalStateException("HTTP ${conn.responseCode}")
                 }
+                val total = conn.contentLengthLong.coerceAtLeast(0L)
+                _transferProgress.value = TransferProgress(fileName, 0L, total, isUpload = false)
 
+                val buf = ByteArray(32768)
+                var done = 0L
                 conn.inputStream.use { input ->
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         val values = ContentValues().apply {
@@ -510,7 +542,13 @@ class WifiPcRemoteClient {
                         val outUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                             ?: throw IllegalStateException("Could not create Download entry")
                         resolver.openOutputStream(outUri)?.use { out ->
-                            input.copyTo(out, bufferSize = 65536)
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                done += n
+                                _transferProgress.value = TransferProgress(fileName, done, maxOf(total, done), isUpload = false)
+                            }
                         }
                     } else {
                         @Suppress("DEPRECATION")
@@ -519,15 +557,30 @@ class WifiPcRemoteClient {
                             "GptRemote"
                         ).apply { mkdirs() }
                         FileOutputStream(File(dir, fileName)).use { out ->
-                            input.copyTo(out, bufferSize = 65536)
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                done += n
+                                _transferProgress.value = TransferProgress(fileName, done, maxOf(total, done), isUpload = false)
+                            }
                         }
                     }
                 }
                 conn.disconnect()
+                _transferProgress.value = TransferProgress(
+                    fileName = fileName,
+                    bytesDone = maxOf(total, done),
+                    totalBytes = maxOf(total, done),
+                    isUpload = false,
+                    isComplete = true
+                )
                 onComplete("Saved '$fileName' to Downloads/GptRemote.")
+                delay(1400)
             } catch (e: Exception) {
                 onComplete("Download failed: ${e.message ?: "error"}")
             } finally {
+                _transferProgress.value = null
                 _isTransferringFile.value = false
             }
         }
@@ -567,6 +620,17 @@ class WifiPcRemoteClient {
         sendQueue.trySend(
             JSONObject()
                 .put("t", "tap_abs")
+                .put("nx", nx.toDouble())
+                .put("ny", ny.toDouble())
+                .toString()
+        )
+    }
+
+    fun sendMoveAbs(nx: Float, ny: Float) {
+        if (writer == null) return
+        sendQueue.trySend(
+            JSONObject()
+                .put("t", "move_abs")
                 .put("nx", nx.toDouble())
                 .put("ny", ny.toDouble())
                 .toString()

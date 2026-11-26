@@ -3,10 +3,12 @@ package com.gptremote.mitv.wifi
 import com.gptremote.mitv.ir.IrBlasterManager
 import com.gptremote.mitv.model.ProductCatalog
 import com.gptremote.mitv.model.ProductType
+import com.gptremote.mitv.model.TvDevice
 import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.wifi.TvCertificateManager.Companion.toUnsignedBigEndianBytes
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -69,11 +71,19 @@ class ProtoWireTest {
             assertTrue("Missing brands for $product", ProductCatalog.brandsFor(product).isNotEmpty())
         }
         assertTrue(ProductType.entries.contains(ProductType.SMART_BULB))
+        assertTrue(ProductType.entries.contains(ProductType.PHONE_TO_PHONE))
         assertEquals(3, ProductCatalog.brandsFor(ProductType.PC_LAPTOP).size)
         assertTrue(ProductCatalog.tvApps.size >= 10)
         assertTrue(ProductCatalog.tvApps.all { it.shortBadge.isNotBlank() })
         assertTrue(ProductCatalog.brandsFor(ProductType.SMART_TV).all { it.supportsWifiTv })
         assertEquals(5, AppAccentTheme.entries.size)
+
+        val miTv = TvDevice.BluetoothTv("EC:FA:5C:8F:67:40", "MiTV-AXS02", isBonded = true)
+        val buds = TvDevice.BluetoothTv("98:47:44:C9:EB:F3", "realme Buds Wireless 3", isBonded = true)
+        val car = TvDevice.BluetoothTv("A4:04:50:C3:D2:A4", "My Car", isBonded = true)
+        assertTrue(miTv.matchesProduct(ProductType.SMART_TV))
+        assertFalse(buds.matchesProduct(ProductType.SMART_TV))
+        assertFalse(car.matchesProduct(ProductType.SMART_TV))
     }
 
     @Test

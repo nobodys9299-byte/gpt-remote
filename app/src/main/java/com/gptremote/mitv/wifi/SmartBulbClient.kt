@@ -3,6 +3,7 @@ package com.gptremote.mitv.wifi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,7 +28,9 @@ data class DiscoveredSmartBulb(
 )
 
 /**
- * Local Wi-Fi Smart Bulb controller supporting Philips WiZ (UDP 38899) and Mi/Yeelight (TCP 55443).
+ * Local Wi-Fi Smart Bulb discovery & controller supporting:
+ * - Philips WiZ (UDP 38899)
+ * - Mi / Yeelight (SSDP 239.255.255.250:1982 + TCP 55443)
  */
 class SmartBulbClient {
 
@@ -46,37 +49,81 @@ class SmartBulbClient {
         scope.launch {
             _isScanning.value = true
             val found = LinkedHashMap<String, DiscoveredSmartBulb>()
-            var udp: DatagramSocket? = null
+            fun publish() {
+                _bulbs.value = found.values.toList()
+            }
+
             try {
-                udp = DatagramSocket().apply {
-                    broadcast = true
-                    soTimeout = 700
-                }
-                // 1. Philips WiZ UDP discovery on port 38899
-                val wizProbe = """{"method":"getPilot","params":{}}""".toByteArray(Charsets.UTF_8)
-                runCatching {
-                    udp.send(
-                        DatagramPacket(wizProbe, wizProbe.size, InetAddress.getByName("255.255.255.255"), 38899)
-                    )
-                }
-                val deadline = System.currentTimeMillis() + 2000L
-                val buf = ByteArray(1024)
-                while (System.currentTimeMillis() < deadline) {
-                    try {
-                        val p = DatagramPacket(buf, buf.size)
-                        udp.receive(p)
-                        val host = p.address.hostAddress ?: continue
-                        val txt = String(p.data, 0, p.length, Charsets.UTF_8)
-                        if (txt.contains("result")) {
-                            found[host] = DiscoveredSmartBulb(host, "WiZ Smart Bulb ($host)", BulbProtocol.PHILIPS_WIZ)
-                            _bulbs.value = found.values.toList()
+                coroutineScope {
+                    // 1. Philips WiZ UDP broadcast probe on 38899
+                    launch {
+                        var udp: DatagramSocket? = null
+                        try {
+                            udp = DatagramSocket().apply {
+                                broadcast = true
+                                soTimeout = 600
+                            }
+                            val wizProbe = """{"method":"getPilot","params":{}}""".toByteArray(Charsets.UTF_8)
+                            runCatching {
+                                udp.send(DatagramPacket(wizProbe, wizProbe.size, InetAddress.getByName("255.255.255.255"), 38899))
+                            }
+                            val deadline = System.currentTimeMillis() + 2400L
+                            val buf = ByteArray(1024)
+                            while (System.currentTimeMillis() < deadline) {
+                                try {
+                                    val p = DatagramPacket(buf, buf.size)
+                                    udp.receive(p)
+                                    val host = p.address.hostAddress ?: continue
+                                    val txt = String(p.data, 0, p.length, Charsets.UTF_8)
+                                    if (txt.contains("result")) {
+                                        found[host] = DiscoveredSmartBulb(host, "WiZ Bulb ($host)", BulbProtocol.PHILIPS_WIZ)
+                                        publish()
+                                    }
+                                } catch (_: SocketTimeoutException) {
+                                }
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            runCatching { udp?.close() }
                         }
-                    } catch (_: SocketTimeoutException) {
+                    }
+
+                    // 2. Mi / Yeelight SSDP multicast probe on 239.255.255.250:1982
+                    launch {
+                        var ssdp: DatagramSocket? = null
+                        try {
+                            ssdp = DatagramSocket().apply { soTimeout = 600 }
+                            val msg = (
+                                "M-SEARCH * HTTP/1.1\r\n" +
+                                    "HOST: 239.255.255.250:1982\r\n" +
+                                    "MAN: \"ssdp:discover\"\r\n" +
+                                    "ST: wifi_bulb\r\n\r\n"
+                                ).toByteArray(Charsets.UTF_8)
+                            runCatching {
+                                ssdp.send(DatagramPacket(msg, msg.size, InetAddress.getByName("239.255.255.250"), 1982))
+                            }
+                            val deadline = System.currentTimeMillis() + 2400L
+                            val buf = ByteArray(2048)
+                            while (System.currentTimeMillis() < deadline) {
+                                try {
+                                    val p = DatagramPacket(buf, buf.size)
+                                    ssdp.receive(p)
+                                    val host = p.address.hostAddress ?: continue
+                                    val txt = String(p.data, 0, p.length, Charsets.UTF_8)
+                                    if (txt.contains("yeelight", ignoreCase = true) || txt.contains("wifi_bulb", ignoreCase = true)) {
+                                        found[host] = DiscoveredSmartBulb(host, "Yeelight / Mi Bulb ($host)", BulbProtocol.YEELIGHT)
+                                        publish()
+                                    }
+                                } catch (_: SocketTimeoutException) {
+                                }
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            runCatching { ssdp?.close() }
+                        }
                     }
                 }
-            } catch (_: Exception) {
             } finally {
-                runCatching { udp?.close() }
                 _isScanning.value = false
             }
         }

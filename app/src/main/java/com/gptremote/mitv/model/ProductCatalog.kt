@@ -125,6 +125,17 @@ enum class ProductType(
         supportsWifiSmart = true,
         supportsIr = true,
         supportsAppLaunch = false
+    ),
+    PHONE_TO_PHONE(
+        title = "Phone Share",
+        subtitle = "QR Connect & File Share",
+        supportsBluetoothHid = false,
+        supportsBluetoothGeneric = false,
+        supportsWifiTv = false,
+        supportsWifiPc = false,
+        supportsWifiSmart = true,
+        supportsIr = false,
+        supportsAppLaunch = false
     )
 }
 
@@ -258,6 +269,10 @@ object ProductCatalog {
             BrandOption("bulb_tapo", "TP-Link Tapo", product, "Wi-Fi • Smart Light"),
             BrandOption("bulb_havells", "Havells Smart", product, "Wi-Fi • Bluetooth • IR"),
             BrandOption("bulb_generic", "Other Smart / IR Bulb", product, "Wi-Fi • IR RGB Bulb")
+        )
+
+        ProductType.PHONE_TO_PHONE -> listOf(
+            BrandOption("phone_qr_share", "Phone-to-Phone Share", product, "Scan QR • Send & Receive Files")
         )
     }
 

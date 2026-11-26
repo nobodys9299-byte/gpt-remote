@@ -30,6 +30,12 @@
     <!-- Haptic vibration feedback -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Camera permission for QR Code scanning (PC & Phone-to-Phone connect) -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
     <!-- Optional built-in IR blaster support for TVs, ACs, Set-Top Boxes, Fans -->
     <uses-permission android:name="android.permission.TRANSMIT_IR" />
     <uses-feature

@@ -53,8 +53,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install PyInstaller, mss, and Pillow
-        run: python -m pip install --upgrade pip pyinstaller mss pillow
+      - name: Install PyInstaller, mss, Pillow, and qrcode
+        run: python -m pip install --upgrade pip pyinstaller mss pillow qrcode
 
       - name: Build standalone GptRemotePC.exe
         run: pyinstaller --onefile --noconsole --name GptRemotePC pc-companion/gpt_remote_pc.py

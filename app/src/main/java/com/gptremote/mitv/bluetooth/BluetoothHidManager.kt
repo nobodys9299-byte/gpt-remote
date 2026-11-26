@@ -62,6 +62,7 @@ class BluetoothHidManager(private val context: Context) {
     private var pendingReRegister = false
     private var connectedCategory: DeviceCategory = DeviceCategory.ANDROID_TV
     private var receiverRegistered = false
+    private val userDisconnectedAddresses = mutableSetOf<String>()
 
     private val _isPcProfile = MutableStateFlow(false)
     val isPcProfile: StateFlow<Boolean> = _isPcProfile.asStateFlow()
@@ -203,20 +204,22 @@ class BluetoothHidManager(private val context: Context) {
                 return
             }
 
-            val activeHost = pluggedDevice ?: runCatching {
-                if (hasConnectPermission()) hidDevice?.connectedDevices?.firstOrNull() else null
-            }.getOrNull()
-
-            if (activeHost != null) {
-                connectedHost = activeHost
+            if (pluggedDevice != null) {
+                if (pluggedDevice.address in userDisconnectedAddresses) {
+                    if (hasConnectPermission()) hidDevice?.disconnect(pluggedDevice)
+                    return
+                }
+                connectedHost = pluggedDevice
                 pendingConnectAddress = null
-                val name = safeDeviceName(activeHost)
+                val name = safeDeviceName(pluggedDevice)
                 _connectionStatus.value = ConnectionStatus.Connected(
                     TvDevice.BluetoothTv(
-                        id = activeHost.address,
+                        id = pluggedDevice.address,
                         name = name,
                         isBonded = true,
-                        category = if (_isPcProfile.value) DeviceCategory.LAPTOP_PC else TvDevice.inferCategory(name)
+                        category = if (_isPcProfile.value) DeviceCategory.LAPTOP_PC else TvDevice.inferCategory(name),
+                        majorClass = pluggedDevice.bluetoothClass?.majorDeviceClass ?: 0,
+                        deviceClass = pluggedDevice.bluetoothClass?.deviceClass ?: 0
                     )
                 )
                 RemoteHidService.start(context, name)
@@ -465,6 +468,7 @@ class BluetoothHidManager(private val context: Context) {
         }
 
         stopDiscovery()
+        userDisconnectedAddresses.remove(address)
         val device = adapter.getRemoteDevice(address)
         val name = safeDeviceName(device)
         val previousHost = connectedHost
@@ -512,10 +516,17 @@ class BluetoothHidManager(private val context: Context) {
     }
 
     fun disconnect() {
-        val host = connectedHost ?: return
-        if (!hasConnectPermission()) return
         pendingConnectAddress = null
-        hidDevice?.disconnect(host)
+        if (hasConnectPermission()) {
+            connectedHost?.let { host ->
+                userDisconnectedAddresses.add(host.address)
+                hidDevice?.disconnect(host)
+            }
+            hidDevice?.connectedDevices.orEmpty().forEach { dev ->
+                userDisconnectedAddresses.add(dev.address)
+                hidDevice?.disconnect(dev)
+            }
+        }
         connectedHost = null
         _connectionStatus.value = ConnectionStatus.Disconnected
         RemoteHidService.stop(context)
@@ -689,10 +700,14 @@ class BluetoothHidManager(private val context: Context) {
         val address = device.address ?: return
         val name = safeDeviceName(device)
         val bonded = device.bondState == BluetoothDevice.BOND_BONDED
+        val majorCls = runCatching { device.bluetoothClass?.majorDeviceClass ?: 0 }.getOrDefault(0)
+        val devCls = runCatching { device.bluetoothClass?.deviceClass ?: 0 }.getOrDefault(0)
         discoveredDevicesMap[address] = TvDevice.BluetoothTv(
             id = address,
             name = name,
-            isBonded = bonded
+            isBonded = bonded,
+            majorClass = majorCls,
+            deviceClass = devCls
         )
         emitSortedDevices()
     }

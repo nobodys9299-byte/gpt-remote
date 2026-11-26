@@ -1,5 +1,7 @@
 package com.gptremote.mitv.model
 
+import android.bluetooth.BluetoothClass
+
 /**
  * Represents a discovered, paired, or saved electronic device across Bluetooth and Wi-Fi.
  */
@@ -13,9 +15,40 @@ sealed interface TvDevice {
         override val id: String, // MAC address
         override val name: String,
         val isBonded: Boolean,
-        override val category: DeviceCategory = inferCategory(name)
+        override val category: DeviceCategory = inferCategory(name),
+        val majorClass: Int = 0,
+        val deviceClass: Int = 0
     ) : TvDevice {
         override val transport: TransportMode = TransportMode.BLUETOOTH_HID
+
+        fun matchesProduct(product: ProductType): Boolean {
+            val lower = name.lowercase()
+            return when (product) {
+                ProductType.SMART_TV, ProductType.SET_TOP_BOX, ProductType.PROJECTOR -> {
+                    val isAudioAccessory = lower.contains("buds") || lower.contains("headphone") ||
+                        lower.contains("ear") || lower.contains("pod") || lower.contains("car") ||
+                        lower.contains("watch") || lower.contains("band") || lower.contains("mouse") ||
+                        lower.contains("toad") || lower.contains("bs3344") || lower.contains("dock")
+                    val isTvKeyword = lower.contains("tv") || lower.contains("mi") || lower.contains("xiaomi") ||
+                        lower.contains("bravia") || lower.contains("samsung") || lower.contains("lg") ||
+                        lower.contains("sony") || lower.contains("tcl") || lower.contains("hisense") ||
+                        lower.contains("oneplus") || lower.contains("projector") || lower.contains("xgimi") ||
+                        lower.contains("wanbo") || lower.contains("nebula") || lower.contains("fire") ||
+                        lower.contains("shield") || lower.contains("apple") || lower.contains("box") ||
+                        lower.contains("xstream") || lower.contains("jio")
+                    val isTvBtClass = deviceClass == BluetoothClass.Device.AUDIO_VIDEO_VIDEO_DISPLAY_AND_LOUDSPEAKER ||
+                        deviceClass == BluetoothClass.Device.AUDIO_VIDEO_SET_TOP_BOX ||
+                        deviceClass == BluetoothClass.Device.AUDIO_VIDEO_VIDEO_MONITOR
+                    (isTvKeyword || isTvBtClass) && !isAudioAccessory
+                }
+                ProductType.PC_LAPTOP -> {
+                    majorClass == BluetoothClass.Device.Major.COMPUTER ||
+                        lower.contains("pc") || lower.contains("laptop") || lower.contains("desktop") ||
+                        lower.contains("mac") || lower.contains("win") || lower.contains("linux")
+                }
+                else -> true
+            }
+        }
     }
 
     data class WifiTv(
@@ -44,8 +77,9 @@ sealed interface TvDevice {
     companion object {
         fun inferCategory(name: String): DeviceCategory {
             val lower = name.lowercase()
-            return if (lower.contains("tv") || lower.contains("mi ") || lower.contains("xiaomi") ||
-                lower.contains("bravia") || lower.contains("shield") || lower.contains("fire")
+            return if (lower.contains("tv") || lower.contains("mi ") || lower.contains("mitv") ||
+                lower.contains("xiaomi") || lower.contains("bravia") || lower.contains("shield") ||
+                lower.contains("fire")
             ) {
                 DeviceCategory.ANDROID_TV
             } else if (lower.contains("pc") || lower.contains("laptop") || lower.contains("desktop") ||

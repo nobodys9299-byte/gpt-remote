@@ -1,9 +1,10 @@
 package com.gptremote.mitv.ui
 
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -28,6 +28,8 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Air
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Bluetooth
+import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Gamepad
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Info
@@ -39,6 +41,7 @@ import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PowerSettingsNew
+import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
@@ -67,19 +70,31 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.gptremote.mitv.haptic.HapticStrength
 import com.gptremote.mitv.model.BrandOption
 import com.gptremote.mitv.model.ConnectionStatus
@@ -92,12 +107,15 @@ import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
+import com.gptremote.mitv.ui.components.AppLogoBadge
 import com.gptremote.mitv.ui.components.ConnectProductSheet
 import com.gptremote.mitv.ui.components.DPadControl
 import com.gptremote.mitv.ui.components.KeyboardSheet
 import com.gptremote.mitv.ui.components.MediaVolumeBar
 import com.gptremote.mitv.ui.components.PcFileSharePanel
 import com.gptremote.mitv.ui.components.PcScreenSharePanel
+import com.gptremote.mitv.ui.components.PhoneSharePanel
+import com.gptremote.mitv.ui.components.QrScannerDialog
 import com.gptremote.mitv.ui.components.SettingsSheet
 import com.gptremote.mitv.ui.components.TouchpadControl
 import com.gptremote.mitv.ui.theme.AppAccentTheme
@@ -137,6 +155,7 @@ fun RemoteScreen(
     onScanWifiPc: () -> Unit,
     onConnectWifiPc: (TvDevice.WifiPc) -> Unit,
     onConnectManualIp: (host: String, category: DeviceCategory) -> Unit,
+    onQrScanned: (String) -> Unit,
     onScanBulbs: () -> Unit,
     onSelectBulb: (DiscoveredSmartBulb) -> Unit,
     onConnectManualBulb: (String) -> Unit,
@@ -147,11 +166,17 @@ fun RemoteScreen(
     onStartPcMirror: () -> Unit,
     onStopPcMirror: () -> Unit,
     onTapMirroredScreen: (Float, Float) -> Unit,
+    onMoveMirroredScreen: (Float, Float) -> Unit,
     onStartPhoneCast: () -> Unit,
     onStopPhoneCast: () -> Unit,
     onRefreshPcFiles: () -> Unit,
     onPickFileToSend: () -> Unit,
     onDownloadPcFile: (SharedPcFile) -> Unit,
+    onStartPhoneShareHost: () -> Unit,
+    onPickHostFileToShare: () -> Unit,
+    onRefreshPeerPhoneFiles: () -> Unit,
+    onPickFileForPeerPhone: () -> Unit,
+    onDownloadFromPeerPhone: (SharedPcFile) -> Unit,
     onButtonPress: (RemoteButton, Boolean) -> Unit,
     onApplianceAction: (String) -> Unit,
     onLaunchApp: (LaunchableApp) -> Unit,
@@ -167,6 +192,7 @@ fun RemoteScreen(
     var showConnectSheet by remember { mutableStateOf(false) }
     var showKeyboardSheet by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
+    var showPhoneQrScanner by remember { mutableStateOf(false) }
     var bulbPower by remember { mutableStateOf(true) }
 
     val statusError = (uiState.status as? ConnectionStatus.Error)?.message
@@ -184,6 +210,18 @@ fun RemoteScreen(
         }
     }
 
+    if (showPhoneQrScanner) {
+        QrScannerDialog(
+            title = "Scan Phone or PC QR",
+            subtitle = "Point camera at GPT Remote QR code",
+            onScanned = { payload ->
+                showPhoneQrScanner = false
+                onQrScanned(payload)
+            },
+            onDismiss = { showPhoneQrScanner = false }
+        )
+    }
+
     Scaffold(
         containerColor = RemoteBg,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
@@ -192,9 +230,8 @@ fun RemoteScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .statusBarsPadding()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 14.dp),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -202,7 +239,13 @@ fun RemoteScreen(
                 brand = brand,
                 uiState = uiState,
                 onBack = onNavigateBack,
-                onOpenConnect = { showConnectSheet = true },
+                onOpenConnect = {
+                    if (brand.productType == ProductType.PHONE_TO_PHONE) {
+                        showPhoneQrScanner = true
+                    } else {
+                        showConnectSheet = true
+                    }
+                },
                 onOpenSettings = { showSettingsSheet = true },
                 onPowerClick = {
                     when (brand.productType) {
@@ -247,6 +290,7 @@ fun RemoteScreen(
                     onStartPcMirror = onStartPcMirror,
                     onStopPcMirror = onStopPcMirror,
                     onTapMirroredScreen = onTapMirroredScreen,
+                    onMoveMirroredScreen = onMoveMirroredScreen,
                     onStartPhoneCast = onStartPhoneCast,
                     onStopPhoneCast = onStopPhoneCast,
                     onRefreshPcFiles = onRefreshPcFiles,
@@ -294,6 +338,16 @@ fun RemoteScreen(
                     },
                     onBulbAction = onBulbAction
                 )
+
+                ProductType.PHONE_TO_PHONE -> PhoneSharePanel(
+                    uiState = uiState,
+                    onStartHost = onStartPhoneShareHost,
+                    onAddHostFile = onPickHostFileToShare,
+                    onScanPeerQr = { showPhoneQrScanner = true },
+                    onRefreshPeerFiles = onRefreshPeerPhoneFiles,
+                    onSendToPeer = onPickFileForPeerPhone,
+                    onDownloadFromPeer = onDownloadFromPeerPhone
+                )
             }
         }
     }
@@ -312,6 +366,7 @@ fun RemoteScreen(
             onScanWifiPc = onScanWifiPc,
             onConnectWifiPc = onConnectWifiPc,
             onConnectManualIp = onConnectManualIp,
+            onQrScanned = onQrScanned,
             onScanBulbs = onScanBulbs,
             onSelectBulb = onSelectBulb,
             onConnectManualBulb = onConnectManualBulb,
@@ -370,8 +425,23 @@ private fun RemoteTopBar(
             Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
         }
 
+        val matchingConnected = uiState.isConnectedForBrand(brand)
         val (pillTitle, dotColor, icon) = when {
-            uiState.status is ConnectionStatus.Connected -> {
+            brand.productType == ProductType.PHONE_TO_PHONE -> {
+                uiState.peerPhoneName?.let {
+                    Triple("Peer: $it", ConnectedGreen, Icons.Rounded.QrCodeScanner)
+                } ?: Triple("Scan Phone QR", WifiBlue, Icons.Rounded.QrCodeScanner)
+            }
+            brand.productType == ProductType.SMART_BULB -> {
+                uiState.connectedBulb?.let {
+                    Triple(it.name, ConnectedGreen, Icons.Rounded.Lightbulb)
+                } ?: if (uiState.irActive && uiState.hasIrEmitter) {
+                    Triple("${brand.name} • IR Ready", ConnectedGreen, Icons.Rounded.SettingsRemote)
+                } else {
+                    Triple("Connect ${brand.name}", TextSecondary, Icons.Rounded.Lightbulb)
+                }
+            }
+            matchingConnected && uiState.status is ConnectionStatus.Connected -> {
                 val st = uiState.status
                 val ic = if (st.device.transport == TransportMode.BLUETOOTH_HID) {
                     Icons.Rounded.Bluetooth
@@ -380,11 +450,13 @@ private fun RemoteTopBar(
                 }
                 Triple(st.device.name, ConnectedGreen, ic)
             }
-            brand.productType == ProductType.SMART_BULB && uiState.connectedBulb != null -> {
-                Triple(uiState.connectedBulb.name, ConnectedGreen, Icons.Rounded.Lightbulb)
-            }
             uiState.status is ConnectionStatus.Connecting -> {
-                Triple("Connecting...", accent, Icons.Rounded.Bluetooth)
+                val ic = if (uiState.status.transport == TransportMode.BLUETOOTH_HID) {
+                    Icons.Rounded.Bluetooth
+                } else {
+                    Icons.Rounded.Wifi
+                }
+                Triple("Connecting...", accent, ic)
             }
             uiState.status is ConnectionStatus.AwaitingWifiPin -> {
                 Triple("Enter PIN", WifiBlue, Icons.Rounded.Wifi)
@@ -393,7 +465,8 @@ private fun RemoteTopBar(
                 Triple("${brand.name} • IR Ready", ConnectedGreen, Icons.Rounded.SettingsRemote)
             }
             else -> {
-                Triple("Connect ${brand.name}", TextSecondary, Icons.Rounded.Bluetooth)
+                val ic = if (brand.productType == ProductType.PC_LAPTOP) Icons.Rounded.Wifi else Icons.Rounded.Bluetooth
+                Triple("Connect ${brand.name}", TextSecondary, ic)
             }
         }
 
@@ -441,16 +514,18 @@ private fun RemoteTopBar(
             ) {
                 Icon(Icons.Rounded.Settings, contentDescription = "Settings")
             }
-            FilledTonalIconButton(
-                onClick = onPowerClick,
-                modifier = Modifier.size(44.dp),
-                shape = CircleShape,
-                colors = IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = Color(0xFF341A1D),
-                    contentColor = Color(0xFFF87171)
-                )
-            ) {
-                Icon(Icons.Rounded.PowerSettingsNew, contentDescription = "Power")
+            if (brand.productType != ProductType.PHONE_TO_PHONE) {
+                FilledTonalIconButton(
+                    onClick = onPowerClick,
+                    modifier = Modifier.size(44.dp),
+                    shape = CircleShape,
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = Color(0xFF341A1D),
+                        contentColor = Color(0xFFF87171)
+                    )
+                ) {
+                    Icon(Icons.Rounded.PowerSettingsNew, contentDescription = "Power")
+                }
             }
         }
     }
@@ -480,7 +555,9 @@ private fun TvRemoteBody(
             val icon = when (tab) {
                 RemoteSubTab.PRIMARY -> Icons.Rounded.Gamepad
                 RemoteSubTab.TOUCHPAD -> Icons.Rounded.TouchApp
-                RemoteSubTab.SCREEN, RemoteSubTab.FILES, RemoteSubTab.APPS -> Icons.Rounded.Apps
+                RemoteSubTab.SCREEN -> Icons.Rounded.Cast
+                RemoteSubTab.FILES -> Icons.Rounded.Folder
+                RemoteSubTab.APPS -> Icons.Rounded.Apps
             }
             SegmentedButton(
                 selected = selectedTab == tab,
@@ -563,6 +640,7 @@ private fun TvRemoteBody(
         RemoteSubTab.APPS -> {
             AppLauncherGrid(
                 apps = ProductCatalog.tvApps,
+                storageKey = "tv_apps_order",
                 onLaunch = onLaunchApp
             )
         }
@@ -582,6 +660,7 @@ private fun PcRemoteBody(
     onStartPcMirror: () -> Unit,
     onStopPcMirror: () -> Unit,
     onTapMirroredScreen: (Float, Float) -> Unit,
+    onMoveMirroredScreen: (Float, Float) -> Unit,
     onStartPhoneCast: () -> Unit,
     onStopPhoneCast: () -> Unit,
     onRefreshPcFiles: () -> Unit,
@@ -589,26 +668,22 @@ private fun PcRemoteBody(
     onDownloadPcFile: (SharedPcFile) -> Unit,
     onOpenConnect: () -> Unit
 ) {
+    // 4 crisp tabs — Keys tab removed & merged into Apps per video walkthrough
     var selectedTab by remember { mutableStateOf(RemoteSubTab.TOUCHPAD) }
     val pcTabs = listOf(
-        RemoteSubTab.TOUCHPAD to "Touchpad",
-        RemoteSubTab.PRIMARY to "Keys",
-        RemoteSubTab.SCREEN to "Screen",
-        RemoteSubTab.FILES to "Files",
-        RemoteSubTab.APPS to "Apps"
+        RemoteSubTab.TOUCHPAD,
+        RemoteSubTab.SCREEN,
+        RemoteSubTab.FILES,
+        RemoteSubTab.APPS
     )
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        pcTabs.forEach { (tab, title) ->
-            FilterChip(
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        pcTabs.forEachIndexed { index, tab ->
+            SegmentedButton(
                 selected = selectedTab == tab,
                 onClick = { selectedTab = tab },
-                label = { Text(title, fontSize = 13.sp, fontWeight = FontWeight.Medium) }
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = pcTabs.size),
+                label = { Text(tab.label, fontSize = 12.sp, maxLines = 1) }
             )
         }
     }
@@ -632,62 +707,24 @@ private fun PcRemoteBody(
                     onClick = { onButtonPress(RemoteButton.ESCAPE, false) },
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp)
-                ) { Text("Esc", fontSize = 12.sp) }
+                ) { Text("Esc", fontSize = 12.sp, maxLines = 1) }
                 FilledTonalButton(
                     onClick = { onButtonPress(RemoteButton.PC_WIN_KEY, true) },
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp)
-                ) { Text("Start", fontSize = 12.sp) }
+                ) { Text("Start", fontSize = 12.sp, maxLines = 1) }
                 FilledTonalButton(
                     onClick = { onButtonPress(RemoteButton.PC_ALT_TAB, false) },
                     modifier = Modifier.weight(1.1f),
                     shape = RoundedCornerShape(12.dp)
-                ) { Text("Alt+Tab", fontSize = 12.sp) }
+                ) { Text("Alt+Tab", fontSize = 12.sp, maxLines = 1) }
                 FilledTonalButton(
                     onClick = onOpenKeyboard,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(0.9f),
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Icon(Icons.Rounded.Keyboard, contentDescription = "Keyboard", modifier = Modifier.size(18.dp))
                 }
-            }
-        }
-
-        RemoteSubTab.PRIMARY -> {
-            DPadControl(
-                onButtonPress = { btn -> onButtonPress(btn, btn == RemoteButton.DPAD_CENTER) }
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf(
-                    RemoteButton.PC_COPY to "Copy",
-                    RemoteButton.PC_PASTE to "Paste",
-                    RemoteButton.PC_SHOW_DESKTOP to "Desktop",
-                    RemoteButton.TAB to "Tab"
-                ).forEach { (btn, label) ->
-                    FilledTonalButton(
-                        onClick = { onButtonPress(btn, false) },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    ) { Text(label, fontSize = 12.sp) }
-                }
-            }
-            MediaVolumeBar(
-                onButtonPress = { btn -> onButtonPress(btn, btn == RemoteButton.MUTE) },
-                showChannelRocker = false,
-                showMediaRow = true
-            )
-            Button(
-                onClick = onOpenKeyboard,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Icon(Icons.Rounded.Keyboard, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Open Full PC Keyboard")
             }
         }
 
@@ -697,6 +734,7 @@ private fun PcRemoteBody(
                 onStartPcMirror = onStartPcMirror,
                 onStopPcMirror = onStopPcMirror,
                 onTapMirroredScreen = onTapMirroredScreen,
+                onMoveMirroredScreen = onMoveMirroredScreen,
                 onStartPhoneCast = onStartPhoneCast,
                 onStopPhoneCast = onStopPhoneCast,
                 onOpenConnect = onOpenConnect
@@ -716,9 +754,54 @@ private fun PcRemoteBody(
         RemoteSubTab.APPS -> {
             AppLauncherGrid(
                 apps = ProductCatalog.pcApps,
+                storageKey = "pc_apps_order",
                 onLaunch = onLaunchApp
             )
+
+            // Shortcut keys & Volume/Media merged into Apps cleanly in 2 balanced rows
+            listOf(
+                listOf(RemoteButton.PC_COPY to "Copy", RemoteButton.PC_PASTE to "Paste"),
+                listOf(RemoteButton.PC_SHOW_DESKTOP to "Desktop", RemoteButton.TAB to "Tab")
+            ).forEach { row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    row.forEach { (btn, label) ->
+                        FilledTonalButton(
+                            onClick = { onButtonPress(btn, false) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(46.dp),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text(label, fontSize = 13.sp, maxLines = 1)
+                        }
+                    }
+                }
+            }
+
+            MediaVolumeBar(
+                onButtonPress = { btn -> onButtonPress(btn, btn == RemoteButton.MUTE) },
+                showChannelRocker = false,
+                showMediaRow = true
+            )
+
+            Button(
+                onClick = onOpenKeyboard,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Icon(Icons.Rounded.Keyboard, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Open Full PC Keyboard", fontWeight = FontWeight.SemiBold)
+            }
         }
+
+        RemoteSubTab.PRIMARY -> Unit
     }
 }
 
@@ -736,7 +819,6 @@ private fun AcRemoteBody(onAction: (String) -> Unit) {
     val fanSpeeds = listOf("Auto", "Low", "Medium", "High")
     val accent = MiOrange
 
-    // Live Digital AC Display Card
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1036,7 +1118,7 @@ private fun SetTopBoxRemoteBody(
     }
 
     if (selectedTab == RemoteSubTab.APPS && brand.supportsAppLaunch) {
-        AppLauncherGrid(apps = ProductCatalog.tvApps, onLaunch = onLaunchApp)
+        AppLauncherGrid(apps = ProductCatalog.tvApps, storageKey = "tv_apps_order", onLaunch = onLaunchApp)
     } else {
         DPadControl(onButtonPress = { btn -> onButtonPress(btn, btn == RemoteButton.DPAD_CENTER) })
         Row(
@@ -1074,7 +1156,6 @@ private fun SoundbarRemoteBody(onButtonPress: (RemoteButton, Boolean) -> Unit) {
     var bassLevel by remember { mutableIntStateOf(0) }
     val audioPink = Color(0xFFF472B6)
 
-    // Sleek Soundbar Status Header
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1102,7 +1183,6 @@ private fun SoundbarRemoteBody(onButtonPress: (RemoteButton, Boolean) -> Unit) {
         }
     }
 
-    // Input Source Pills
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1227,7 +1307,7 @@ private fun ProjectorRemoteBody(
         }
 
         RemoteSubTab.APPS -> {
-            AppLauncherGrid(apps = ProductCatalog.tvApps, onLaunch = onLaunchApp)
+            AppLauncherGrid(apps = ProductCatalog.tvApps, storageKey = "tv_apps_order", onLaunch = onLaunchApp)
         }
 
         RemoteSubTab.SCREEN, RemoteSubTab.FILES -> Unit
@@ -1324,61 +1404,65 @@ private fun SmartBulbRemoteBody(
 ) {
     var brightness by remember { mutableFloatStateOf(80f) }
     var activeColor by remember { mutableStateOf(Color(0xFFFDE047)) }
-    var tempLabel by remember { mutableStateOf("Warm 2700K") }
+    var sceneLabel by remember { mutableStateOf("Warm 2700K") }
 
     val bulbColors = listOf(
         Triple(255, 68, 68) to ("Red" to "bulb_red"),
         Triple(255, 165, 0) to ("Amber" to "bulb_amber"),
+        Triple(253, 224, 71) to ("Gold" to "bulb_warm"),
         Triple(52, 211, 153) to ("Green" to "bulb_green"),
         Triple(56, 189, 248) to ("Cyan" to "bulb_cool"),
         Triple(99, 102, 241) to ("Blue" to "bulb_blue"),
-        Triple(192, 132, 252) to ("Purple" to "bulb_purple")
+        Triple(192, 132, 252) to ("Purple" to "bulb_purple"),
+        Triple(248, 250, 252) to ("White" to "bulb_white")
     )
 
+    // Sleek Radial Glow Lamp Header
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(26.dp))
+            .clip(RoundedCornerShape(28.dp))
             .background(
-                Brush.verticalGradient(
+                Brush.radialGradient(
                     colors = listOf(
-                        if (isPowerOn) activeColor.copy(alpha = 0.22f) else RemoteSurface,
+                        if (isPowerOn) activeColor.copy(alpha = 0.28f) else RemoteSurface,
                         RemoteSurfaceElevated
                     )
                 )
             )
             .border(
                 width = 1.5.dp,
-                color = if (isPowerOn) activeColor.copy(alpha = 0.65f) else RemoteBorder,
-                shape = RoundedCornerShape(26.dp)
+                color = if (isPowerOn) activeColor.copy(alpha = 0.7f) else RemoteBorder,
+                shape = RoundedCornerShape(28.dp)
             )
-            .padding(22.dp),
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(72.dp)
+                .size(86.dp)
                 .clip(CircleShape)
-                .background(if (isPowerOn) activeColor.copy(alpha = 0.25f) else RemoteSurface)
-                .border(2.dp, if (isPowerOn) activeColor else RemoteBorder, CircleShape),
+                .background(
+                    if (isPowerOn) activeColor.copy(alpha = 0.25f) else RemoteSurface
+                )
+                .border(2.5.dp, if (isPowerOn) activeColor else RemoteBorder, CircleShape)
+                .clickable(onClick = onTogglePower),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = Icons.Rounded.Lightbulb,
-                contentDescription = "Bulb State",
+                contentDescription = "Toggle Bulb",
                 tint = if (isPowerOn) activeColor else TextSecondary,
-                modifier = Modifier.size(38.dp)
+                modifier = Modifier.size(44.dp)
             )
         }
         Text(
-            text = if (isPowerOn) "${brightness.roundToInt()}% Brightness" else "Bulb Off",
+            text = if (isPowerOn) "${brightness.roundToInt()}%  •  $sceneLabel" else "Bulb Off",
             color = TextPrimary,
-            fontSize = 24.sp,
+            fontSize = 20.sp,
             fontWeight = FontWeight.Bold
         )
-        Text(text = tempLabel, color = TextSecondary, fontSize = 13.sp)
-
         Button(
             onClick = onTogglePower,
             colors = ButtonDefaults.buttonColors(
@@ -1393,7 +1477,7 @@ private fun SmartBulbRemoteBody(
         }
     }
 
-    // Brightness Slider
+    // Dimmer Slider Card
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1424,60 +1508,71 @@ private fun SmartBulbRemoteBody(
         )
     }
 
-    // White Temperature Presets
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        listOf(
-            Triple("Warm", 2700, Color(0xFFFDE047)) to "bulb_warm",
-            Triple("Neutral", 4500, Color(0xFFF8FAFC)) to "bulb_white",
-            Triple("Cool", 6500, Color(0xFFBAE6FD)) to "bulb_cool"
-        ).forEach { (preset, irKey) ->
-            val (label, kelvin, previewColor) = preset
-            FilledTonalButton(
-                onClick = {
-                    tempLabel = "$label ${kelvin}K"
-                    activeColor = previewColor
-                    onBulbAction(true, null, null, kelvin, irKey)
-                },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Text(label, fontSize = 13.sp)
+    // Scenes & White Temperatures
+    ApplianceToggleGrid(
+        items = listOf(
+            ToggleActionItem("Night (15%)", sceneLabel == "Night") {
+                sceneLabel = "Night"
+                brightness = 15f
+                activeColor = Color(0xFFFDE047)
+                onBulbAction(true, 15, null, 2400, "bright_down")
+            },
+            ToggleActionItem("Reading (4500K)", sceneLabel == "Reading") {
+                sceneLabel = "Reading"
+                brightness = 85f
+                activeColor = Color(0xFFF8FAFC)
+                onBulbAction(true, 85, null, 4500, "bulb_white")
+            },
+            ToggleActionItem("Warm (2700K)", sceneLabel == "Warm 2700K") {
+                sceneLabel = "Warm 2700K"
+                activeColor = Color(0xFFFDE047)
+                onBulbAction(true, null, null, 2700, "bulb_warm")
+            },
+            ToggleActionItem("Cool (6500K)", sceneLabel == "Cool 6500K") {
+                sceneLabel = "Cool 6500K"
+                activeColor = Color(0xFFBAE6FD)
+                onBulbAction(true, null, null, 6500, "bulb_cool")
             }
-        }
-    }
+        )
+    )
 
-    // Color Swatches
-    Row(
+    // 8-Swatch Vivid Color Palette (2 rows of 4)
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(22.dp))
             .background(RemoteSurfaceElevated)
-            .border(1.dp, RemoteBorder, RoundedCornerShape(20.dp))
+            .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
             .padding(14.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        bulbColors.forEach { (rgb, meta) ->
-            val (label, irKey) = meta
-            val swatch = Color(rgb.first, rgb.second, rgb.third)
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(swatch)
-                    .border(
-                        width = if (activeColor == swatch) 3.dp else 1.dp,
-                        color = if (activeColor == swatch) Color.White else RemoteBorder,
-                        shape = CircleShape
+        Text("Color Mode", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        bulbColors.chunked(4).forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                row.forEach { (rgb, meta) ->
+                    val (label, irKey) = meta
+                    val swatch = Color(rgb.first, rgb.second, rgb.third)
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(swatch)
+                            .border(
+                                width = if (activeColor == swatch) 3.dp else 1.dp,
+                                color = if (activeColor == swatch) Color.White else RemoteBorder,
+                                shape = CircleShape
+                            )
+                            .clickable {
+                                activeColor = swatch
+                                sceneLabel = label
+                                onBulbAction(true, null, rgb, null, irKey)
+                            }
                     )
-                    .clickable {
-                        activeColor = swatch
-                        tempLabel = "$label Color"
-                        onBulbAction(true, null, rgb, null, irKey)
-                    }
-            )
+                }
+            }
         }
     }
 }
@@ -1485,44 +1580,112 @@ private fun SmartBulbRemoteBody(
 @Composable
 private fun AppLauncherGrid(
     apps: List<LaunchableApp>,
+    storageKey: String,
     onLaunch: (LaunchableApp) -> Unit
 ) {
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    var orderedApps by remember(apps, storageKey) {
+        mutableStateOf(loadAppOrder(context, storageKey, apps))
+    }
+    val itemBounds = remember(storageKey) { mutableStateMapOf<String, Rect>() }
+    var draggedId by remember { mutableStateOf<String?>(null) }
+    var pointerRoot by remember { mutableStateOf(Offset.Zero) }
+    var touchAnchor by remember { mutableStateOf(Offset.Zero) }
+    var lastSwapMs by remember { mutableLongStateOf(0L) }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        apps.chunked(2).forEach { row ->
+        Text(
+            text = if (draggedId != null) "Drag to reorder app" else "Tap to open • Hold & drag to reorder",
+            color = if (draggedId != null) MiOrange else TextSecondary,
+            fontSize = 11.sp
+        )
+
+        orderedApps.chunked(2).forEach { row ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 row.forEach { app ->
+                    val isDragged = draggedId == app.id
+                    val rect = itemBounds[app.id]
+                    val delta = if (isDragged && rect != null) {
+                        pointerRoot - rect.topLeft - touchAnchor
+                    } else {
+                        Offset.Zero
+                    }
+                    val activeAccent = MiOrange
+
                     Row(
                         modifier = Modifier
                             .weight(1f)
                             .height(66.dp)
+                            .zIndex(if (isDragged) 10f else 0f)
+                            .graphicsLayer {
+                                translationX = delta.x
+                                translationY = delta.y
+                                scaleX = if (isDragged) 1.05f else 1f
+                                scaleY = if (isDragged) 1.05f else 1f
+                            }
+                            .onGloballyPositioned { coords ->
+                                itemBounds[app.id] = coords.boundsInRoot()
+                            }
                             .clip(RoundedCornerShape(18.dp))
                             .background(RemoteSurfaceElevated)
-                            .border(1.dp, RemoteBorder, RoundedCornerShape(18.dp))
+                            .border(
+                                width = if (isDragged) 2.dp else 1.dp,
+                                color = if (isDragged) activeAccent else RemoteBorder,
+                                shape = RoundedCornerShape(18.dp)
+                            )
+                            .pointerInput(app.id) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = { startOffset ->
+                                        val r = itemBounds[app.id] ?: return@detectDragGesturesAfterLongPress
+                                        draggedId = app.id
+                                        touchAnchor = startOffset
+                                        pointerRoot = r.topLeft + startOffset
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        pointerRoot += dragAmount
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastSwapMs >= 140L) {
+                                            val hit = itemBounds.entries.firstOrNull { (otherId, otherRect) ->
+                                                otherId != app.id && otherRect.contains(pointerRoot)
+                                            }?.key
+                                            if (hit != null) {
+                                                val fromIdx = orderedApps.indexOfFirst { it.id == app.id }
+                                                val toIdx = orderedApps.indexOfFirst { it.id == hit }
+                                                if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
+                                                    val mutable = orderedApps.toMutableList()
+                                                    mutable.add(toIdx, mutable.removeAt(fromIdx))
+                                                    orderedApps = mutable
+                                                    lastSwapMs = now
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                }
+                                            }
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        draggedId = null
+                                        saveAppOrder(context, storageKey, orderedApps)
+                                    },
+                                    onDragCancel = {
+                                        draggedId = null
+                                        saveAppOrder(context, storageKey, orderedApps)
+                                    }
+                                )
+                            }
                             .clickable { onLaunch(app) }
                             .padding(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(app.badgeColor),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = app.shortBadge,
-                                color = Color.White,
-                                fontSize = if (app.shortBadge.length >= 3) 11.sp else 14.sp,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                        }
+                        AppLogoBadge(app = app)
                         Text(
                             text = app.name,
                             color = TextPrimary,
@@ -1683,4 +1846,29 @@ private fun QuickShortcutButton(
         Spacer(modifier = Modifier.width(6.dp))
         Text(text = label, fontSize = 12.sp)
     }
+}
+
+private const val APP_ORDER_PREFS = "gpt_app_order"
+
+private fun loadAppOrder(
+    context: Context,
+    key: String,
+    defaults: List<LaunchableApp>
+): List<LaunchableApp> {
+    val csv = context.applicationContext.getSharedPreferences(APP_ORDER_PREFS, Context.MODE_PRIVATE)
+        .getString(key, null)
+    if (csv.isNullOrBlank()) return defaults
+    val list = csv.split(',')
+        .mapNotNull { id -> defaults.firstOrNull { it.id == id } }
+        .distinctBy { it.id }
+        .toMutableList()
+    defaults.forEach { app -> if (list.none { it.id == app.id }) list.add(app) }
+    return list
+}
+
+private fun saveAppOrder(context: Context, key: String, list: List<LaunchableApp>) {
+    context.applicationContext.getSharedPreferences(APP_ORDER_PREFS, Context.MODE_PRIVATE)
+        .edit()
+        .putString(key, list.joinToString(",") { it.id })
+        .apply()
 }

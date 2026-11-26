@@ -7,11 +7,9 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -56,8 +54,8 @@ private enum class DPadDirection {
 }
 
 /**
- * Gesture-driven circular D-Pad:
- * - Slide anywhere Up / Down / Left / Right to navigate smoothly (repeats continuously while dragging)
+ * Perfectly centered gesture D-Pad:
+ * - Slide anywhere Up / Down / Left / Right to navigate
  * - Tap anywhere inside the circle to send OK (DPAD_CENTER)
  */
 @Composable
@@ -83,7 +81,7 @@ fun DPadControl(
 
     Box(
         modifier = modifier
-            .size(256.dp)
+            .size(252.dp)
             .shadow(16.dp, CircleShape)
             .clip(CircleShape)
             .background(
@@ -149,78 +147,77 @@ fun DPadControl(
                         }
                     }
                 }
-            },
-        contentAlignment = Alignment.Center
+            }
+            .padding(16.dp)
     ) {
-        Column(
+        Icon(
+            imageVector = Icons.Rounded.KeyboardArrowUp,
+            contentDescription = "Slide Up",
+            tint = if (activeDir == DPadDirection.UP) accent else TextPrimary.copy(alpha = 0.8f),
             modifier = Modifier
-                .fillMaxSize()
-                .padding(18.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
-            horizontalAlignment = Alignment.CenterHorizontally
+                .size(34.dp)
+                .align(Alignment.TopCenter)
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.Center),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                imageVector = Icons.Rounded.KeyboardArrowUp,
-                contentDescription = "Slide Up",
-                tint = if (activeDir == DPadDirection.UP) accent else TextPrimary.copy(alpha = 0.78f),
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
+                contentDescription = "Slide Left",
+                tint = if (activeDir == DPadDirection.LEFT) accent else TextPrimary.copy(alpha = 0.8f),
                 modifier = Modifier.size(34.dp)
             )
 
-            Row(
+            Box(
                 modifier = Modifier
-                    .weight(1f)
-                    .fillMaxSize(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
-                    contentDescription = "Slide Left",
-                    tint = if (activeDir == DPadDirection.LEFT) accent else TextPrimary.copy(alpha = 0.78f),
-                    modifier = Modifier.size(34.dp)
-                )
-
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(
-                        modifier = Modifier
-                            .size(86.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (activeDir == DPadDirection.CENTER) accent else accent.copy(alpha = 0.22f)
-                            )
-                            .border(2.dp, accent, CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "OK",
-                            color = if (activeDir == DPadDirection.CENTER) Color.White else TextPrimary,
-                            fontSize = 19.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Slide • Tap OK",
-                        color = TextSecondary,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium
+                    .size(88.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (activeDir == DPadDirection.CENTER) accent else accent.copy(alpha = 0.22f)
                     )
-                }
-
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                    contentDescription = "Slide Right",
-                    tint = if (activeDir == DPadDirection.RIGHT) accent else TextPrimary.copy(alpha = 0.78f),
-                    modifier = Modifier.size(34.dp)
+                    .border(2.dp, accent, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "OK",
+                    color = if (activeDir == DPadDirection.CENTER) Color.White else TextPrimary,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
 
             Icon(
-                imageVector = Icons.Rounded.KeyboardArrowDown,
-                contentDescription = "Slide Down",
-                tint = if (activeDir == DPadDirection.DOWN) accent else TextPrimary.copy(alpha = 0.78f),
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = "Slide Right",
+                tint = if (activeDir == DPadDirection.RIGHT) accent else TextPrimary.copy(alpha = 0.8f),
                 modifier = Modifier.size(34.dp)
             )
         }
+
+        Text(
+            text = "Slide • Tap OK",
+            color = TextSecondary,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 36.dp)
+        )
+
+        Icon(
+            imageVector = Icons.Rounded.KeyboardArrowDown,
+            contentDescription = "Slide Down",
+            tint = if (activeDir == DPadDirection.DOWN) accent else TextPrimary.copy(alpha = 0.8f),
+            modifier = Modifier
+                .size(34.dp)
+                .align(Alignment.BottomCenter)
+        )
+
+        Box(modifier = Modifier.fillMaxSize())
     }
 }

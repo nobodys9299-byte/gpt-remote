@@ -36,6 +36,12 @@ private sealed interface AppRoute {
     data class Remote(val brand: BrandOption) : AppRoute
 }
 
+private enum class FilePickTarget {
+    PC_UPLOAD,
+    PHONE_HOST_ADD,
+    PHONE_PEER_SEND
+}
+
 class MainActivity : ComponentActivity() {
 
     private val viewModel: RemoteViewModel by viewModels()
@@ -50,6 +56,7 @@ class MainActivity : ComponentActivity() {
             MiTvRemoteTheme(accentTheme = uiState.accentTheme) {
                 var hasBtPermissions by remember { mutableStateOf(viewModel.hasBluetoothPermissions()) }
                 var route by remember { mutableStateOf<AppRoute>(AppRoute.Home) }
+                var filePickTarget by remember { mutableStateOf(FilePickTarget.PC_UPLOAD) }
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -79,7 +86,11 @@ class MainActivity : ComponentActivity() {
                     contract = ActivityResultContracts.OpenDocument()
                 ) { uri ->
                     if (uri != null) {
-                        viewModel.uploadFileToPc(uri)
+                        when (filePickTarget) {
+                            FilePickTarget.PC_UPLOAD -> viewModel.uploadFileToPc(uri)
+                            FilePickTarget.PHONE_HOST_ADD -> viewModel.addLocalFileToPhoneShare(uri)
+                            FilePickTarget.PHONE_PEER_SEND -> viewModel.sendFileToPeerPhone(uri)
+                        }
                     }
                 }
 
@@ -114,7 +125,13 @@ class MainActivity : ComponentActivity() {
                         HomeHubScreen(
                             uiState = uiState,
                             onSelectProduct = { product ->
-                                route = AppRoute.BrandList(product)
+                                if (product == ProductType.PHONE_TO_PHONE) {
+                                    val phoneBrand = ProductCatalog.brandsFor(product).first()
+                                    viewModel.selectProductBrand(phoneBrand)
+                                    route = AppRoute.Remote(phoneBrand)
+                                } else {
+                                    route = AppRoute.BrandList(product)
+                                }
                             },
                             onOpenActiveRemote = {
                                 val activeBrand = uiState.selectedBrand ?: run {
@@ -139,21 +156,30 @@ class MainActivity : ComponentActivity() {
                         BackHandler { route = AppRoute.Home }
                         BrandPickerScreen(
                             product = current.product,
+                            uiState = uiState,
                             onBack = { route = AppRoute.Home },
                             onSelectBrand = { brand ->
                                 viewModel.selectProductBrand(brand)
                                 route = AppRoute.Remote(brand)
-                            }
+                            },
+                            onSelectHapticStrength = viewModel::setHapticStrength,
+                            onToggleSound = viewModel::setSoundEnabled,
+                            onSelectAccentTheme = viewModel::setAccentTheme
                         )
                     }
 
                     is AppRoute.Remote -> {
-                        BackHandler { route = AppRoute.BrandList(current.brand.productType) }
+                        val backTarget = if (current.brand.productType == ProductType.PHONE_TO_PHONE) {
+                            AppRoute.Home
+                        } else {
+                            AppRoute.BrandList(current.brand.productType)
+                        }
+                        BackHandler { route = backTarget }
                         RemoteScreen(
                             brand = current.brand,
                             uiState = uiState,
                             hasBluetoothPermissions = hasBtPermissions,
-                            onNavigateBack = { route = AppRoute.BrandList(current.brand.productType) },
+                            onNavigateBack = { route = backTarget },
                             onRequestBluetoothPermissions = requestBtPermissions,
                             onMakeDiscoverable = {
                                 val intent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
@@ -170,6 +196,9 @@ class MainActivity : ComponentActivity() {
                             onConnectManualIp = { host, category ->
                                 viewModel.addAndConnectManualWifi(host, current.brand.name, category)
                             },
+                            onQrScanned = { rawQr ->
+                                viewModel.connectFromQr(rawQr)
+                            },
                             onScanBulbs = viewModel::startBulbScan,
                             onSelectBulb = viewModel::selectBulb,
                             onConnectManualBulb = viewModel::connectManualBulb,
@@ -182,14 +211,29 @@ class MainActivity : ComponentActivity() {
                             onStartPcMirror = viewModel::startPcScreenMirror,
                             onStopPcMirror = viewModel::stopPcScreenMirror,
                             onTapMirroredScreen = viewModel::sendPcScreenTap,
+                            onMoveMirroredScreen = viewModel::sendPcScreenMove,
                             onStartPhoneCast = {
                                 val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                                 screenCastLauncher.launch(mgr.createScreenCaptureIntent())
                             },
                             onStopPhoneCast = viewModel::stopPhoneCast,
                             onRefreshPcFiles = viewModel::refreshPcFiles,
-                            onPickFileToSend = { pickFileLauncher.launch(arrayOf("*/*")) },
+                            onPickFileToSend = {
+                                filePickTarget = FilePickTarget.PC_UPLOAD
+                                pickFileLauncher.launch(arrayOf("*/*"))
+                            },
                             onDownloadPcFile = { file -> viewModel.downloadFileFromPc(file.name) },
+                            onStartPhoneShareHost = viewModel::startPhoneShareHost,
+                            onPickHostFileToShare = {
+                                filePickTarget = FilePickTarget.PHONE_HOST_ADD
+                                pickFileLauncher.launch(arrayOf("*/*"))
+                            },
+                            onRefreshPeerPhoneFiles = viewModel::refreshPeerPhoneFiles,
+                            onPickFileForPeerPhone = {
+                                filePickTarget = FilePickTarget.PHONE_PEER_SEND
+                                pickFileLauncher.launch(arrayOf("*/*"))
+                            },
+                            onDownloadFromPeerPhone = { file -> viewModel.downloadFileFromPeerPhone(file.name) },
                             onButtonPress = viewModel::pressButton,
                             onApplianceAction = viewModel::sendApplianceAction,
                             onLaunchApp = viewModel::launchApp,

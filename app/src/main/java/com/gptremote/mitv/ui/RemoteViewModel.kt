@@ -85,6 +85,20 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun sendPcScreenTap(nx: Float, ny: Float) = repository.sendPcScreenTap(nx, ny)
 
+    fun sendPcScreenMove(nx: Float, ny: Float) = repository.sendPcScreenMove(nx, ny)
+
+    fun connectFromQr(rawQr: String): String = repository.connectFromQr(rawQr)
+
+    fun startPhoneShareHost() = repository.startPhoneShareHost()
+
+    fun addLocalFileToPhoneShare(uri: Uri) = repository.addLocalFileToPhoneShare(uri)
+
+    fun refreshPeerPhoneFiles() = repository.refreshPeerPhoneFiles()
+
+    fun sendFileToPeerPhone(uri: Uri) = repository.sendFileToPeerPhone(uri)
+
+    fun downloadFileFromPeerPhone(fileName: String) = repository.downloadFileFromPeerPhone(fileName)
+
     fun getConnectedPcHost(): String? = repository.getConnectedPcHost()
 
     fun startPhoneCast(resultCode: Int, data: Intent) = repository.startPhoneCast(resultCode, data)

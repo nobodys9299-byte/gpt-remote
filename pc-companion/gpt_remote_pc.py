@@ -398,14 +398,36 @@ class RemoteServerState:
         self.latest_phone_frame: bytes | None = None
         self.latest_phone_frame_ts: float = 0.0
         self.bind_errors: list[str] = []
+        self.transfer_info: dict | None = None
         self.on_change = None
         self.on_files_change = None
         self.on_phone_frame = None
+        self.on_transfer = None
 
     def report_bind_error(self, msg: str) -> None:
         with self._lock:
             self.bind_errors.append(msg)
             cb = self.on_change
+        if cb:
+            cb()
+
+    def update_transfer(
+        self,
+        direction: str,
+        filename: str,
+        done_bytes: int,
+        total_bytes: int,
+        active: bool = True,
+    ) -> None:
+        with self._lock:
+            self.transfer_info = {
+                "direction": direction,
+                "filename": filename,
+                "done": done_bytes,
+                "total": total_bytes,
+                "active": active,
+            }
+            cb = self.on_transfer
         if cb:
             cb()
 
@@ -690,12 +712,22 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
                 self.send_header("Content-Length", str(size))
                 self.end_headers()
-                with open(full, "rb") as fh:
-                    while True:
-                        chunk = fh.read(65536)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
+                sent = 0
+                last_notify = 0
+                state.update_transfer("Sending to Phone", safe_name, 0, size, True)
+                try:
+                    with open(full, "rb") as fh:
+                        while True:
+                            chunk = fh.read(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            sent += len(chunk)
+                            if sent - last_notify >= 131072 or sent == size:
+                                last_notify = sent
+                                state.update_transfer("Sending to Phone", safe_name, sent, size, True)
+                finally:
+                    state.update_transfer("Sent to Phone", safe_name, sent, size, False)
             else:
                 self.send_error(404)
 
@@ -707,13 +739,23 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 safe_name = sanitize_filename(raw_name)
                 dest = unique_target_path(state.shared_dir, safe_name)
                 remaining = length
-                with open(dest, "wb") as out:
-                    while remaining > 0:
-                        chunk = self.rfile.read(min(65536, remaining))
-                        if not chunk:
-                            break
-                        out.write(chunk)
-                        remaining -= len(chunk)
+                received = 0
+                last_notify = 0
+                state.update_transfer("Receiving from Phone", safe_name, 0, length, True)
+                try:
+                    with open(dest, "wb") as out:
+                        while remaining > 0:
+                            chunk = self.rfile.read(min(65536, remaining))
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                            remaining -= len(chunk)
+                            received += len(chunk)
+                            if received - last_notify >= 131072 or remaining == 0:
+                                last_notify = received
+                                state.update_transfer("Receiving from Phone", safe_name, received, length, True)
+                finally:
+                    state.update_transfer("Received from Phone", os.path.basename(dest), received, length, False)
                 state.notify_files_changed()
                 resp = json.dumps({"ok": True, "savedAs": os.path.basename(dest)}).encode("utf-8")
                 self.send_response(200)
@@ -861,63 +903,286 @@ def run_windows_desktop_app(
 
     root = tk.Tk()
     root.title("GPT Remote PC")
-    root.geometry("460x600")
-    root.configure(bg="#0E1015")
-    root.resizable(False, False)
+    root.geometry("940x560")
+    root.minsize(880, 520)
+    root.configure(bg="#0B0E14")
 
-    BG = "#0E1015"
-    CARD = "#181B23"
-    ELEV = "#232834"
+    BG = "#0B0E14"
+    CARD = "#151A24"
+    ELEV = "#1F2735"
+    BORDER = "#2B3548"
     ORANGE = "#FF6900"
     BLUE = "#38BDF8"
     GREEN = "#34D399"
-    TXT = "#F3F4F6"
-    SUB = "#9CA3AF"
+    TXT = "#F8FAFC"
+    SUB = "#94A3B8"
 
-    # Header
+    def quit_completely():
+        stop_event.set()
+        root.quit()
+        root.destroy()
+
+    def minimize_to_tray():
+        root.withdraw()
+
+    root.protocol("WM_DELETE_WINDOW", minimize_to_tray)
+
+    # Top Landscape Header Bar
     hdr = tk.Frame(root, bg=BG)
-    hdr.pack(fill="x", padx=20, pady=(18, 10))
-    tk.Label(hdr, text="GPT Remote PC", bg=BG, fg=TXT, font=("Segoe UI", 18, "bold")).pack(anchor="w")
+    hdr.pack(fill="x", padx=22, pady=(16, 10))
+
+    title_col = tk.Frame(hdr, bg=BG)
+    title_col.pack(side="left")
     tk.Label(
-        hdr,
-        text="Control PC, share screen, and transfer files with your phone",
+        title_col,
+        text="GPT Remote PC",
+        bg=BG,
+        fg=TXT,
+        font=("Segoe UI", 20, "bold"),
+    ).pack(anchor="w")
+    tk.Label(
+        title_col,
+        text="Mouse, Touchpad, Screen Mirror, QR Connect & Two-Way File Share",
         bg=BG,
         fg=SUB,
         font=("Segoe UI", 9),
     ).pack(anchor="w")
 
-    # Connection Card
-    conn_card = tk.Frame(root, bg=CARD, highlightbackground="#2F3545", highlightthickness=1)
-    conn_card.pack(fill="x", padx=20, pady=6)
+    qr_visible = tk.BooleanVar(value=False)
+
+    btn_hdr = tk.Frame(hdr, bg=BG)
+    btn_hdr.pack(side="right", pady=4)
+
+    qr_toggle_btn = tk.Button(
+        btn_hdr,
+        text="Show QR Code",
+        bg=ORANGE,
+        fg="#FFFFFF",
+        activebackground="#E05D00",
+        activeforeground="#FFFFFF",
+        relief="flat",
+        font=("Segoe UI", 9, "bold"),
+        padx=14,
+        pady=7,
+        cursor="hand2",
+    )
+    qr_toggle_btn.pack(side="left", padx=(0, 8))
+
+    tk.Button(
+        btn_hdr,
+        text="Allow Firewall",
+        command=allow_windows_firewall,
+        bg=ELEV,
+        fg=BLUE,
+        activebackground=BORDER,
+        activeforeground=BLUE,
+        relief="flat",
+        font=("Segoe UI", 9, "bold"),
+        padx=12,
+        pady=7,
+        cursor="hand2",
+    ).pack(side="left", padx=(0, 8))
+
+    tk.Button(
+        btn_hdr,
+        text="Exit App",
+        command=quit_completely,
+        bg="#341A1D",
+        fg="#F87171",
+        activebackground="#4C2226",
+        activeforeground="#FCA5A5",
+        relief="flat",
+        font=("Segoe UI", 9, "bold"),
+        padx=12,
+        pady=7,
+        cursor="hand2",
+    ).pack(side="left")
+
+    # Main 2-Column Landscape Grid
+    main_row = tk.Frame(root, bg=BG)
+    main_row.pack(fill="both", expand=True, padx=22, pady=(4, 18))
+
+    left_col = tk.Frame(main_row, bg=BG, width=410)
+    left_col.pack(side="left", fill="y", padx=(0, 14))
+    left_col.pack_propagate(False)
+
+    right_col = tk.Frame(main_row, bg=BG)
+    right_col.pack(side="left", fill="both", expand=True)
+
+    # ---- Left Top: Connection Hub Card (with toggleable QR Code) ----
+    conn_card = tk.Frame(left_col, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+    conn_card.pack(fill="x", pady=(0, 12))
+
+    conn_top = tk.Frame(conn_card, bg=CARD)
+    conn_top.pack(fill="x", padx=16, pady=(14, 6))
+    tk.Label(conn_top, text="Connection Hub", bg=CARD, fg=TXT, font=("Segoe UI", 12, "bold")).pack(
+        side="left"
+    )
+    status_badge_lbl = tk.Label(
+        conn_top,
+        text="Waiting for phone",
+        bg=ELEV,
+        fg=SUB,
+        font=("Segoe UI", 8, "bold"),
+        padx=10,
+        pady=3,
+    )
+    status_badge_lbl.pack(side="right")
+
+    info_panel = tk.Frame(conn_card, bg=CARD)
+    info_panel.pack(fill="x", padx=16, pady=(0, 14))
 
     ip_var = tk.StringVar()
-    clients_var = tk.StringVar()
+    ports_var = tk.StringVar()
+    selected_ip_idx = {"i": 0}
+
+    def current_primary_ip() -> str:
+        ips = get_local_ips()
+        if not ips:
+            return ""
+        idx = selected_ip_idx["i"] % len(ips)
+        return ips[idx]
+
+    def copy_ip():
+        ip = current_primary_ip()
+        if ip:
+            root.clipboard_clear()
+            root.clipboard_append(ip)
+            ip_var.set(f"Copied Wi-Fi IP: {ip}")
+            root.after(1600, refresh_status)
+
+    def cycle_ip():
+        selected_ip_idx["i"] += 1
+        refresh_status()
+        if qr_visible.get():
+            draw_qr_code()
+
+    tk.Label(info_panel, textvariable=ip_var, bg=CARD, fg=BLUE, font=("Segoe UI", 11, "bold")).pack(
+        anchor="w", pady=(2, 2)
+    )
+    tk.Label(info_panel, textvariable=ports_var, bg=CARD, fg=SUB, font=("Segoe UI", 9)).pack(
+        anchor="w", pady=(0, 10)
+    )
+
+    ip_btn_row = tk.Frame(info_panel, bg=CARD)
+    ip_btn_row.pack(fill="x")
+    tk.Button(
+        ip_btn_row,
+        text="Copy IP",
+        command=copy_ip,
+        bg=ELEV,
+        fg=TXT,
+        relief="flat",
+        font=("Segoe UI", 9, "bold"),
+        padx=10,
+        pady=5,
+        cursor="hand2",
+    ).pack(side="left", padx=(0, 8))
+    tk.Button(
+        ip_btn_row,
+        text="Switch Network IP",
+        command=cycle_ip,
+        bg=ELEV,
+        fg=SUB,
+        relief="flat",
+        font=("Segoe UI", 9),
+        padx=10,
+        pady=5,
+        cursor="hand2",
+    ).pack(side="left")
+
+    # Inline QR Panel (hidden until Show QR Code clicked)
+    qr_panel = tk.Frame(conn_card, bg=CARD)
+    qr_canvas = tk.Canvas(qr_panel, width=196, height=196, bg="#FFFFFF", highlightthickness=0)
+    qr_canvas.pack(pady=(4, 6))
+    qr_caption = tk.Label(qr_panel, text="", bg=CARD, fg=SUB, font=("Segoe UI", 8))
+    qr_caption.pack(pady=(0, 12))
+
+    def draw_qr_code():
+        qr_canvas.delete("all")
+        ip = current_primary_ip()
+        if not ip:
+            qr_caption.configure(text="Connect PC to Wi-Fi first to generate QR code")
+            return
+        host_name = urllib.parse.quote(socket.gethostname())
+        payload = f"gptremote://pc?host={ip}&port={TCP_PORT}&name={host_name}"
+        try:
+            import qrcode
+            qr = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=1,
+                border=2,
+            )
+            qr.add_data(payload)
+            qr.make(fit=True)
+            matrix = qr.get_matrix()
+            n = len(matrix)
+            size = 196
+            cell = size / n
+            qr_canvas.create_rectangle(0, 0, size, size, fill="#FFFFFF", outline="")
+            for r, row_vals in enumerate(matrix):
+                for c, val in enumerate(row_vals):
+                    if val:
+                        x0 = c * cell
+                        y0 = r * cell
+                        qr_canvas.create_rectangle(
+                            x0, y0, x0 + cell + 0.5, y0 + cell + 0.5, fill="#0B0E14", outline=""
+                        )
+            qr_caption.configure(text=f"Scan in phone app -> Connect PC -> Scan QR  ({ip})")
+        except Exception as exc:
+            qr_canvas.create_text(
+                98,
+                98,
+                text=f"QR requires 'qrcode'\n{exc}\nUse IP: {ip}",
+                fill="#0B0E14",
+                font=("Segoe UI", 9),
+                justify="center",
+            )
+            qr_caption.configure(text=f"Enter IP manually on phone: {ip}")
+
+    def toggle_qr():
+        show = not qr_visible.get()
+        qr_visible.set(show)
+        if show:
+            info_panel.pack_forget()
+            qr_panel.pack(fill="x", padx=16, pady=(0, 6))
+            draw_qr_code()
+            qr_toggle_btn.configure(text="Hide QR Code", bg=ELEV, fg=TXT)
+        else:
+            qr_panel.pack_forget()
+            info_panel.pack(fill="x", padx=16, pady=(0, 14))
+            qr_toggle_btn.configure(text="Show QR Code", bg=ORANGE, fg="#FFFFFF")
+
+    qr_toggle_btn.configure(command=toggle_qr)
 
     def refresh_status():
         ips = get_local_ips()
-        ip_str = ", ".join(ips) if ips else "Not connected to Wi-Fi"
-        ip_var.set(f"PC Name: {socket.gethostname()}   •   Wi-Fi IP: {ip_str}")
+        primary = current_primary_ip()
+        host = socket.gethostname()
+        ip_var.set(f"{host}   •   {primary if primary else 'No Wi-Fi'}")
+        if len(ips) > 1:
+            ports_var.set(f"All IPs: {', '.join(ips)}   •   Ports {TCP_PORT}/{SCREEN_PORT}/{FILE_HTTP_PORT}")
+        else:
+            ports_var.set(f"Ports: Control {TCP_PORT} • Screen {SCREEN_PORT} • Files {FILE_HTTP_PORT}")
+
         if state.bind_errors:
-            clients_var.set("Port conflict: " + "; ".join(state.bind_errors))
+            status_badge_lbl.configure(text="Port Conflict!", bg="#3B1A1E", fg="#F87171")
+            ports_var.set("Port error: " + "; ".join(state.bind_errors))
         else:
             c = state.count()
-            clients_var.set(
-                f"Connected Phones: {c}   •   Ports: {TCP_PORT} / {SCREEN_PORT} / {FILE_HTTP_PORT}"
-            )
+            if c > 0:
+                status_badge_lbl.configure(text=f"Connected ({c})", bg="#123829", fg=GREEN)
+            else:
+                status_badge_lbl.configure(text="Ready on Wi-Fi", bg=ELEV, fg=BLUE)
 
-    tk.Label(conn_card, textvariable=ip_var, bg=CARD, fg=BLUE, font=("Segoe UI", 10, "bold")).pack(
-        anchor="w", padx=14, pady=(12, 2)
-    )
-    tk.Label(conn_card, textvariable=clients_var, bg=CARD, fg=GREEN, font=("Segoe UI", 9)).pack(
-        anchor="w", padx=14, pady=(0, 12)
+    # ---- Left Bottom: Screen Share & Startup Card ----
+    scr_card = tk.Frame(left_col, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+    scr_card.pack(fill="both", expand=True)
+    tk.Label(scr_card, text="Screen & Startup", bg=CARD, fg=TXT, font=("Segoe UI", 12, "bold")).pack(
+        anchor="w", padx=16, pady=(14, 6)
     )
 
-    # Screen Share Card
-    scr_card = tk.Frame(root, bg=CARD, highlightbackground="#2F3545", highlightthickness=1)
-    scr_card.pack(fill="x", padx=20, pady=6)
-    tk.Label(scr_card, text="Screen Sharing", bg=CARD, fg=TXT, font=("Segoe UI", 11, "bold")).pack(
-        anchor="w", padx=14, pady=(12, 4)
-    )
     allow_screen_var = tk.BooleanVar(value=state.allow_pc_screen_share)
 
     def on_toggle_screen():
@@ -925,7 +1190,7 @@ def run_windows_desktop_app(
 
     tk.Checkbutton(
         scr_card,
-        text="Allow phone app to view & touch-control this PC screen",
+        text="Allow phone app to view & touch PC screen",
         variable=allow_screen_var,
         command=on_toggle_screen,
         bg=CARD,
@@ -934,7 +1199,31 @@ def run_windows_desktop_app(
         activebackground=CARD,
         activeforeground=TXT,
         font=("Segoe UI", 9),
-    ).pack(anchor="w", padx=12, pady=(0, 8))
+    ).pack(anchor="w", padx=12, pady=(0, 6))
+
+    autostart_var = tk.BooleanVar(value=is_autostart_enabled())
+
+    def on_toggle_autostart():
+        try:
+            enabled, msg = toggle_autostart()
+            autostart_var.set(enabled)
+            messagebox.showinfo("GPT Remote Startup", msg)
+        except Exception as exc:
+            autostart_var.set(is_autostart_enabled())
+            messagebox.showerror("Error", f"Could not update startup: {exc}")
+
+    tk.Checkbutton(
+        scr_card,
+        text="Launch minimized to Tray on Windows login",
+        variable=autostart_var,
+        command=on_toggle_autostart,
+        bg=CARD,
+        fg=TXT,
+        selectcolor=ELEV,
+        activebackground=CARD,
+        activeforeground=TXT,
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", padx=12, pady=(0, 12))
 
     phone_win_ref: dict[str, tk.Toplevel | None] = {"win": None}
     phone_label_ref: dict[str, tk.Label | None] = {"lbl": None}
@@ -951,7 +1240,7 @@ def run_windows_desktop_app(
         win.configure(bg="#000000")
         lbl = tk.Label(
             win,
-            text="Waiting for phone screen cast...\n\nOn your phone, open:\nPC Remote -> Screen -> Cast Phone Screen",
+            text="Waiting for phone screen cast...\n\nOn your phone, open:\nPC Remote -> Screen -> Cast Screen",
             bg="#000000",
             fg=SUB,
             font=("Segoe UI", 10),
@@ -985,37 +1274,94 @@ def run_windows_desktop_app(
         command=open_phone_mirror_window,
         bg=ELEV,
         fg=TXT,
+        activebackground=BORDER,
+        activeforeground=TXT,
         relief="flat",
         font=("Segoe UI", 9, "bold"),
-        padx=12,
-        pady=6,
-    ).pack(anchor="w", padx=14, pady=(0, 12))
+        padx=14,
+        pady=8,
+        cursor="hand2",
+    ).pack(anchor="w", padx=16, pady=(0, 14))
 
-    # File Sharing Card
-    file_card = tk.Frame(root, bg=CARD, highlightbackground="#2F3545", highlightthickness=1)
-    file_card.pack(fill="both", expand=True, padx=20, pady=6)
-    tk.Label(file_card, text="Two-Way File Share", bg=CARD, fg=TXT, font=("Segoe UI", 11, "bold")).pack(
-        anchor="w", padx=14, pady=(12, 2)
+    # ---- Right Top: Live File Transfer Progress Card ----
+    prog_card = tk.Frame(right_col, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+    prog_card.pack(fill="x", pady=(0, 12))
+
+    prog_hdr = tk.Frame(prog_card, bg=CARD)
+    prog_hdr.pack(fill="x", padx=16, pady=(12, 6))
+    transfer_title_var = tk.StringVar(value="File Transfer Idle")
+    transfer_pct_var = tk.StringVar(value="0%")
+    tk.Label(prog_hdr, textvariable=transfer_title_var, bg=CARD, fg=TXT, font=("Segoe UI", 10, "bold")).pack(
+        side="left"
     )
-    folder_lbl = tk.Label(
-        file_card,
-        text=f"Folder: {state.shared_dir}",
-        bg=CARD,
-        fg=SUB,
-        font=("Segoe UI", 8),
+    transfer_pct_lbl = tk.Label(
+        prog_hdr, textvariable=transfer_pct_var, bg=CARD, fg=ORANGE, font=("Segoe UI", 10, "bold")
     )
-    folder_lbl.pack(anchor="w", padx=14, pady=(0, 6))
+    transfer_pct_lbl.pack(side="right")
+
+    prog_canvas = tk.Canvas(prog_card, height=14, bg=ELEV, highlightthickness=0)
+    prog_canvas.pack(fill="x", padx=16, pady=(0, 6))
+    transfer_detail_var = tk.StringVar(value="Select or send any file between Phone and PC")
+    tk.Label(prog_card, textvariable=transfer_detail_var, bg=CARD, fg=SUB, font=("Segoe UI", 8)).pack(
+        anchor="w", padx=16, pady=(0, 12)
+    )
+
+    def draw_progress_bar(fraction: float, active: bool):
+        prog_canvas.delete("all")
+        w = prog_canvas.winfo_width()
+        if w < 10:
+            w = 430
+        h = 14
+        fill_w = max(0, min(w, int(w * fraction)))
+        prog_canvas.create_rectangle(0, 0, w, h, fill=ELEV, outline="")
+        if fill_w > 0:
+            color = ORANGE if active else GREEN
+            prog_canvas.create_rectangle(0, 0, fill_w, h, fill=color, outline="")
+
+    def refresh_transfer():
+        info = state.transfer_info
+        if not info:
+            transfer_title_var.set("File Transfer Ready")
+            transfer_pct_var.set("")
+            transfer_detail_var.set("Progress appears here when sending or receiving files")
+            draw_progress_bar(0.0, False)
+            return
+        total = max(1, info["total"])
+        done = info["done"]
+        frac = min(1.0, done / total) if info["total"] > 0 else (1.0 if not info["active"] else 0.5)
+        pct = int(round(frac * 100))
+        done_mb = done / (1024.0 * 1024.0)
+        tot_mb = total / (1024.0 * 1024.0)
+        transfer_title_var.set(f"{info['direction']}: {info['filename']}")
+        transfer_pct_var.set(f"{pct}%")
+        transfer_pct_lbl.configure(fg=ORANGE if info["active"] else GREEN)
+        transfer_detail_var.set(f"{done_mb:.2f} MB / {tot_mb:.2f} MB")
+        draw_progress_bar(frac, info["active"])
+
+    prog_canvas.bind("<Configure>", lambda _e: refresh_transfer())
+
+    # ---- Right Bottom: Two-Way File Share Hub ----
+    file_card = tk.Frame(right_col, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+    file_card.pack(fill="both", expand=True)
+
+    file_hdr = tk.Frame(file_card, bg=CARD)
+    file_hdr.pack(fill="x", padx=16, pady=(14, 4))
+    tk.Label(file_hdr, text="Shared Files Folder", bg=CARD, fg=TXT, font=("Segoe UI", 12, "bold")).pack(
+        side="left"
+    )
+    btn_row = tk.Frame(file_hdr, bg=CARD)
+    btn_row.pack(side="right")
 
     files_listbox = tk.Listbox(
         file_card,
         bg=ELEV,
         fg=TXT,
+        selectbackground=ORANGE,
+        selectforeground="#FFFFFF",
         borderwidth=0,
         highlightthickness=0,
         font=("Segoe UI", 9),
-        height=7,
     )
-    files_listbox.pack(fill="both", expand=True, padx=14, pady=(0, 8))
 
     def refresh_files():
         files_listbox.delete(0, tk.END)
@@ -1024,114 +1370,74 @@ def run_windows_desktop_app(
             e for e in os.listdir(state.shared_dir) if os.path.isfile(os.path.join(state.shared_dir, e))
         )
         if not entries:
-            files_listbox.insert(tk.END, "(No files yet — add a file or send from phone)")
+            files_listbox.insert(tk.END, "  (Folder empty — click + Share File or send from phone)")
         else:
             for e in entries:
                 sz = os.path.getsize(os.path.join(state.shared_dir, e))
-                kb = max(1, sz // 1024)
-                files_listbox.insert(tk.END, f"{e}  ({kb} KB)")
+                if sz >= 1024 * 1024:
+                    size_txt = f"{sz / (1024.0 * 1024.0):.1f} MB"
+                else:
+                    size_txt = f"{max(1, sz // 1024)} KB"
+                files_listbox.insert(tk.END, f"  {e}    ({size_txt})")
 
     def add_files_to_share():
         picked = filedialog.askopenfilenames(title="Select file(s) to share with phone")
         for src in picked:
-            dest = unique_target_path(state.shared_dir, sanitize_filename(src))
+            name = os.path.basename(src)
+            total_sz = max(1, os.path.getsize(src))
+            dest = unique_target_path(state.shared_dir, sanitize_filename(name))
+            state.update_transfer("Adding to Share", name, 0, total_sz, True)
             shutil.copy2(src, dest)
+            state.update_transfer("Ready to Download", os.path.basename(dest), total_sz, total_sz, False)
         refresh_files()
 
     def open_shared_folder():
         os.makedirs(state.shared_dir, exist_ok=True)
         os.startfile(state.shared_dir)
 
-    btn_row = tk.Frame(file_card, bg=CARD)
-    btn_row.pack(fill="x", padx=14, pady=(0, 12))
     tk.Button(
         btn_row,
-        text="+ Share File to Phone",
+        text="+ Share File",
         command=add_files_to_share,
         bg=ORANGE,
         fg="#FFFFFF",
+        activebackground="#E05D00",
+        activeforeground="#FFFFFF",
         relief="flat",
         font=("Segoe UI", 9, "bold"),
-        padx=10,
-        pady=6,
-    ).pack(side="left")
+        padx=12,
+        pady=5,
+        cursor="hand2",
+    ).pack(side="left", padx=(0, 8))
     tk.Button(
         btn_row,
         text="Open Folder",
         command=open_shared_folder,
         bg=ELEV,
         fg=TXT,
+        activebackground=BORDER,
+        activeforeground=TXT,
         relief="flat",
         font=("Segoe UI", 9),
         padx=10,
-        pady=6,
-    ).pack(side="left", padx=8)
-
-    # Bottom Controls Row
-    bot = tk.Frame(root, bg=BG)
-    bot.pack(fill="x", padx=20, pady=(6, 16))
-
-    autostart_var = tk.BooleanVar(value=is_autostart_enabled())
-
-    def on_toggle_autostart():
-        try:
-            enabled, msg = toggle_autostart()
-            autostart_var.set(enabled)
-            messagebox.showinfo("GPT Remote Startup", msg)
-        except Exception as exc:
-            autostart_var.set(is_autostart_enabled())
-            messagebox.showerror("Error", f"Could not update startup: {exc}")
-
-    tk.Checkbutton(
-        bot,
-        text="Run at Windows Startup",
-        variable=autostart_var,
-        command=on_toggle_autostart,
-        bg=BG,
-        fg=TXT,
-        selectcolor=ELEV,
-        activebackground=BG,
-        activeforeground=TXT,
-        font=("Segoe UI", 9),
+        pady=5,
+        cursor="hand2",
     ).pack(side="left")
 
-    tk.Button(
-        bot,
-        text="Allow Firewall",
-        command=allow_windows_firewall,
-        bg=ELEV,
-        fg=BLUE,
-        relief="flat",
-        font=("Segoe UI", 9),
-        padx=8,
-        pady=4,
-    ).pack(side="right")
+    tk.Label(
+        file_card,
+        text=f"Path: {state.shared_dir}",
+        bg=CARD,
+        fg=SUB,
+        font=("Segoe UI", 8),
+    ).pack(anchor="w", padx=16, pady=(0, 8))
 
-    tk.Button(
-        bot,
-        text="Exit App",
-        command=lambda: quit_completely(),
-        bg="#341A1D",
-        fg="#F87171",
-        relief="flat",
-        font=("Segoe UI", 9),
-        padx=8,
-        pady=4,
-    ).pack(side="right", padx=6)
-
-    def quit_completely():
-        stop_event.set()
-        root.quit()
-        root.destroy()
-
-    def minimize_to_tray():
-        root.withdraw()
-
-    root.protocol("WM_DELETE_WINDOW", minimize_to_tray)
+    files_listbox.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
     # Wire live background state updates safely onto Tk thread
     state.on_change = lambda: root.after(0, refresh_status)
     state.on_files_change = lambda: root.after(0, refresh_files)
+    state.on_transfer = lambda: root.after(0, refresh_transfer)
     state.on_phone_frame = lambda data: root.after(0, lambda d=data: (
         open_phone_mirror_window() if not (phone_win_ref["win"] and phone_win_ref["win"].winfo_exists()) else None,
         render_phone_frame(d),
@@ -1139,6 +1445,7 @@ def run_windows_desktop_app(
 
     refresh_status()
     refresh_files()
+    refresh_transfer()
 
     # Background Win32 Tray Icon so closing window keeps service alive in System Tray
     def tray_thread():
