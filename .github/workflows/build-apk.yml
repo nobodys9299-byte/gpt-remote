@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Android APK & Windows Companion
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-apk:
     runs-on: ubuntu-latest
 
     steps:
@@ -35,20 +35,65 @@ jobs:
       - name: Prepare APK for download
         run: cp app/build/outputs/apk/debug/app-debug.apk MiTvRemote-debug.apk
 
-      - name: Upload workflow artifact
+      - name: Upload Android APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: MiTvRemote-debug-apk
           path: MiTvRemote-debug.apk
 
+  build-pc-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build standalone GptRemotePC.exe
+        run: pyinstaller --onefile --name GptRemotePC pc-companion/gpt_remote_pc.py
+
+      - name: Upload Windows EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GptRemotePC-exe
+          path: dist/GptRemotePC.exe
+
+  release:
+    needs: [build-apk, build-pc-exe]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: MiTvRemote-debug-apk
+          path: release-assets
+
+      - name: Download Windows EXE
+        uses: actions/download-artifact@v4
+        with:
+          name: GptRemotePC-exe
+          path: release-assets
+
       - name: Publish latest GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Mi TV Remote (Latest Build)
+          name: GPT Remote (Latest Build)
           body: |
             Automated build from commit `${{ github.sha }}`.
-            Download `MiTvRemote-debug.apk` below to install on Android 9.0+.
-          files: MiTvRemote-debug.apk
+
+            - **Android App:** Download `MiTvRemote-debug.apk` (Android 9.0+).
+            - **Windows Wi-Fi PC Receiver:** Download `GptRemotePC.exe` (no Python required).
+          files: |
+            release-assets/MiTvRemote-debug.apk
+            release-assets/GptRemotePC.exe
           overwrite_files: true
           make_latest: true

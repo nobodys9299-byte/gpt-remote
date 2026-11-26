@@ -306,6 +306,27 @@ def handle_client(conn: socket.socket, addr: tuple, backend: InputBackend) -> No
         print(f"[-] Disconnected: {addr[0]}:{addr[1]}")
 
 
+def get_local_ips() -> list[str]:
+    ips: list[str] = []
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("8.8.8.8", 80))
+        primary = probe.getsockname()[0]
+        probe.close()
+        if primary and not primary.startswith("127."):
+            ips.append(primary)
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    return ips
+
+
 def main() -> None:
     backend = create_backend()
     threading.Thread(target=udp_discovery_loop, daemon=True).start()
@@ -316,8 +337,15 @@ def main() -> None:
     server.listen(4)
 
     hostname = socket.gethostname()
-    print(f"GPT Remote PC Companion running on '{hostname}' ({platform.system()})")
-    print(f"Listening on TCP {TCP_PORT} & UDP discovery {UDP_DISCOVERY_PORT}...")
+    local_ips = get_local_ips()
+    print("==========================================")
+    print(f" GPT Remote PC Companion ({platform.system()})")
+    print(f" Computer Name : {hostname}")
+    print(f" Wi-Fi IP(s)   : {', '.join(local_ips) if local_ips else 'Check ipconfig'}")
+    print(f" Listening on  : TCP {TCP_PORT} / UDP {UDP_DISCOVERY_PORT}")
+    print("==========================================")
+    print("Open GPT Remote on your phone -> Wi-Fi PC -> Scan (or enter IP above).")
+    print("Keep this window open while controlling your PC (Ctrl+C to stop).\n")
 
     while True:
         conn, addr = server.accept()
