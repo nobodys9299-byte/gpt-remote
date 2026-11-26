@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """
-GPT Remote - Wi-Fi PC/Laptop Companion Server
-Lets the GPT Remote Android app control your Windows, macOS, or Linux computer
-as a wireless mouse, touchpad, keyboard, and media remote over Wi-Fi.
+GPT Remote - Wi-Fi PC/Laptop Companion
+Runs silently in the Windows System Tray (no CMD window when compiled with --noconsole)
+or as a CLI service on macOS/Linux.
 
-On Windows: Zero external dependencies required (uses built-in ctypes SendInput).
-On macOS/Linux: Uses pynput (`pip install pynput`).
+Features:
+- Zero external dependencies on Windows (ctypes SendInput + Win32 System Tray)
+- UDP subnet discovery (port 58766) + TCP control & announce (port 58765)
+- 1-click "Run at Windows Startup" (copies to %LOCALAPPDATA%\\GptRemotePC if run from Temp)
+- 1-click "Allow Windows Firewall" helper for Private & Public/Hotspot Wi-Fi
 """
 
 import ctypes
 import json
+import os
 import platform
+import shutil
 import socket
+import subprocess
+import sys
 import threading
 
 TCP_PORT = 58765
@@ -37,8 +44,7 @@ class InputBackend:
 
 
 def create_backend() -> InputBackend:
-    system = platform.system()
-    if system == "Windows":
+    if platform.system() == "Windows":
         return WindowsBackend()
     return PynputBackend()
 
@@ -165,15 +171,15 @@ class WindowsBackend(InputBackend):
 
     def key(self, code: str) -> None:
         if code == "alt_tab":
-            self._combo(0x12, 0x09)  # VK_MENU + VK_TAB
+            self._combo(0x12, 0x09)
         elif code == "copy":
-            self._combo(0x11, 0x43)  # VK_CONTROL + C
+            self._combo(0x11, 0x43)
         elif code == "paste":
-            self._combo(0x11, 0x56)  # VK_CONTROL + V
+            self._combo(0x11, 0x56)
         elif code == "desktop":
-            self._combo(0x5B, 0x44)  # LWIN + D
+            self._combo(0x5B, 0x44)
         elif code == "settings":
-            self._combo(0x5B, 0x49)  # LWIN + I
+            self._combo(0x5B, 0x49)
         elif code == "lock":
             self._user32.LockWorkStation()
         elif code in self.VK_MAP:
@@ -238,10 +244,7 @@ class PynputBackend(InputBackend):
         self.mouse.scroll(0, dy)
 
     def click(self, btn: str) -> None:
-        target = {
-            "right": self.Button.right,
-            "middle": self.Button.middle,
-        }.get(btn, self.Button.left)
+        target = {"right": self.Button.right, "middle": self.Button.middle}.get(btn, self.Button.left)
         self.mouse.click(target)
 
     def key(self, code: str) -> None:
@@ -254,56 +257,6 @@ class PynputBackend(InputBackend):
 
     def text(self, s: str) -> None:
         self.kb.type(s)
-
-
-def udp_discovery_loop() -> None:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("", UDP_DISCOVERY_PORT))
-    announce = json.dumps({
-        "type": "announce",
-        "name": socket.gethostname(),
-        "os": platform.system(),
-        "port": TCP_PORT,
-    }).encode("utf-8")
-
-    while True:
-        data, addr = sock.recvfrom(1024)
-        if data.strip() == DISCOVER_MAGIC:
-            sock.sendto(announce, addr)
-
-
-def handle_client(conn: socket.socket, addr: tuple, backend: InputBackend) -> None:
-    print(f"[+] Connected: {addr[0]}:{addr[1]}")
-    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    buf = ""
-    try:
-        while True:
-            chunk = conn.recv(4096)
-            if not chunk:
-                break
-            buf += chunk.decode("utf-8", errors="ignore")
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                if not line.strip():
-                    continue
-                msg = json.loads(line)
-                t = msg.get("t")
-                if t == "move":
-                    backend.move(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
-                elif t == "scroll":
-                    backend.scroll(int(msg.get("dy", 0)))
-                elif t == "click":
-                    backend.click(msg.get("btn", "left"))
-                elif t == "key":
-                    backend.key(msg.get("code", ""))
-                elif t == "text":
-                    backend.text(msg.get("s", ""))
-    except Exception as exc:
-        print(f"[!] Client error ({addr[0]}): {exc}")
-    finally:
-        conn.close()
-        print(f"[-] Disconnected: {addr[0]}:{addr[1]}")
 
 
 def get_local_ips() -> list[str]:
@@ -327,29 +280,449 @@ def get_local_ips() -> list[str]:
     return ips
 
 
-def main() -> None:
-    backend = create_backend()
-    threading.Thread(target=udp_discovery_loop, daemon=True).start()
+class RemoteServerState:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active_clients: set[str] = set()
+        self.on_change = None
 
+    def add_client(self, addr_str: str) -> None:
+        with self._lock:
+            self.active_clients.add(addr_str)
+            cb = self.on_change
+        if cb:
+            cb()
+
+    def remove_client(self, addr_str: str) -> None:
+        with self._lock:
+            self.active_clients.discard(addr_str)
+            cb = self.on_change
+        if cb:
+            cb()
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self.active_clients)
+
+
+def udp_discovery_loop(stop_event: threading.Event) -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.settimeout(1.0)
+    sock.bind(("", UDP_DISCOVERY_PORT))
+    announce = json.dumps({
+        "type": "announce",
+        "name": socket.gethostname(),
+        "os": platform.system(),
+        "port": TCP_PORT,
+    }).encode("utf-8")
+
+    try:
+        while not stop_event.is_set():
+            try:
+                data, addr = sock.recvfrom(1024)
+                if data.strip() == DISCOVER_MAGIC:
+                    sock.sendto(announce, addr)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+    finally:
+        sock.close()
+
+
+def handle_client(
+    conn: socket.socket,
+    addr: tuple,
+    backend: InputBackend,
+    state: RemoteServerState,
+) -> None:
+    tag = f"{addr[0]}:{addr[1]}"
+    state.add_client(tag)
+    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    try:
+        hello = json.dumps({
+            "type": "announce",
+            "name": socket.gethostname(),
+            "os": platform.system(),
+            "port": TCP_PORT,
+        }) + "\n"
+        conn.sendall(hello.encode("utf-8"))
+    except OSError:
+        pass
+
+    buf = ""
+    try:
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            buf += chunk.decode("utf-8", errors="ignore")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                if not line.strip():
+                    continue
+                msg = json.loads(line)
+                t = msg.get("t")
+                if t == "move":
+                    backend.move(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
+                elif t == "scroll":
+                    backend.scroll(int(msg.get("dy", 0)))
+                elif t == "click":
+                    backend.click(msg.get("btn", "left"))
+                elif t == "key":
+                    backend.key(msg.get("code", ""))
+                elif t == "text":
+                    backend.text(msg.get("s", ""))
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+        pass
+    finally:
+        conn.close()
+        state.remove_client(tag)
+
+
+def tcp_server_loop(
+    backend: InputBackend,
+    state: RemoteServerState,
+    stop_event: threading.Event,
+) -> None:
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.settimeout(1.0)
     server.bind(("0.0.0.0", TCP_PORT))
-    server.listen(4)
+    server.listen(8)
 
-    hostname = socket.gethostname()
-    local_ips = get_local_ips()
-    print("==========================================")
-    print(f" GPT Remote PC Companion ({platform.system()})")
-    print(f" Computer Name : {hostname}")
-    print(f" Wi-Fi IP(s)   : {', '.join(local_ips) if local_ips else 'Check ipconfig'}")
-    print(f" Listening on  : TCP {TCP_PORT} / UDP {UDP_DISCOVERY_PORT}")
-    print("==========================================")
-    print("Open GPT Remote on your phone -> Wi-Fi PC -> Scan (or enter IP above).")
-    print("Keep this window open while controlling your PC (Ctrl+C to stop).\n")
+    try:
+        while not stop_event.is_set():
+            try:
+                conn, addr = server.accept()
+                threading.Thread(
+                    target=handle_client,
+                    args=(conn, addr, backend, state),
+                    daemon=True,
+                ).start()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+    finally:
+        server.close()
 
-    while True:
-        conn, addr = server.accept()
-        threading.Thread(target=handle_client, args=(conn, addr, backend), daemon=True).start()
+
+# ---- Windows Startup, Install & Firewall Helpers ----
+
+def _startup_shortcut_path() -> str:
+    appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
+    return os.path.join(
+        appdata, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "GptRemotePC.lnk"
+    )
+
+
+def _installed_exe_path() -> str:
+    local_appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+    return os.path.join(local_appdata, "GptRemotePC", "GptRemotePC.exe")
+
+
+def is_autostart_enabled() -> bool:
+    return os.path.exists(_startup_shortcut_path())
+
+
+def toggle_autostart() -> tuple[bool, str]:
+    shortcut = _startup_shortcut_path()
+    if os.path.exists(shortcut):
+        os.remove(shortcut)
+        return False, "Auto-start at Windows login removed."
+
+    is_frozen = getattr(sys, "frozen", False)
+    if is_frozen:
+        target_exe = os.path.abspath(sys.executable)
+        # If running out of a Temp folder/zip, copy into %LOCALAPPDATA%\GptRemotePC first
+        if "temp" in target_exe.lower():
+            dest_exe = _installed_exe_path()
+            os.makedirs(os.path.dirname(dest_exe), exist_ok=True)
+            if os.path.abspath(dest_exe) != target_exe:
+                shutil.copy2(target_exe, dest_exe)
+            target_exe = dest_exe
+        target_path = target_exe
+        args = ""
+        workdir = os.path.dirname(target_exe)
+    else:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        vbs = os.path.join(script_dir, "start_hidden.vbs")
+        target_path = "wscript.exe"
+        args = f'"{vbs}"'
+        workdir = script_dir
+
+    ps_cmd = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        f"$s = $ws.CreateShortcut('{shortcut}'); "
+        f"$s.TargetPath = '{target_path}'; "
+        f"$s.Arguments = '{args}'; "
+        f"$s.WorkingDirectory = '{workdir}'; "
+        "$s.Save()"
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
+        creationflags=0x08000000,  # CREATE_NO_WINDOW
+        check=True,
+    )
+    return True, f"Installed auto-start shortcut for:\n{target_path}"
+
+
+def allow_windows_firewall() -> None:
+    cmd = (
+        'netsh advfirewall firewall delete rule name="GPT Remote PC TCP 58765" >nul 2>&1 & '
+        'netsh advfirewall firewall delete rule name="GPT Remote PC UDP 58766" >nul 2>&1 & '
+        'netsh advfirewall firewall add rule name="GPT Remote PC TCP 58765" dir=in action=allow protocol=TCP localport=58765 profile=any & '
+        'netsh advfirewall firewall add rule name="GPT Remote PC UDP 58766" dir=in action=allow protocol=UDP localport=58766 profile=any'
+    )
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f"/c {cmd}", None, 0)
+
+
+# ---- Windows System Tray UI (Zero Console Window) ----
+
+def run_windows_tray(backend: InputBackend, state: RemoteServerState, stop_event: threading.Event) -> None:
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    shell32 = ctypes.windll.shell32
+
+    LRESULT = ctypes.c_ssize_t
+    WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+    WM_DESTROY = 0x0002
+    WM_LBUTTONUP = 0x0202
+    WM_RBUTTONUP = 0x0205
+    WM_TRAY = 0x8001
+
+    NIM_ADD = 0x00000000
+    NIM_MODIFY = 0x00000001
+    NIM_DELETE = 0x00000002
+    NIF_MESSAGE = 0x00000001
+    NIF_ICON = 0x00000002
+    NIF_TIP = 0x00000004
+    NIF_INFO = 0x00000010
+    NIIF_INFO = 0x00000001
+
+    MF_STRING = 0x00000000
+    MF_CHECKED = 0x00000008
+    MF_GRAYED = 0x00000001
+    MF_SEPARATOR = 0x00000800
+    TPM_LEFTALIGN = 0x0000
+    TPM_BOTTOMALIGN = 0x0020
+    TPM_RETURNCMD = 0x0100
+
+    ID_SHOW_INFO = 1001
+    ID_AUTOSTART = 1002
+    ID_FIREWALL = 1003
+    ID_EXIT = 1004
+
+    class WNDCLASSEXW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.UINT),
+            ("style", wintypes.UINT),
+            ("lpfnWndProc", WNDPROC),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wintypes.HINSTANCE),
+            ("hIcon", wintypes.HICON),
+            ("hCursor", wintypes.HANDLE),
+            ("hbrBackground", wintypes.HBRUSH),
+            ("lpszMenuName", wintypes.LPCWSTR),
+            ("lpszClassName", wintypes.LPCWSTR),
+            ("hIconSm", wintypes.HICON),
+        ]
+
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    class NOTIFYICONDATAW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("hWnd", wintypes.HWND),
+            ("uID", wintypes.UINT),
+            ("uFlags", wintypes.UINT),
+            ("uCallbackMessage", wintypes.UINT),
+            ("hIcon", wintypes.HICON),
+            ("szTip", wintypes.WCHAR * 128),
+            ("dwState", wintypes.DWORD),
+            ("dwStateMask", wintypes.DWORD),
+            ("szInfo", wintypes.WCHAR * 256),
+            ("uVersion", wintypes.UINT),
+            ("szInfoTitle", wintypes.WCHAR * 64),
+            ("dwInfoFlags", wintypes.DWORD),
+            ("guidItem", GUID),
+            ("hBalloonIcon", wintypes.HICON),
+        ]
+
+    user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.DefWindowProcW.restype = LRESULT
+
+    hinstance = kernel32.GetModuleHandleW(None)
+    # Try nice computer/network icon from shell32.dll (index 15 = This PC / monitor), fallback to default app icon
+    hicon = shell32.ExtractIconW(hinstance, "shell32.dll", 15)
+    if not hicon or hicon == 1:
+        hicon = user32.LoadIconW(None, ctypes.cast(32512, wintypes.LPCWSTR))
+
+    hwnd_holder: dict[str, wintypes.HWND] = {}
+
+    def build_tip() -> str:
+        ips = get_local_ips()
+        ip_str = ips[0] if ips else "Check Wi-Fi"
+        return f"GPT Remote ({ip_str}) • Connected: {state.count()}"[:127]
+
+    def update_tray_tip() -> None:
+        hwnd = hwnd_holder.get("hwnd")
+        if not hwnd:
+            return
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        nid.hWnd = hwnd
+        nid.uID = 1
+        nid.uFlags = NIF_TIP
+        nid.szTip = build_tip()
+        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+
+    state.on_change = update_tray_tip
+
+    def show_info_popup() -> None:
+        ips = get_local_ips()
+        ip_text = ", ".join(ips) if ips else "Not connected to Wi-Fi"
+        msg = (
+            f"Computer Name: {socket.gethostname()}\n"
+            f"Wi-Fi IP: {ip_text}\n"
+            f"Port: {TCP_PORT} (UDP Discovery: {UDP_DISCOVERY_PORT})\n"
+            f"Connected Phones: {state.count()}\n\n"
+            "On your phone, open GPT Remote -> Wi-Fi PC -> Scan\n"
+            "or tap + and enter the Wi-Fi IP above."
+        )
+        user32.MessageBoxW(None, msg, "GPT Remote PC Companion", 0x00000040)
+
+    def show_tray_menu(hwnd: wintypes.HWND) -> None:
+        hmenu = user32.CreatePopupMenu()
+        ips = get_local_ips()
+        ip_label = ips[0] if ips else "No Wi-Fi IP"
+        user32.AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, f"IP: {ip_label}  (Port {TCP_PORT})")
+        user32.AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, f"Connected Phones: {state.count()}")
+        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(hmenu, MF_STRING, ID_SHOW_INFO, "Show Status && IP...")
+        autostart_flags = MF_STRING | (MF_CHECKED if is_autostart_enabled() else 0)
+        user32.AppendMenuW(hmenu, autostart_flags, ID_AUTOSTART, "Run at Windows Startup")
+        user32.AppendMenuW(hmenu, MF_STRING, ID_FIREWALL, "Allow Windows Firewall (Admin)")
+        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(hmenu, MF_STRING, ID_EXIT, "Exit")
+
+        pt = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        user32.SetForegroundWindow(hwnd)
+        cmd = user32.TrackPopupMenu(
+            hmenu,
+            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            None,
+        )
+        user32.DestroyMenu(hmenu)
+
+        if cmd == ID_SHOW_INFO:
+            threading.Thread(target=show_info_popup, daemon=True).start()
+        elif cmd == ID_AUTOSTART:
+            try:
+                _, info_msg = toggle_autostart()
+                threading.Thread(
+                    target=lambda: user32.MessageBoxW(None, info_msg, "GPT Remote Startup", 0x40),
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                err_msg = f"Failed to update startup shortcut: {exc}"
+                threading.Thread(
+                    target=lambda: user32.MessageBoxW(None, err_msg, "GPT Remote Error", 0x10),
+                    daemon=True,
+                ).start()
+        elif cmd == ID_FIREWALL:
+            allow_windows_firewall()
+        elif cmd == ID_EXIT:
+            stop_event.set()
+            user32.PostQuitMessage(0)
+
+    def wnd_proc(hwnd, msg, wparam, lparam):
+        if msg == WM_TRAY:
+            event = lparam & 0xFFFF
+            if event in (WM_LBUTTONUP, WM_RBUTTONUP):
+                show_tray_menu(hwnd)
+            return 0
+        if msg == WM_DESTROY:
+            stop_event.set()
+            user32.PostQuitMessage(0)
+            return 0
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    wnd_proc_cb = WNDPROC(wnd_proc)
+    class_name = "GptRemoteTrayWindow"
+
+    wc = WNDCLASSEXW()
+    wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+    wc.lpfnWndProc = wnd_proc_cb
+    wc.hInstance = hinstance
+    wc.hIcon = hicon
+    wc.lpszClassName = class_name
+    user32.RegisterClassExW(ctypes.byref(wc))
+
+    hwnd = user32.CreateWindowExW(
+        0, class_name, "GPT Remote", 0, 0, 0, 0, 0, None, None, hinstance, None
+    )
+    hwnd_holder["hwnd"] = hwnd
+
+    ips = get_local_ips()
+    ip_summary = ", ".join(ips) if ips else "Check Wi-Fi"
+
+    nid = NOTIFYICONDATAW()
+    nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+    nid.hWnd = hwnd
+    nid.uID = 1
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO
+    nid.uCallbackMessage = WM_TRAY
+    nid.hIcon = hicon
+    nid.szTip = build_tip()
+    nid.szInfoTitle = "GPT Remote Ready"
+    nid.szInfo = f"Running in System Tray • Wi-Fi IP: {ip_summary}"[:255]
+    nid.dwInfoFlags = NIIF_INFO
+    shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+
+    msg_struct = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg_struct), None, 0, 0) > 0:
+        user32.TranslateMessage(ctypes.byref(msg_struct))
+        user32.DispatchMessageW(ctypes.byref(msg_struct))
+
+    shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+
+
+def main() -> None:
+    backend = create_backend()
+    state = RemoteServerState()
+    stop_event = threading.Event()
+
+    threading.Thread(target=udp_discovery_loop, args=(stop_event,), daemon=True).start()
+    threading.Thread(target=tcp_server_loop, args=(backend, state, stop_event), daemon=True).start()
+
+    if platform.system() == "Windows":
+        run_windows_tray(backend, state, stop_event)
+    else:
+        ips = get_local_ips()
+        print(f"GPT Remote PC Companion running on '{socket.gethostname()}' ({platform.system()})")
+        print(f"Wi-Fi IP(s): {', '.join(ips) if ips else 'unknown'} | TCP {TCP_PORT} / UDP {UDP_DISCOVERY_PORT}")
+        try:
+            stop_event.wait()
+        except KeyboardInterrupt:
+            stop_event.set()
 
 
 if __name__ == "__main__":
