@@ -1,8 +1,10 @@
 package com.gptremote.mitv.ui
 
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.rounded.AcUnit
 import androidx.compose.material.icons.rounded.Air
 import androidx.compose.material.icons.rounded.Kitchen
 import androidx.compose.material.icons.rounded.Laptop
+import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.LocalLaundryService
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Settings
@@ -47,24 +50,37 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.gptremote.mitv.haptic.HapticStrength
 import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.ProductType
 import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.ui.components.SettingsSheet
+import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.ui.theme.ConnectedGreen
 import com.gptremote.mitv.ui.theme.MiOrange
 import com.gptremote.mitv.ui.theme.RemoteBg
@@ -81,11 +97,21 @@ fun HomeHubScreen(
     onOpenActiveRemote: () -> Unit,
     onDisconnect: () -> Unit,
     onSelectHapticStrength: (HapticStrength) -> Unit,
-    onToggleBluetoothPcProfile: (Boolean) -> Unit,
+    onToggleSound: (Boolean) -> Unit,
+    onSelectAccentTheme: (AppAccentTheme) -> Unit,
     onClearBanner: () -> Unit
 ) {
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val snackbarHostState = remember { SnackbarHostState() }
     var showSettings by remember { mutableStateOf(false) }
+
+    var productOrder by remember { mutableStateOf(loadProductOrder(context)) }
+    val itemBounds = remember { mutableStateMapOf<ProductType, Rect>() }
+    var draggedProduct by remember { mutableStateOf<ProductType?>(null) }
+    var pointerRoot by remember { mutableStateOf(Offset.Zero) }
+    var touchAnchorInItem by remember { mutableStateOf(Offset.Zero) }
+    var lastSwapMs by remember { mutableLongStateOf(0L) }
 
     val statusError = (uiState.status as? ConnectionStatus.Error)?.message
     val bannerMessage = uiState.lastStatusBanner ?: statusError
@@ -99,9 +125,11 @@ fun HomeHubScreen(
     if (showSettings) {
         SettingsSheet(
             hapticStrength = uiState.hapticStrength,
-            bluetoothPcProfile = uiState.bluetoothPcProfile,
+            soundEnabled = uiState.soundEnabled,
+            accentTheme = uiState.accentTheme,
             onSelectHapticStrength = onSelectHapticStrength,
-            onToggleBluetoothPcProfile = onToggleBluetoothPcProfile,
+            onToggleSound = onToggleSound,
+            onSelectAccentTheme = onSelectAccentTheme,
             onDismiss = { showSettings = false }
         )
     }
@@ -136,8 +164,12 @@ fun HomeHubScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Choose a product to control",
-                            color = TextSecondary,
+                            text = if (draggedProduct != null) {
+                                "Drag to place card anywhere"
+                            } else {
+                                "Tap a device • Hold & drag to reorder"
+                            },
+                            color = if (draggedProduct != null) MiOrange else TextSecondary,
                             fontSize = 13.sp
                         )
                     }
@@ -208,9 +240,69 @@ fun HomeHubScreen(
                 }
             }
 
-            items(ProductType.entries, key = { it.name }) { product ->
+            items(productOrder, key = { it.name }) { product ->
+                val isDragged = draggedProduct == product
+                val currentRect = itemBounds[product]
+                val delta = if (isDragged && currentRect != null) {
+                    pointerRoot - currentRect.topLeft - touchAnchorInItem
+                } else {
+                    Offset.Zero
+                }
+
                 ProductCard(
                     product = product,
+                    isDragged = isDragged,
+                    modifier = Modifier
+                        .zIndex(if (isDragged) 10f else 0f)
+                        .graphicsLayer {
+                            translationX = delta.x
+                            translationY = delta.y
+                            scaleX = if (isDragged) 1.05f else 1f
+                            scaleY = if (isDragged) 1.05f else 1f
+                        }
+                        .onGloballyPositioned { coords ->
+                            itemBounds[product] = coords.boundsInRoot()
+                        }
+                        .pointerInput(product) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { startOffset ->
+                                    val rect = itemBounds[product] ?: return@detectDragGesturesAfterLongPress
+                                    draggedProduct = product
+                                    touchAnchorInItem = startOffset
+                                    pointerRoot = rect.topLeft + startOffset
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                onDrag = { change, dragAmount ->
+                                    change.consume()
+                                    pointerRoot += dragAmount
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastSwapMs >= 140L) {
+                                        val hit = itemBounds.entries.firstOrNull { (other, rect) ->
+                                            other != product && rect.contains(pointerRoot)
+                                        }?.key
+                                        if (hit != null) {
+                                            val fromIdx = productOrder.indexOf(product)
+                                            val toIdx = productOrder.indexOf(hit)
+                                            if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
+                                                val mutable = productOrder.toMutableList()
+                                                mutable.add(toIdx, mutable.removeAt(fromIdx))
+                                                productOrder = mutable
+                                                lastSwapMs = now
+                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            }
+                                        }
+                                    }
+                                },
+                                onDragEnd = {
+                                    draggedProduct = null
+                                    saveProductOrder(context, productOrder)
+                                },
+                                onDragCancel = {
+                                    draggedProduct = null
+                                    saveProductOrder(context, productOrder)
+                                }
+                            )
+                        },
                     onClick = { onSelectProduct(product) }
                 )
             }
@@ -221,17 +313,24 @@ fun HomeHubScreen(
 @Composable
 private fun ProductCard(
     product: ProductType,
+    isDragged: Boolean,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     val (icon, accent) = productVisuals(product)
+    val activeAccent = MiOrange
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .height(132.dp)
             .clip(RoundedCornerShape(22.dp))
             .background(RemoteSurfaceElevated)
-            .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
+            .border(
+                width = if (isDragged) 2.dp else 1.dp,
+                color = if (isDragged) activeAccent else RemoteBorder,
+                shape = RoundedCornerShape(22.dp)
+            )
             .clickable(onClick = onClick)
             .padding(16.dp),
         verticalArrangement = Arrangement.SpaceBetween
@@ -271,6 +370,7 @@ private fun ProductCard(
     }
 }
 
+@Composable
 fun productVisuals(product: ProductType): Pair<ImageVector, Color> = when (product) {
     ProductType.SMART_TV -> Icons.Rounded.Tv to MiOrange
     ProductType.PC_LAPTOP -> Icons.Rounded.Laptop to WifiBlue
@@ -281,4 +381,28 @@ fun productVisuals(product: ProductType): Pair<ImageVector, Color> = when (produ
     ProductType.SOUNDBAR -> Icons.Rounded.Speaker to Color(0xFFF472B6)
     ProductType.PROJECTOR -> Icons.Rounded.Videocam to Color(0xFFFB923C)
     ProductType.CEILING_FAN -> Icons.Rounded.Air to Color(0xFF2DD4BF)
+    ProductType.SMART_BULB -> Icons.Rounded.Lightbulb to Color(0xFFFDE047)
+}
+
+private const val PRODUCT_ORDER_PREFS = "gpt_product_order"
+private const val KEY_ORDER = "order_csv"
+
+private fun loadProductOrder(context: Context): List<ProductType> {
+    val prefs = context.applicationContext.getSharedPreferences(PRODUCT_ORDER_PREFS, Context.MODE_PRIVATE)
+    val saved = prefs.getString(KEY_ORDER, null)
+    val all = ProductType.entries.toList()
+    if (saved.isNullOrBlank()) return all
+    val ordered = saved.split(',')
+        .mapNotNull { name -> all.firstOrNull { it.name == name } }
+        .distinct()
+        .toMutableList()
+    all.forEach { if (it !in ordered) ordered.add(it) }
+    return ordered
+}
+
+private fun saveProductOrder(context: Context, order: List<ProductType>) {
+    context.applicationContext.getSharedPreferences(PRODUCT_ORDER_PREFS, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_ORDER, order.joinToString(",") { it.name })
+        .apply()
 }

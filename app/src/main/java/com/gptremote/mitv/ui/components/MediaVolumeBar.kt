@@ -2,20 +2,22 @@ package com.gptremote.mitv.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
-import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
@@ -32,15 +34,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -51,116 +55,102 @@ import com.gptremote.mitv.ui.theme.RemoteSurface
 import com.gptremote.mitv.ui.theme.RemoteSurfaceElevated
 import com.gptremote.mitv.ui.theme.TextPrimary
 import com.gptremote.mitv.ui.theme.TextSecondary
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlin.math.abs
 
+/**
+ * Vertical slide/tap Volume & Channel rockers with Mute in the center, plus optional Media bar.
+ */
 @Composable
 fun MediaVolumeBar(
     onButtonPress: (RemoteButton) -> Unit,
+    showChannelRocker: Boolean = true,
+    showMediaRow: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    val haptic = LocalHapticFeedback.current
-
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Volume + Mute + Channel rockers
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Volume Rocker
-            RockerPill(
-                label = "VOL",
-                upIcon = Icons.Rounded.Add,
-                downIcon = Icons.Rounded.Remove,
-                onUp = {
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onButtonPress(RemoteButton.VOLUME_UP)
-                },
-                onDown = {
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onButtonPress(RemoteButton.VOLUME_DOWN)
-                },
-                modifier = Modifier.weight(1f)
-            )
-
-            // Center Mute button
-            FilledTonalIconButton(
-                onClick = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onButtonPress(RemoteButton.MUTE)
-                },
-                modifier = Modifier.size(56.dp),
-                shape = CircleShape,
-                colors = IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = RemoteSurfaceElevated,
-                    contentColor = TextPrimary
-                )
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.VolumeOff,
-                    contentDescription = "Mute"
-                )
-            }
-
-            // Channel Rocker
-            RockerPill(
-                label = "CH",
-                upIcon = Icons.Rounded.KeyboardArrowUp,
-                downIcon = Icons.Rounded.KeyboardArrowDown,
-                onUp = {
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onButtonPress(RemoteButton.CHANNEL_UP)
-                },
-                onDown = {
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onButtonPress(RemoteButton.CHANNEL_DOWN)
-                },
-                modifier = Modifier.weight(1f)
-            )
-        }
-
-        // Media Playback Controls
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
-                .background(RemoteSurface)
-                .border(1.dp, RemoteBorder, RoundedCornerShape(18.dp))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+                .height(148.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            MediaButton(
-                icon = Icons.Rounded.SkipPrevious,
-                description = "Previous",
-                onClick = { onButtonPress(RemoteButton.MEDIA_PREVIOUS) }
+            VerticalSlideRocker(
+                label = "VOL",
+                upIcon = Icons.Rounded.Add,
+                downIcon = Icons.Rounded.Remove,
+                onUp = { onButtonPress(RemoteButton.VOLUME_UP) },
+                onDown = { onButtonPress(RemoteButton.VOLUME_DOWN) },
+                modifier = if (showChannelRocker) Modifier.weight(1f) else Modifier.width(120.dp)
             )
-            MediaButton(
-                icon = Icons.Rounded.PlayArrow,
-                description = "Play / Pause",
-                tint = MiOrange,
-                onClick = { onButtonPress(RemoteButton.MEDIA_PLAY_PAUSE) }
-            )
-            MediaButton(
-                icon = Icons.Rounded.Stop,
-                description = "Stop",
-                onClick = { onButtonPress(RemoteButton.MEDIA_STOP) }
-            )
-            MediaButton(
-                icon = Icons.Rounded.SkipNext,
-                description = "Next",
-                onClick = { onButtonPress(RemoteButton.MEDIA_NEXT) }
-            )
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                FilledTonalIconButton(
+                    onClick = { onButtonPress(RemoteButton.MUTE) },
+                    modifier = Modifier.size(62.dp),
+                    shape = CircleShape,
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = RemoteSurfaceElevated,
+                        contentColor = TextPrimary
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.VolumeOff,
+                        contentDescription = "Mute",
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+                Text("MUTE", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+
+            if (showChannelRocker) {
+                VerticalSlideRocker(
+                    label = "CH",
+                    upIcon = Icons.Rounded.KeyboardArrowUp,
+                    downIcon = Icons.Rounded.KeyboardArrowDown,
+                    onUp = { onButtonPress(RemoteButton.CHANNEL_UP) },
+                    onDown = { onButtonPress(RemoteButton.CHANNEL_DOWN) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        if (showMediaRow) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(RemoteSurface)
+                    .border(1.dp, RemoteBorder, RoundedCornerShape(20.dp))
+                    .padding(vertical = 8.dp, horizontal = 10.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MediaTransportIcon(Icons.Rounded.SkipPrevious, "Previous") {
+                    onButtonPress(RemoteButton.MEDIA_PREVIOUS)
+                }
+                MediaTransportIcon(Icons.Rounded.PlayArrow, "Play / Pause", accent = true) {
+                    onButtonPress(RemoteButton.MEDIA_PLAY_PAUSE)
+                }
+                MediaTransportIcon(Icons.Rounded.Stop, "Stop") {
+                    onButtonPress(RemoteButton.MEDIA_STOP)
+                }
+                MediaTransportIcon(Icons.Rounded.SkipNext, "Next") {
+                    onButtonPress(RemoteButton.MEDIA_NEXT)
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun RockerPill(
+private fun VerticalSlideRocker(
     label: String,
     upIcon: ImageVector,
     downIcon: ImageVector,
@@ -168,88 +158,118 @@ private fun RockerPill(
     onDown: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(
-        modifier = modifier
-            .height(54.dp)
-            .clip(RoundedCornerShape(27.dp))
-            .background(RemoteSurfaceElevated)
-            .border(1.dp, RemoteBorder, RoundedCornerShape(27.dp))
-            .padding(horizontal = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        RepeatableSmallButton(icon = downIcon, description = "$label Down", onTrigger = onDown)
-        Text(
-            text = label,
-            color = TextSecondary,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 1.sp
-        )
-        RepeatableSmallButton(icon = upIcon, description = "$label Up", onTrigger = onUp)
-    }
-}
-
-@Composable
-private fun RepeatableSmallButton(
-    icon: ImageVector,
-    description: String,
-    onTrigger: () -> Unit
-) {
-    val scope = rememberCoroutineScope()
-    var pressed by remember { mutableStateOf(false) }
+    val latestOnUp by rememberUpdatedState(onUp)
+    val latestOnDown by rememberUpdatedState(onDown)
+    var activeHalf by remember { mutableStateOf(0) } // 1 = up, -1 = down, 0 = idle
+    var boxHeightPx by remember { mutableStateOf(1) }
+    val accent = MiOrange
 
     Box(
-        modifier = Modifier
-            .size(40.dp)
-            .clip(CircleShape)
-            .background(if (pressed) MiOrange.copy(alpha = 0.25f) else RemoteSurface.copy(alpha = 0.5f))
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        pressed = true
-                        onTrigger()
-                        val job = scope.launch {
-                            delay(340)
-                            while (pressed) {
-                                onTrigger()
-                                delay(120)
-                            }
-                        }
-                        tryAwaitRelease()
-                        pressed = false
-                        job.cancel()
-                    }
+        modifier = modifier
+            .fillMaxHeight()
+            .onSizeChanged { boxHeightPx = it.height.coerceAtLeast(1) }
+            .clip(RoundedCornerShape(26.dp))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(RemoteSurfaceElevated, RemoteSurface)
                 )
-            },
+            )
+            .border(
+                width = 1.5.dp,
+                color = if (activeHalf != 0) accent.copy(alpha = 0.8f) else RemoteBorder,
+                shape = RoundedCornerShape(26.dp)
+            )
+            .pointerInput(Unit) {
+                val slop = viewConfiguration.touchSlop
+                val stepPx = 28f
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+
+                    val downY = down.position.y
+                    var accumY = 0f
+                    var totalTravel = 0f
+                    var didSlide = false
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.pressed }
+                        if (change == null) {
+                            if (!didSlide && totalTravel <= slop * 1.4f) {
+                                if (downY < boxHeightPx / 2f) {
+                                    latestOnUp()
+                                } else {
+                                    latestOnDown()
+                                }
+                            }
+                            activeHalf = 0
+                            break
+                        }
+                        val dy = change.positionChange().y
+                        change.consume()
+                        totalTravel += abs(dy)
+                        accumY += dy
+                        if (abs(accumY) >= stepPx) {
+                            didSlide = true
+                            if (accumY < 0f) {
+                                activeHalf = 1
+                                latestOnUp()
+                            } else {
+                                activeHalf = -1
+                                latestOnDown()
+                            }
+                            accumY = 0f
+                        }
+                    }
+                }
+            }
+            .padding(vertical = 12.dp),
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = description,
-            tint = if (pressed) MiOrange else TextPrimary
-        )
+        Column(
+            modifier = Modifier.fillMaxHeight(),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(
+                imageVector = upIcon,
+                contentDescription = "$label Up",
+                tint = if (activeHalf == 1) accent else TextPrimary,
+                modifier = Modifier.size(26.dp)
+            )
+            Text(
+                text = label,
+                color = TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Icon(
+                imageVector = downIcon,
+                contentDescription = "$label Down",
+                tint = if (activeHalf == -1) accent else TextPrimary,
+                modifier = Modifier.size(26.dp)
+            )
+        }
     }
 }
 
 @Composable
-private fun MediaButton(
+private fun MediaTransportIcon(
     icon: ImageVector,
     description: String,
-    tint: androidx.compose.ui.graphics.Color = TextPrimary,
+    accent: Boolean = false,
     onClick: () -> Unit
 ) {
-    val haptic = LocalHapticFeedback.current
+    val accentColor = MiOrange
     FilledTonalIconButton(
-        onClick = {
-            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            onClick()
-        },
+        onClick = onClick,
+        modifier = Modifier.size(48.dp),
+        shape = CircleShape,
         colors = IconButtonDefaults.filledTonalIconButtonColors(
-            containerColor = RemoteSurfaceElevated,
-            contentColor = tint
+            containerColor = if (accent) accentColor else RemoteSurfaceElevated,
+            contentColor = if (accent) Color.White else TextPrimary
         )
     ) {
-        Icon(imageVector = icon, contentDescription = description)
+        Icon(imageVector = icon, contentDescription = description, modifier = Modifier.size(22.dp))
     }
 }

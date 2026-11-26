@@ -19,9 +19,14 @@ import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.model.SavedDevice
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
+import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.wifi.AndroidTvNsdDiscovery
+import com.gptremote.mitv.wifi.DiscoveredSmartBulb
 import com.gptremote.mitv.wifi.ScreenCastService
 import com.gptremote.mitv.wifi.SharedPcFile
+import com.gptremote.mitv.wifi.SmartBulbClient
+import com.gptremote.mitv.wifi.SmartTvProtocol
+import com.gptremote.mitv.wifi.SmartTvWebSocketClient
 import com.gptremote.mitv.wifi.TvCertificateManager
 import com.gptremote.mitv.wifi.WifiPcRemoteClient
 import com.gptremote.mitv.wifi.WifiTvRemoteClient
@@ -37,13 +42,15 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 
 /**
- * Coordinates Bluetooth HID, Wi-Fi Android TV Remote v2, Wi-Fi PC Companion (control,
- * live screen mirror/cast, two-way file sharing), built-in IR Blaster, and vibration haptics.
+ * Coordinates Bluetooth HID, Wi-Fi Android TV Remote v2, Samsung Tizen & LG webOS Wi-Fi TVs,
+ * Wi-Fi PC Companion (control, live screen mirror/cast, two-way file sharing), Smart Bulbs,
+ * built-in IR Blaster, vibration haptics, button sound, and app theme.
  */
 class RemoteRepository(context: Context) {
 
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val settingsPrefs = appContext.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
 
     val bluetoothHid = BluetoothHidManager(appContext)
     val haptics = HapticManager(appContext)
@@ -53,18 +60,23 @@ class RemoteRepository(context: Context) {
     private val certManager = TvCertificateManager(appContext)
     private val wifiDiscovery = AndroidTvNsdDiscovery(appContext, certManager)
     private val wifiTvClient = WifiTvRemoteClient(certManager)
+    private val smartTvWsClient = SmartTvWebSocketClient(appContext)
     private val wifiPcClient = WifiPcRemoteClient()
+    private val smartBulbClient = SmartBulbClient()
 
     private val activeTransport = MutableStateFlow(TransportMode.BLUETOOTH_HID)
     private val selectedBrand = MutableStateFlow<BrandOption?>(null)
     private val irActive = MutableStateFlow(false)
     private val hapticStrengthFlow = MutableStateFlow(haptics.strength)
+    private val soundEnabledFlow = MutableStateFlow(haptics.soundEnabled)
+    private val accentThemeFlow = MutableStateFlow(loadAccentTheme())
     private val statusBanner = MutableStateFlow<String?>(null)
 
     private data class CoreFlows(
         val transport: TransportMode,
         val btStatus: ConnectionStatus,
         val wifiTvStatus: ConnectionStatus,
+        val smartTvWsStatus: ConnectionStatus,
         val wifiPcStatus: ConnectionStatus,
         val btEnabled: Boolean,
         val btRegistered: Boolean,
@@ -75,7 +87,10 @@ class RemoteRepository(context: Context) {
         val btDevices: List<TvDevice.BluetoothTv>,
         val wifiTvDevices: List<TvDevice.WifiTv>,
         val wifiPcDevices: List<TvDevice.WifiPc>,
-        val savedDevices: List<SavedDevice>
+        val savedDevices: List<SavedDevice>,
+        val bulbs: List<DiscoveredSmartBulb>,
+        val isScanningBulbs: Boolean,
+        val connectedBulb: DiscoveredSmartBulb?
     )
 
     private data class FlagsFlows(
@@ -83,6 +98,8 @@ class RemoteRepository(context: Context) {
         val wifiTvScanning: Boolean,
         val wifiPcScanning: Boolean,
         val hapticStrength: HapticStrength,
+        val soundEnabled: Boolean,
+        val accentTheme: AppAccentTheme,
         val banner: String?,
         val brand: BrandOption?,
         val irEnabled: Boolean
@@ -100,6 +117,7 @@ class RemoteRepository(context: Context) {
         activeTransport,
         bluetoothHid.connectionStatus,
         wifiTvClient.connectionStatus,
+        smartTvWsClient.connectionStatus,
         wifiPcClient.connectionStatus,
         bluetoothHid.isBluetoothEnabled,
         bluetoothHid.isAppRegistered,
@@ -109,10 +127,11 @@ class RemoteRepository(context: Context) {
             transport = values[0] as TransportMode,
             btStatus = values[1] as ConnectionStatus,
             wifiTvStatus = values[2] as ConnectionStatus,
-            wifiPcStatus = values[3] as ConnectionStatus,
-            btEnabled = values[4] as Boolean,
-            btRegistered = values[5] as Boolean,
-            btPcProfile = values[6] as Boolean
+            smartTvWsStatus = values[3] as ConnectionStatus,
+            wifiPcStatus = values[4] as ConnectionStatus,
+            btEnabled = values[5] as Boolean,
+            btRegistered = values[6] as Boolean,
+            btPcProfile = values[7] as Boolean
         )
     }
 
@@ -120,9 +139,21 @@ class RemoteRepository(context: Context) {
         bluetoothHid.devices,
         wifiDiscovery.devices,
         wifiPcClient.discoveredPcs,
-        savedStore.devices
-    ) { bt, wifiTv, wifiPc, saved ->
-        DiscoveryFlows(bt, wifiTv, wifiPc, saved)
+        savedStore.devices,
+        smartBulbClient.bulbs,
+        smartBulbClient.isScanning,
+        smartBulbClient.connectedBulb
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        DiscoveryFlows(
+            btDevices = values[0] as List<TvDevice.BluetoothTv>,
+            wifiTvDevices = values[1] as List<TvDevice.WifiTv>,
+            wifiPcDevices = values[2] as List<TvDevice.WifiPc>,
+            savedDevices = values[3] as List<SavedDevice>,
+            bulbs = values[4] as List<DiscoveredSmartBulb>,
+            isScanningBulbs = values[5] as Boolean,
+            connectedBulb = values[6] as DiscoveredSmartBulb?
+        )
     }
 
     private val flagsFlows = combine(
@@ -130,6 +161,8 @@ class RemoteRepository(context: Context) {
         wifiDiscovery.isScanning,
         wifiPcClient.isScanning,
         hapticStrengthFlow,
+        soundEnabledFlow,
+        accentThemeFlow,
         statusBanner,
         selectedBrand,
         irActive
@@ -139,9 +172,11 @@ class RemoteRepository(context: Context) {
             wifiTvScanning = values[1] as Boolean,
             wifiPcScanning = values[2] as Boolean,
             hapticStrength = values[3] as HapticStrength,
-            banner = values[4] as String?,
-            brand = values[5] as BrandOption?,
-            irEnabled = values[6] as Boolean
+            soundEnabled = values[4] as Boolean,
+            accentTheme = values[5] as AppAccentTheme,
+            banner = values[6] as String?,
+            brand = values[7] as BrandOption?,
+            irEnabled = values[8] as Boolean
         )
     }
 
@@ -164,9 +199,16 @@ class RemoteRepository(context: Context) {
         val effectiveStatus = when {
             core.btStatus is ConnectionStatus.Connected -> core.btStatus
             core.wifiTvStatus is ConnectionStatus.Connected -> core.wifiTvStatus
+            core.smartTvWsStatus is ConnectionStatus.Connected -> core.smartTvWsStatus
             core.wifiPcStatus is ConnectionStatus.Connected -> core.wifiPcStatus
             core.transport == TransportMode.BLUETOOTH_HID -> core.btStatus
-            core.transport == TransportMode.WIFI_ANDROID_TV -> core.wifiTvStatus
+            core.transport == TransportMode.WIFI_ANDROID_TV -> {
+                if (core.smartTvWsStatus !is ConnectionStatus.Disconnected) {
+                    core.smartTvWsStatus
+                } else {
+                    core.wifiTvStatus
+                }
+            }
             else -> core.wifiPcStatus
         }
 
@@ -195,6 +237,8 @@ class RemoteRepository(context: Context) {
             wifiPcDevices = disc.wifiPcDevices,
             savedDevices = disc.savedDevices,
             hapticStrength = flags.hapticStrength,
+            soundEnabled = flags.soundEnabled,
+            accentTheme = flags.accentTheme,
             isScanningBluetooth = flags.btScanning,
             isScanningWifi = flags.wifiTvScanning,
             isScanningWifiPc = flags.wifiPcScanning,
@@ -203,6 +247,9 @@ class RemoteRepository(context: Context) {
             isCastingPhoneScreen = media.isCastingPhone,
             sharedPcFiles = media.files,
             isTransferringFile = media.isTransferring,
+            smartBulbs = disc.bulbs,
+            isScanningBulbs = disc.isScanningBulbs,
+            connectedBulb = disc.connectedBulb,
             lastStatusBanner = flags.banner
         )
     }.stateIn(
@@ -210,7 +257,9 @@ class RemoteRepository(context: Context) {
         started = SharingStarted.Eagerly,
         initialValue = RemoteUiState(
             hasIrEmitter = irBlaster.hasIrEmitter,
-            hapticStrength = haptics.strength
+            hapticStrength = haptics.strength,
+            soundEnabled = haptics.soundEnabled,
+            accentTheme = accentThemeFlow.value
         )
     )
 
@@ -228,19 +277,16 @@ class RemoteRepository(context: Context) {
 
     fun selectProductBrand(brand: BrandOption) {
         selectedBrand.value = brand
+        statusBanner.value = null
         val isPc = brand.productType == ProductType.PC_LAPTOP
-        bluetoothHid.setPcProfile(isPc)
-        if (!isPc && !brand.supportsBluetoothHidOnly() && irBlaster.hasIrEmitter) {
+        if (brand.productType.supportsBluetoothHid) {
+            if (bluetoothHid.isPcProfile.value != isPc) {
+                bluetoothHid.setPcProfile(isPc)
+            }
+        } else if (irBlaster.hasIrEmitter) {
             irActive.value = true
         }
     }
-
-    private fun BrandOption.supportsBluetoothHidOnly(): Boolean =
-        productType == ProductType.SMART_TV ||
-            productType == ProductType.PC_LAPTOP ||
-            productType == ProductType.SET_TOP_BOX ||
-            productType == ProductType.SOUNDBAR ||
-            productType == ProductType.PROJECTOR
 
     fun setIrMode(enabled: Boolean) {
         if (enabled && !irBlaster.hasIrEmitter) {
@@ -262,6 +308,18 @@ class RemoteRepository(context: Context) {
         }
     }
 
+    fun setSoundEnabled(enabled: Boolean) {
+        haptics.soundEnabled = enabled
+        soundEnabledFlow.value = enabled
+        if (enabled) haptics.click()
+    }
+
+    fun setAccentTheme(theme: AppAccentTheme) {
+        accentThemeFlow.value = theme
+        settingsPrefs.edit().putString(KEY_ACCENT_THEME, theme.name).apply()
+        haptics.click()
+    }
+
     fun setBluetoothPcProfile(enabled: Boolean) = bluetoothHid.setPcProfile(enabled)
 
     fun startBluetoothScan() {
@@ -277,6 +335,7 @@ class RemoteRepository(context: Context) {
 
     fun connectBluetooth(device: TvDevice.BluetoothTv) {
         wifiTvClient.disconnect()
+        smartTvWsClient.disconnect()
         wifiPcClient.disconnect()
         irActive.value = false
         activeTransport.value = TransportMode.BLUETOOTH_HID
@@ -298,18 +357,90 @@ class RemoteRepository(context: Context) {
         wifiPcClient.startDiscovery()
     }
 
+    fun startBulbScan() {
+        smartBulbClient.discoverBulbs()
+    }
+
+    fun selectBulb(bulb: DiscoveredSmartBulb) {
+        haptics.click()
+        smartBulbClient.selectBulb(bulb)
+        statusBanner.value = "Connected to ${bulb.name}"
+    }
+
+    fun connectManualBulb(host: String) {
+        val clean = host.trim()
+        if (clean.isEmpty()) return
+        haptics.click()
+        smartBulbClient.selectManualBulb(clean, selectedBrand.value?.id ?: "bulb_wiz")
+        statusBanner.value = "Bulb ready at $clean"
+    }
+
+    fun setBulbState(
+        power: Boolean? = null,
+        brightness: Int? = null,
+        rgb: Triple<Int, Int, Int>? = null,
+        tempKelvin: Int? = null,
+        irFallbackAction: String? = null
+    ) {
+        haptics.click()
+        if (smartBulbClient.connectedBulb.value != null) {
+            smartBulbClient.setState(
+                power = power,
+                brightness = brightness,
+                rgb = rgb,
+                tempKelvin = tempKelvin,
+                onError = { err -> statusBanner.value = err }
+            )
+            return
+        }
+        val brand = selectedBrand.value
+        if (brand != null && irBlaster.hasIrEmitter && irFallbackAction != null) {
+            irBlaster.sendApplianceCommand(brand, irFallbackAction)
+        } else {
+            statusBanner.value = "Tap Connect at top to add your Wi-Fi Smart Bulb IP."
+        }
+    }
+
     fun connectWifi(device: TvDevice.WifiTv, forcePair: Boolean = false) {
         bluetoothHid.disconnect()
         wifiPcClient.disconnect()
         irActive.value = false
         activeTransport.value = TransportMode.WIFI_ANDROID_TV
         wifiDiscovery.stopDiscovery()
-        wifiTvClient.connect(device, forcePair)
+        when (device.port) {
+            8001, 8002 -> {
+                wifiTvClient.disconnect()
+                smartTvWsClient.connect(device.host, device.name, SmartTvProtocol.SAMSUNG_TIZEN)
+            }
+            3000, 3001 -> {
+                wifiTvClient.disconnect()
+                smartTvWsClient.connect(device.host, device.name, SmartTvProtocol.LG_WEBOS)
+            }
+            else -> {
+                smartTvWsClient.disconnect()
+                wifiTvClient.connect(device, forcePair)
+            }
+        }
+    }
+
+    fun connectSmartTvWifi(host: String, name: String, protocol: SmartTvProtocol) {
+        val cleanHost = host.trim()
+        if (cleanHost.isEmpty()) return
+        bluetoothHid.disconnect()
+        wifiTvClient.disconnect()
+        wifiPcClient.disconnect()
+        irActive.value = false
+        activeTransport.value = TransportMode.WIFI_ANDROID_TV
+        val label = name.trim().ifEmpty {
+            if (protocol == SmartTvProtocol.SAMSUNG_TIZEN) "Samsung TV ($cleanHost)" else "LG TV ($cleanHost)"
+        }
+        smartTvWsClient.connect(cleanHost, label, protocol)
     }
 
     fun connectWifiPc(device: TvDevice.WifiPc) {
         bluetoothHid.disconnect()
         wifiTvClient.disconnect()
+        smartTvWsClient.disconnect()
         irActive.value = false
         activeTransport.value = TransportMode.WIFI_PC
         wifiPcClient.stopDiscovery()
@@ -319,26 +450,35 @@ class RemoteRepository(context: Context) {
     fun addAndConnectManualWifi(host: String, nickname: String, category: DeviceCategory) {
         val cleanHost = host.trim()
         if (cleanHost.isEmpty()) return
-        val name = nickname.trim().ifEmpty {
-            if (category == DeviceCategory.LAPTOP_PC) "PC ($cleanHost)" else "Smart TV ($cleanHost)"
-        }
-        if (category == DeviceCategory.LAPTOP_PC) {
-            connectWifiPc(
-                TvDevice.WifiPc(
-                    id = "$cleanHost:${WifiPcRemoteClient.DEFAULT_PORT}",
-                    name = name,
-                    host = cleanHost
+        val brandId = selectedBrand.value?.id
+        when {
+            category == DeviceCategory.LAPTOP_PC -> {
+                val name = nickname.trim().ifEmpty { "PC ($cleanHost)" }
+                connectWifiPc(
+                    TvDevice.WifiPc(
+                        id = "$cleanHost:${WifiPcRemoteClient.DEFAULT_PORT}",
+                        name = name,
+                        host = cleanHost
+                    )
                 )
-            )
-        } else {
-            connectWifi(
-                TvDevice.WifiTv(
-                    id = "$cleanHost:6466",
-                    name = name,
-                    host = cleanHost,
-                    isPaired = certManager.isHostPaired(cleanHost)
+            }
+            brandId == "tv_samsung" -> {
+                connectSmartTvWifi(cleanHost, nickname.ifBlank { "Samsung Smart TV" }, SmartTvProtocol.SAMSUNG_TIZEN)
+            }
+            brandId == "tv_lg" -> {
+                connectSmartTvWifi(cleanHost, nickname.ifBlank { "LG webOS TV" }, SmartTvProtocol.LG_WEBOS)
+            }
+            else -> {
+                val name = nickname.trim().ifEmpty { "Smart TV ($cleanHost)" }
+                connectWifi(
+                    TvDevice.WifiTv(
+                        id = "$cleanHost:6466",
+                        name = name,
+                        host = cleanHost,
+                        isPaired = certManager.isHostPaired(cleanHost)
+                    )
                 )
-            )
+            }
         }
     }
 
@@ -348,7 +488,9 @@ class RemoteRepository(context: Context) {
         ScreenCastService.stop(appContext)
         bluetoothHid.disconnect()
         wifiTvClient.disconnect()
+        smartTvWsClient.disconnect()
         wifiPcClient.disconnect()
+        smartBulbClient.disconnect()
         irActive.value = false
     }
 
@@ -395,6 +537,12 @@ class RemoteRepository(context: Context) {
     fun sendButton(button: RemoteButton, strongHaptic: Boolean = false) {
         if (strongHaptic) haptics.heavyClick() else haptics.click()
 
+        if (smartTvWsClient.connectionStatus.value is ConnectionStatus.Connected) {
+            smartTvWsClient.sendButton(button)
+            statusBanner.value = null
+            return
+        }
+
         when (val current = uiState.value.status) {
             is ConnectionStatus.Connected -> {
                 when (current.device.transport) {
@@ -421,13 +569,27 @@ class RemoteRepository(context: Context) {
         val brand = selectedBrand.value
         if (brand != null && irBlaster.hasIrEmitter) {
             irBlaster.sendApplianceCommand(brand, actionKey)
+        } else if (uiState.value.status is ConnectionStatus.Connected) {
+            val mapped = when (actionKey) {
+                "power" -> RemoteButton.POWER
+                "speed_up", "temp_up" -> RemoteButton.VOLUME_UP
+                "speed_down", "temp_down" -> RemoteButton.VOLUME_DOWN
+                "mode", "cycle" -> RemoteButton.MENU
+                "start_pause" -> RemoteButton.MEDIA_PLAY_PAUSE
+                else -> null
+            }
+            mapped?.let { sendButton(it) }
         } else {
-            statusBanner.value = "Phone has no built-in IR Blaster to transmit to ${brand?.name ?: "this appliance"}."
+            statusBanner.value = "Use a phone with IR Blaster or connect via Wi-Fi / BT."
         }
     }
 
     fun launchApp(app: LaunchableApp) {
         haptics.heavyClick()
+        if (smartTvWsClient.connectionStatus.value is ConnectionStatus.Connected) {
+            smartTvWsClient.launchApp(app.id)
+            return
+        }
         when (val current = uiState.value.status) {
             is ConnectionStatus.Connected -> {
                 when (current.device.transport) {
@@ -439,7 +601,7 @@ class RemoteRepository(context: Context) {
                         ) {
                             app.pcFallbackCommand?.let { bluetoothHid.launchPcApp(it) }
                         } else {
-                            statusBanner.value = "Direct TV app launch requires Wi-Fi Android TV connection."
+                            bluetoothHid.launchTvAppViaSearch(app.name)
                         }
                     }
                 }
@@ -451,6 +613,10 @@ class RemoteRepository(context: Context) {
     fun sendText(text: String) {
         if (text.isEmpty()) return
         haptics.tick()
+        if (smartTvWsClient.connectionStatus.value is ConnectionStatus.Connected) {
+            smartTvWsClient.sendText(text)
+            return
+        }
         when (val current = uiState.value.status) {
             is ConnectionStatus.Connected -> {
                 when (current.device.transport) {
@@ -477,6 +643,15 @@ class RemoteRepository(context: Context) {
 
     fun sendMouseClick(button: MouseButton) {
         if (button == MouseButton.RIGHT) haptics.heavyClick() else haptics.click()
+        if (smartTvWsClient.connectionStatus.value is ConnectionStatus.Connected) {
+            val mapped = when (button) {
+                MouseButton.LEFT -> RemoteButton.DPAD_CENTER
+                MouseButton.RIGHT -> RemoteButton.BACK
+                MouseButton.MIDDLE -> RemoteButton.HOME
+            }
+            smartTvWsClient.sendButton(mapped)
+            return
+        }
         val current = uiState.value.status
         if (current is ConnectionStatus.Connected) {
             when (current.device.transport) {
@@ -505,6 +680,17 @@ class RemoteRepository(context: Context) {
         bluetoothHid.release()
         wifiDiscovery.stopDiscovery()
         wifiTvClient.disconnect()
+        smartTvWsClient.disconnect()
         wifiPcClient.release()
+    }
+
+    private fun loadAccentTheme(): AppAccentTheme {
+        val raw = settingsPrefs.getString(KEY_ACCENT_THEME, AppAccentTheme.ORANGE.name)
+        return AppAccentTheme.entries.firstOrNull { it.name == raw } ?: AppAccentTheme.ORANGE
+    }
+
+    private companion object {
+        const val SETTINGS_PREFS = "gpt_remote_settings"
+        const val KEY_ACCENT_THEME = "accent_theme"
     }
 }

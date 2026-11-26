@@ -33,20 +33,21 @@ class IrBlasterManager(context: Context) {
         val manager = irManager ?: return false
         if (!hasIrEmitter) return false
 
-        // Map common appliance actions to NEC fallback frames when IR emitter is present
         val cmdByte = when (actionKey) {
-            "power" -> 0x01
-            "temp_up", "speed_up", "fridge_up" -> 0x02
-            "temp_down", "speed_down", "fridge_down" -> 0x03
-            "mode", "cycle" -> 0x04
-            "fan", "spin" -> 0x05
-            "swing", "light" -> 0x06
-            "timer" -> 0x07
-            "turbo", "boost", "super_cool" -> 0x08
-            "sleep", "eco" -> 0x09
-            "freezer_up" -> 0x0A
-            "freezer_down" -> 0x0B
-            "start_pause" -> 0x0C
+            "power", "power_on" -> 0x01
+            "power_off" -> 0x41
+            "temp_up", "speed_up", "fridge_up", "bright_up" -> 0x02
+            "temp_down", "speed_down", "fridge_down", "bright_down" -> 0x03
+            "mode", "cycle", "bulb_warm" -> 0x04
+            "fan", "spin", "bulb_cool" -> 0x05
+            "swing", "light", "bulb_white" -> 0x06
+            "timer", "bulb_red" -> 0x07
+            "turbo", "boost", "super_cool", "bulb_green" -> 0x08
+            "sleep", "eco", "bulb_blue" -> 0x09
+            "freezer_up", "bulb_amber" -> 0x0A
+            "freezer_down", "bulb_purple" -> 0x0B
+            "start_pause", "ice_maker" -> 0x0C
+            "child_lock", "temp_cycle" -> 0x0E
             else -> 0x0D
         }
         val addrByte = when (brand.productType) {
@@ -54,6 +55,7 @@ class IrBlasterManager(context: Context) {
             ProductType.CEILING_FAN -> 0x52
             ProductType.FRIDGE -> 0x61
             ProductType.WASHING_MACHINE -> 0x62
+            ProductType.SMART_BULB -> 0x00
             else -> 0x20
         }
         return runCatching {

@@ -2,6 +2,8 @@ package com.gptremote.mitv.model
 
 import android.graphics.Bitmap
 import com.gptremote.mitv.haptic.HapticStrength
+import com.gptremote.mitv.ui.theme.AppAccentTheme
+import com.gptremote.mitv.wifi.DiscoveredSmartBulb
 import com.gptremote.mitv.wifi.SharedPcFile
 
 sealed interface ConnectionStatus {
@@ -26,6 +28,8 @@ data class RemoteUiState(
     val wifiPcDevices: List<TvDevice.WifiPc> = emptyList(),
     val savedDevices: List<SavedDevice> = emptyList(),
     val hapticStrength: HapticStrength = HapticStrength.MEDIUM,
+    val soundEnabled: Boolean = true,
+    val accentTheme: AppAccentTheme = AppAccentTheme.ORANGE,
     val isScanningWifi: Boolean = false,
     val isScanningWifiPc: Boolean = false,
     val isScanningBluetooth: Boolean = false,
@@ -34,6 +38,9 @@ data class RemoteUiState(
     val isCastingPhoneScreen: Boolean = false,
     val sharedPcFiles: List<SharedPcFile> = emptyList(),
     val isTransferringFile: Boolean = false,
+    val smartBulbs: List<DiscoveredSmartBulb> = emptyList(),
+    val isScanningBulbs: Boolean = false,
+    val connectedBulb: DiscoveredSmartBulb? = null,
     val lastStatusBanner: String? = null
 ) {
     val isConnected: Boolean

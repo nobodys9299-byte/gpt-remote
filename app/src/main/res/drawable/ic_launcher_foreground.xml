@@ -3,35 +3,38 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Signal waves -->
+    <!-- Top Wireless Signal Arcs -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M41,28 A19,19 0 0,1 67,28"
+        android:pathData="M34,27 A24,24 0 0,1 74,27"
         android:strokeColor="#38BDF8"
         android:strokeLineCap="round"
-        android:strokeWidth="3.5" />
+        android:strokeWidth="4" />
     <path
         android:fillColor="#00000000"
-        android:pathData="M46,34 A12,12 0 0,1 62,34"
-        android:strokeColor="#38BDF8"
+        android:pathData="M42,34 A15,15 0 0,1 66,34"
+        android:strokeColor="#22D3EE"
         android:strokeLineCap="round"
+        android:strokeWidth="3.6" />
+
+    <!-- Outer Touch D-Pad Ring -->
+    <path
+        android:fillColor="#111827"
+        android:pathData="M54,39 A22,22 0 1,0 54,83 A22,22 0 1,0 54,39 Z"
+        android:strokeColor="#38BDF8"
         android:strokeWidth="3.2" />
-    <!-- Sleek remote body -->
+
+    <!-- Directional Dots -->
+    <path android:fillColor="#E2E8F0" android:pathData="M54,44.5 a2.2,2.2 0 1,0 0,4.4 a2.2,2.2 0 1,0 0,-4.4 z" />
+    <path android:fillColor="#E2E8F0" android:pathData="M54,73.1 a2.2,2.2 0 1,0 0,4.4 a2.2,2.2 0 1,0 0,-4.4 z" />
+    <path android:fillColor="#E2E8F0" android:pathData="M39.7,58.8 a2.2,2.2 0 1,0 0,4.4 a2.2,2.2 0 1,0 0,-4.4 z" />
+    <path android:fillColor="#E2E8F0" android:pathData="M68.3,58.8 a2.2,2.2 0 1,0 0,4.4 a2.2,2.2 0 1,0 0,-4.4 z" />
+
+    <!-- Glowing Center Action Core -->
     <path
-        android:fillColor="#1E293B"
-        android:pathData="M37,39 h34 a8,8 0 0,1 8,8 v33 a8,8 0 0,1 -8,8 h-34 a8,8 0 0,1 -8,-8 v-33 a8,8 0 0,1 8,-8 z"
-        android:strokeColor="#FF6900"
-        android:strokeWidth="2.5" />
-    <!-- Power dot -->
+        android:fillColor="#38BDF8"
+        android:pathData="M54,52 A9,9 0 1,0 54,70 A9,9 0 1,0 54,52 Z" />
     <path
-        android:fillColor="#FF6900"
-        android:pathData="M42,46 a2.8,2.8 0 1,0 0,5.6 a2.8,2.8 0 1,0 0,-5.6 z" />
-    <!-- D-Pad ring -->
-    <path
-        android:fillColor="#FF6900"
-        android:pathData="M54,48 a12,12 0 1,0 0,24 a12,12 0 1,0 0,-24 z M54,54.5 a5.5,5.5 0 1,1 0,11 a5.5,5.5 0 1,1 0,-11 z" />
-    <!-- Bottom pill controls -->
-    <path
-        android:fillColor="#E2E8F0"
-        android:pathData="M42,78 h24 a2.5,2.5 0 0,1 0,5 h-24 a2.5,2.5 0 0,1 0,-5 z" />
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,57.5 A3.5,3.5 0 1,0 54,64.5 A3.5,3.5 0 1,0 54,57.5 Z" />
 </vector>

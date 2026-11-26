@@ -59,6 +59,7 @@ class BluetoothHidManager(private val context: Context) {
     private var hidDevice: BluetoothHidDevice? = null
     private var connectedHost: BluetoothDevice? = null
     private var pendingConnectAddress: String? = null
+    private var pendingReRegister = false
     private var connectedCategory: DeviceCategory = DeviceCategory.ANDROID_TV
     private var receiverRegistered = false
 
@@ -195,6 +196,10 @@ class BluetoothHidManager(private val context: Context) {
             if (!registered) {
                 connectedHost = null
                 _connectionStatus.value = ConnectionStatus.Disconnected
+                if (pendingReRegister) {
+                    pendingReRegister = false
+                    registerHidApp()
+                }
                 return
             }
 
@@ -367,19 +372,22 @@ class BluetoothHidManager(private val context: Context) {
         connectedCategory = if (enabled) DeviceCategory.LAPTOP_PC else DeviceCategory.ANDROID_TV
         val hid = hidDevice
         if (hid != null && hasConnectPermission() && connectedHost == null) {
-            runCatching { hid.unregisterApp() }
-            _isAppRegistered.value = false
-            registerHidApp()
+            if (_isAppRegistered.value) {
+                pendingReRegister = true
+                runCatching { hid.unregisterApp() }
+            } else {
+                registerHidApp()
+            }
         }
     }
 
-    private fun registerHidApp() {
+    private fun registerHidApp(retryCount: Int = 0) {
         val hid = hidDevice ?: return
         if (!hasConnectPermission()) return
 
         val pcMode = _isPcProfile.value
         val sdpSettings = BluetoothHidDeviceAppSdpSettings(
-            if (pcMode) "GPT Remote (PC)" else "Mi TV Remote",
+            if (pcMode) "GPT Remote (PC)" else "GPT Remote (TV)",
             if (pcMode) "Bluetooth HID Keyboard & Mouse" else "Bluetooth HID Remote Control for Android TV",
             "GPT Remote",
             if (pcMode) BluetoothHidDevice.SUBCLASS1_COMBO else BluetoothHidDevice.SUBCLASS2_REMOTE_CONTROL,
@@ -396,11 +404,13 @@ class BluetoothHidManager(private val context: Context) {
         )
 
         val registered = hid.registerApp(sdpSettings, null, outQos, callbackExecutor, hidCallback)
-        if (!registered) {
-            _connectionStatus.value = ConnectionStatus.Error(
-                "Could not register Bluetooth HID profile on this phone.",
-                TransportMode.BLUETOOTH_HID
-            )
+        if (!registered && retryCount < 1) {
+            scope.launch {
+                delay(400)
+                if (!_isAppRegistered.value) {
+                    registerHidApp(retryCount + 1)
+                }
+            }
         }
     }
 
@@ -548,6 +558,32 @@ class BluetoothHidManager(private val context: Context) {
                 )
                 delay(16)
             }
+        }
+    }
+
+    fun launchTvAppViaSearch(appName: String) {
+        if (appName.isBlank() || connectedHost == null || hidDevice == null || !hasConnectPermission()) return
+
+        actionQueue.trySend {
+            val host = connectedHost ?: return@trySend
+            val hid = hidDevice ?: return@trySend
+            // Open TV Search overlay via Consumer AC Search (0x0221)
+            hid.sendReport(host, HidDescriptor.REPORT_ID_CONSUMER, HidDescriptor.consumerReport(0x0221))
+            delay(40)
+            hid.sendReport(host, HidDescriptor.REPORT_ID_CONSUMER, HidDescriptor.CONSUMER_RELEASE)
+            delay(500)
+
+            for (ch in appName) {
+                val (keyCode, modifier) = HidDescriptor.charToHidKey(ch) ?: continue
+                hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.keyboardReport(keyCode, modifier))
+                delay(20)
+                hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.KEYBOARD_RELEASE)
+                delay(16)
+            }
+            delay(200)
+            hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.keyboardReport(0x28)) // Enter
+            delay(40)
+            hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.KEYBOARD_RELEASE)
         }
     }
 

@@ -2,16 +2,23 @@ package com.gptremote.mitv.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -19,26 +26,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.gptremote.mitv.haptic.HapticStrength
-import com.gptremote.mitv.ui.theme.MiOrange
+import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.ui.theme.RemoteBorder
 import com.gptremote.mitv.ui.theme.RemoteSurface
 import com.gptremote.mitv.ui.theme.RemoteSurfaceElevated
 import com.gptremote.mitv.ui.theme.TextPrimary
 import com.gptremote.mitv.ui.theme.TextSecondary
-import com.gptremote.mitv.ui.theme.WifiBlue
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsSheet(
     hapticStrength: HapticStrength,
-    bluetoothPcProfile: Boolean,
+    soundEnabled: Boolean,
+    accentTheme: AppAccentTheme,
     onSelectHapticStrength: (HapticStrength) -> Unit,
-    onToggleBluetoothPcProfile: (Boolean) -> Unit,
+    onToggleSound: (Boolean) -> Unit,
+    onSelectAccentTheme: (AppAccentTheme) -> Unit,
     onDismiss: () -> Unit
 ) {
     ModalBottomSheet(
@@ -50,10 +58,10 @@ fun SettingsSheet(
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text(
-                text = "Remote Settings",
+                text = "Settings",
                 color = TextPrimary,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
@@ -76,7 +84,7 @@ fun SettingsSheet(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Tactile pulse on D-pad, clicks, volume, and scroll ticks",
+                    text = "Stronger pulse on D-Pad slide, volume rockers, clicks, and buttons",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
@@ -95,7 +103,7 @@ fun SettingsSheet(
                 }
             }
 
-            // Bluetooth HID Device Profile
+            // Button Click Sound
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -108,28 +116,24 @@ fun SettingsSheet(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Bluetooth PC / Laptop Mode",
+                        text = "Button Click Sound",
                         color = TextPrimary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = if (bluetoothPcProfile) {
-                            "Advertises Keyboard+Mouse Combo (best for Windows/Mac/Linux)"
-                        } else {
-                            "Advertises TV Remote Control (best for Mi Android TV)"
-                        },
+                        text = "Play soft remote click audio on key press",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
                 }
                 Switch(
-                    checked = bluetoothPcProfile,
-                    onCheckedChange = onToggleBluetoothPcProfile
+                    checked = soundEnabled,
+                    onCheckedChange = onToggleSound
                 )
             }
 
-            // Wi-Fi PC Companion Info
+            // App Theme Color
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -137,24 +141,49 @@ fun SettingsSheet(
                     .background(RemoteSurfaceElevated)
                     .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
                     .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "Control Laptop / PC over Wi-Fi",
-                    color = WifiBlue,
+                    text = "App Accent Color",
+                    color = TextPrimary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "1. Install GptRemotePC-Setup.exe on your Windows PC (from GitHub Releases) and open GPT Remote PC.",
+                    text = "Theme: ${accentTheme.label}",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
-                Text(
-                    text = "2. On your phone, choose PC / Laptop -> Connect -> Wi-Fi PC -> Scan to control mouse/keyboard, mirror screens, and share files.",
-                    color = TextSecondary,
-                    fontSize = 12.sp
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    AppAccentTheme.entries.forEach { theme ->
+                        val selected = theme == accentTheme
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(theme.primary)
+                                .border(
+                                    width = if (selected) 3.dp else 1.dp,
+                                    color = if (selected) Color.White else RemoteBorder,
+                                    shape = CircleShape
+                                )
+                                .clickable { onSelectAccentTheme(theme) },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (selected) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Check,
+                                    contentDescription = theme.label,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(4.dp))

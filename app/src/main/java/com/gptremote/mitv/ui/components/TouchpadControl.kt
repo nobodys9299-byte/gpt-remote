@@ -14,12 +14,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -28,10 +26,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -52,57 +48,37 @@ fun TouchpadControl(
     onMouseMove: (dx: Int, dy: Int, wheel: Int) -> Unit,
     onMouseClick: (MouseButton) -> Unit,
     onButtonFallback: (RemoteButton) -> Unit,
+    showClickButtons: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    val haptic = LocalHapticFeedback.current
-    var sensitivity by remember { mutableFloatStateOf(1.5f) }
     var isTouching by remember { mutableStateOf(false) }
 
     val isCursorMode = transportMode == TransportMode.BLUETOOTH_HID ||
         transportMode == TransportMode.WIFI_PC
     val latestIsCursor by rememberUpdatedState(isCursorMode)
-    val latestSensitivity by rememberUpdatedState(sensitivity)
+    val accent = MiOrange
 
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = when (transportMode) {
-                    TransportMode.BLUETOOTH_HID -> "Bluetooth HID Touchpad"
-                    TransportMode.WIFI_PC -> "Wi-Fi PC Touchpad"
-                    TransportMode.WIFI_ANDROID_TV -> "Swipe Pad (Wi-Fi D-Pad)"
-                },
-                color = TextSecondary,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium
-            )
-
-            if (isCursorMode) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(1.0f to "1x", 1.5f to "1.5x", 2.2f to "2.2x").forEach { (factor, label) ->
-                        FilterChip(
-                            selected = sensitivity == factor,
-                            onClick = { sensitivity = factor },
-                            label = { Text(label, fontSize = 11.sp) }
-                        )
-                    }
-                }
-            }
-        }
+        Text(
+            text = when (transportMode) {
+                TransportMode.BLUETOOTH_HID -> "Bluetooth Touchpad"
+                TransportMode.WIFI_PC -> "Wi-Fi PC Touchpad"
+                TransportMode.WIFI_ANDROID_TV -> "Wi-Fi Swipe Pad"
+            },
+            color = TextSecondary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium
+        )
 
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(252.dp),
+                .height(if (showClickButtons) 286.dp else 326.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Unified single pointerInput surface: zero gesture competition, sub-pixel accumulator, instant tap
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -111,7 +87,7 @@ fun TouchpadControl(
                     .background(RemoteSurfaceElevated)
                     .border(
                         width = 1.5.dp,
-                        color = if (isTouching) MiOrange.copy(alpha = 0.7f) else RemoteBorder,
+                        color = if (isTouching) accent.copy(alpha = 0.75f) else RemoteBorder,
                         shape = RoundedCornerShape(22.dp)
                     )
                     .pointerInput(Unit) {
@@ -138,12 +114,7 @@ fun TouchpadControl(
                                 }
 
                                 if (activeChanges.isEmpty()) {
-                                    // All fingers lifted
                                     if (!movedBeyondTap) {
-                                        haptic.performHapticFeedback(
-                                            if (maxPointers >= 2) HapticFeedbackType.LongPress
-                                            else HapticFeedbackType.TextHandleMove
-                                        )
                                         onMouseClick(
                                             if (maxPointers >= 2) MouseButton.RIGHT else MouseButton.LEFT
                                         )
@@ -153,7 +124,6 @@ fun TouchpadControl(
                                 }
 
                                 if (activeChanges.size >= 2 && latestIsCursor) {
-                                    // Two-finger vertical drag -> smooth mouse wheel scroll
                                     val avgDeltaY = activeChanges
                                         .map { it.positionChange().y }
                                         .average()
@@ -164,7 +134,7 @@ fun TouchpadControl(
                                         movedBeyondTap = true
                                     }
                                     remScroll += avgDeltaY
-                                    val step = 22f
+                                    val step = 20f
                                     if (abs(remScroll) >= step) {
                                         val wheelTicks = (remScroll / step).toInt()
                                         remScroll -= wheelTicks * step
@@ -182,7 +152,7 @@ fun TouchpadControl(
                                         }
 
                                         if (latestIsCursor) {
-                                            val factor = latestSensitivity
+                                            val factor = 1.6f
                                             remX += delta.x * factor
                                             remY += delta.y * factor
                                             val sendX = truncate(remX).toInt()
@@ -195,16 +165,14 @@ fun TouchpadControl(
                                         } else {
                                             swipeAccumX += delta.x
                                             swipeAccumY += delta.y
-                                            val threshold = 64f
+                                            val threshold = 60f
                                             if (abs(swipeAccumX) > abs(swipeAccumY) && abs(swipeAccumX) >= threshold) {
-                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                                 onButtonFallback(
                                                     if (swipeAccumX > 0) RemoteButton.DPAD_RIGHT else RemoteButton.DPAD_LEFT
                                                 )
                                                 swipeAccumX = 0f
                                                 swipeAccumY = 0f
                                             } else if (abs(swipeAccumY) >= threshold) {
-                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                                 onButtonFallback(
                                                     if (swipeAccumY > 0) RemoteButton.DPAD_DOWN else RemoteButton.DPAD_UP
                                                 )
@@ -223,13 +191,13 @@ fun TouchpadControl(
                     Text(
                         text = if (isCursorMode) "Drag to move cursor" else "Swipe to navigate",
                         color = TextSecondary,
-                        fontSize = 14.sp,
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.Medium
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = if (isCursorMode) {
-                            "Tap = Click • 2-finger tap = Right-click • 2-finger drag = Scroll"
+                            "Tap = Select • 2-finger tap = Right-click"
                         } else {
                             "Tap = OK • 2-finger tap = Back"
                         },
@@ -239,82 +207,92 @@ fun TouchpadControl(
                 }
             }
 
-            // Large, easy-to-thumb vertical scroll strip for cursor mode
-            if (isCursorMode) {
-                Box(
-                    modifier = Modifier
-                        .width(74.dp)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(RemoteSurface)
-                        .border(1.5.dp, MiOrange.copy(alpha = 0.45f), RoundedCornerShape(22.dp))
-                        .pointerInput(Unit) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                down.consume()
-                                var scrollAccum = 0f
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val active = event.changes.firstOrNull { it.pressed } ?: break
-                                    val dy = active.positionChange().y
-                                    active.consume()
-                                    scrollAccum += dy
+            // Large dedicated vertical Scroll strip (mouse wheel or Wi-Fi list scroll)
+            Box(
+                modifier = Modifier
+                    .width(74.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(RemoteSurface)
+                    .border(1.5.dp, accent.copy(alpha = 0.5f), RoundedCornerShape(22.dp))
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            down.consume()
+                            var scrollAccum = 0f
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val active = event.changes.firstOrNull { it.pressed } ?: break
+                                val dy = active.positionChange().y
+                                active.consume()
+                                scrollAccum += dy
+                                if (latestIsCursor) {
                                     val step = 18f
                                     if (abs(scrollAccum) >= step) {
                                         val ticks = (scrollAccum / step).toInt()
                                         scrollAccum -= ticks * step
                                         onMouseMove(0, 0, -ticks)
                                     }
+                                } else {
+                                    val step = 48f
+                                    if (abs(scrollAccum) >= step) {
+                                        onButtonFallback(
+                                            if (scrollAccum > 0) RemoteButton.DPAD_DOWN else RemoteButton.DPAD_UP
+                                        )
+                                        scrollAccum = 0f
+                                    }
                                 }
                             }
-                        },
-                    contentAlignment = Alignment.Center
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        Text(
-                            text = "▲",
-                            color = MiOrange,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "S\nC\nR\nO\nL\nL",
-                            color = TextSecondary,
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "▼",
-                            color = MiOrange,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    Text(
+                        text = "▲",
+                        color = accent,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "S\nC\nR\nO\nL\nL",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "▼",
+                        color = accent,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            OutlinedButton(
-                onClick = { onMouseClick(MouseButton.LEFT) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(14.dp)
+        if (showClickButtons) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(if (isCursorMode) "Left Click" else "OK / Select")
-            }
-            OutlinedButton(
-                onClick = { onMouseClick(MouseButton.RIGHT) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Text(if (isCursorMode) "Right Click" else "Back")
+                OutlinedButton(
+                    onClick = { onMouseClick(MouseButton.LEFT) },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text("Left Click")
+                }
+                OutlinedButton(
+                    onClick = { onMouseClick(MouseButton.RIGHT) },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text("Right Click")
+                }
             }
         }
     }

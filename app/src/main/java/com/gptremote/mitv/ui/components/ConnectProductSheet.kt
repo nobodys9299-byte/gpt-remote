@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Laptop
+import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SettingsRemote
 import androidx.compose.material.icons.rounded.Tv
@@ -65,11 +66,14 @@ import com.gptremote.mitv.ui.theme.RemoteSurfaceElevated
 import com.gptremote.mitv.ui.theme.TextPrimary
 import com.gptremote.mitv.ui.theme.TextSecondary
 import com.gptremote.mitv.ui.theme.WifiBlue
+import com.gptremote.mitv.wifi.DiscoveredSmartBulb
 
 private enum class ConnectTab {
     BLUETOOTH,
     WIFI_TV,
     WIFI_PC,
+    WIFI_SMART_BULB,
+    WIFI_APPLIANCE,
     IR_BLASTER
 }
 
@@ -88,6 +92,9 @@ fun ConnectProductSheet(
     onScanWifiPc: () -> Unit,
     onConnectWifiPc: (TvDevice.WifiPc) -> Unit,
     onConnectManualIp: (host: String, category: DeviceCategory) -> Unit,
+    onScanBulbs: () -> Unit,
+    onSelectBulb: (DiscoveredSmartBulb) -> Unit,
+    onConnectManualBulb: (String) -> Unit,
     onEnableIr: () -> Unit,
     onSubmitWifiPin: (String) -> Unit,
     onDisconnect: () -> Unit,
@@ -95,13 +102,30 @@ fun ConnectProductSheet(
 ) {
     val availableTabs = remember(brand) {
         buildList {
-            if (brand.productType.supportsBluetoothHid) add(ConnectTab.BLUETOOTH)
+            if (brand.productType.supportsBluetoothHid || brand.productType.supportsBluetoothGeneric) {
+                add(ConnectTab.BLUETOOTH)
+            }
             if (brand.supportsWifiTv) add(ConnectTab.WIFI_TV)
             if (brand.productType.supportsWifiPc) add(ConnectTab.WIFI_PC)
+            if (brand.productType == ProductType.SMART_BULB) add(ConnectTab.WIFI_SMART_BULB)
+            if (brand.productType.supportsWifiSmart &&
+                !brand.supportsWifiTv &&
+                brand.productType != ProductType.SMART_BULB
+            ) {
+                add(ConnectTab.WIFI_APPLIANCE)
+            }
             if (brand.productType.supportsIr) add(ConnectTab.IR_BLASTER)
         }
     }
-    var selectedIdx by remember(brand) { mutableIntStateOf(0) }
+    var selectedIdx by remember(brand) {
+        mutableIntStateOf(
+            if (brand.productType == ProductType.SMART_BULB) {
+                availableTabs.indexOf(ConnectTab.WIFI_SMART_BULB).coerceAtLeast(0)
+            } else {
+                0
+            }
+        )
+    }
     val activeTab = availableTabs.getOrElse(selectedIdx) { availableTabs.first() }
 
     var manualIp by remember { mutableStateOf("") }
@@ -177,7 +201,7 @@ fun ConnectProductSheet(
                         fontSize = 12.sp
                     )
                 }
-                if (uiState.isConnected || uiState.irActive) {
+                if (uiState.isConnected || uiState.irActive || uiState.connectedBulb != null) {
                     TextButton(onClick = onDisconnect) {
                         Text("Disconnect", color = Color(0xFFF87171))
                     }
@@ -194,6 +218,8 @@ fun ConnectProductSheet(
                             ConnectTab.BLUETOOTH -> "Bluetooth" to Icons.Rounded.Bluetooth
                             ConnectTab.WIFI_TV -> "Wi-Fi TV" to Icons.Rounded.Wifi
                             ConnectTab.WIFI_PC -> "Wi-Fi PC" to Icons.Rounded.Wifi
+                            ConnectTab.WIFI_SMART_BULB -> "Wi-Fi Bulb" to Icons.Rounded.Lightbulb
+                            ConnectTab.WIFI_APPLIANCE -> "Wi-Fi" to Icons.Rounded.Wifi
                             ConnectTab.IR_BLASTER -> "IR Blaster" to Icons.Rounded.SettingsRemote
                         }
                         Tab(
@@ -202,8 +228,9 @@ fun ConnectProductSheet(
                                 selectedIdx = idx
                                 if (tab == ConnectTab.WIFI_TV) onScanWifiTv()
                                 if (tab == ConnectTab.WIFI_PC) onScanWifiPc()
+                                if (tab == ConnectTab.WIFI_SMART_BULB) onScanBulbs()
                             },
-                            text = { Text(label, fontSize = 12.sp) },
+                            text = { Text(label, fontSize = 11.sp, maxLines = 1) },
                             icon = { Icon(icon, contentDescription = null) }
                         )
                     }
@@ -285,6 +312,17 @@ fun ConnectProductSheet(
                 }
 
                 ConnectTab.WIFI_TV -> {
+                    val isSamsung = brand.id == "tv_samsung"
+                    val isLg = brand.id == "tv_lg"
+                    Text(
+                        text = when {
+                            isSamsung -> "Samsung Tizen TV: enter your TV IP below and allow the pop-up on your TV screen."
+                            isLg -> "LG webOS TV: enter your TV IP below (enable LG Connect Apps in TV Network settings)."
+                            else -> "Scan local Wi-Fi Android TVs or enter TV IP directly."
+                        },
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -293,7 +331,15 @@ fun ConnectProductSheet(
                         OutlinedTextField(
                             value = manualIp,
                             onValueChange = { manualIp = it },
-                            label = { Text("TV IP (e.g. 192.168.1.40)") },
+                            label = {
+                                Text(
+                                    when {
+                                        isSamsung -> "Samsung TV IP (e.g. 192.168.1.40)"
+                                        isLg -> "LG webOS TV IP (e.g. 192.168.1.40)"
+                                        else -> "TV IP (e.g. 192.168.1.40)"
+                                    }
+                                )
+                            },
                             singleLine = true,
                             modifier = Modifier.weight(1f)
                         )
@@ -324,7 +370,7 @@ fun ConnectProductSheet(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(180.dp),
+                            .height(168.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(uiState.wifiDevices, key = { it.id }) { dev ->
@@ -382,7 +428,7 @@ fun ConnectProductSheet(
                         Text(if (uiState.isScanningWifiPc) "Scanning Network..." else "Scan Wi-Fi PCs")
                     }
                     Text(
-                        text = "Run GptRemotePC.exe on your Windows PC first (lives in your System Tray).",
+                        text = "Install GptRemotePC-Setup.exe on Windows to control mouse, mirror screens, and share files.",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
@@ -405,6 +451,118 @@ fun ConnectProductSheet(
                                     onDismiss()
                                 }
                             )
+                        }
+                    }
+                }
+
+                ConnectTab.WIFI_SMART_BULB -> {
+                    Text(
+                        text = "Discover WiZ / Yeelight bulbs on local Wi-Fi or enter your bulb IP.",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = manualIp,
+                            onValueChange = { manualIp = it },
+                            label = { Text("Smart Bulb IP (e.g. 192.168.1.55)") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = {
+                                onConnectManualBulb(manualIp)
+                                onDismiss()
+                            },
+                            enabled = manualIp.isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MiOrange)
+                        ) {
+                            Text("Go")
+                        }
+                    }
+                    FilledTonalButton(
+                        onClick = onScanBulbs,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        if (uiState.isScanningBulbs) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Rounded.Lightbulb, contentDescription = null, modifier = Modifier.size(18.dp))
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (uiState.isScanningBulbs) "Scanning Bulbs..." else "Scan Smart Bulbs (WiZ)")
+                    }
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(160.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(uiState.smartBulbs, key = { it.host }) { bulb ->
+                            val isSelected = uiState.connectedBulb?.host == bulb.host
+                            ConnectRow(
+                                title = bulb.name,
+                                subtitle = "${bulb.host} • ${bulb.protocol.name}",
+                                isConnected = isSelected,
+                                accent = MiOrange,
+                                isPc = false,
+                                onClick = {
+                                    onSelectBulb(bulb)
+                                    onDismiss()
+                                }
+                            )
+                        }
+                    }
+                }
+
+                ConnectTab.WIFI_APPLIANCE -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(RemoteSurfaceElevated)
+                            .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "${brand.name} Wi-Fi / Smart Appliance",
+                            color = WifiBlue,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Pair your ${brand.productType.title} with the Bluetooth tab or enter its local network IP below.",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = manualIp,
+                                onValueChange = { manualIp = it },
+                                label = { Text("Device Wi-Fi IP") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Button(
+                                onClick = {
+                                    onConnectManualIp(manualIp, DeviceCategory.ANDROID_TV)
+                                    onDismiss()
+                                },
+                                enabled = manualIp.isNotBlank(),
+                                colors = ButtonDefaults.buttonColors(containerColor = WifiBlue)
+                            ) {
+                                Text("Go")
+                            }
                         }
                     }
                 }
@@ -433,7 +591,7 @@ fun ConnectProductSheet(
                             text = if (uiState.hasIrEmitter) {
                                 "Point the top of your phone directly at your ${brand.name} ${brand.productType.title} and tap Use IR Mode."
                             } else {
-                                "Infrared control requires hardware IR emitter (found on Xiaomi/Redmi/POCO phones). For Smart TV or PC without IR, use Bluetooth or Wi-Fi."
+                                "Infrared requires a hardware IR emitter (Xiaomi/Redmi/POCO phones). Use Bluetooth or Wi-Fi where supported by your ${brand.productType.title}."
                             },
                             color = TextSecondary,
                             fontSize = 13.sp

@@ -45,8 +45,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            MiTvRemoteTheme {
-                val uiState by viewModel.uiState.collectAsState()
+            val uiState by viewModel.uiState.collectAsState()
+
+            MiTvRemoteTheme(accentTheme = uiState.accentTheme) {
                 var hasBtPermissions by remember { mutableStateOf(viewModel.hasBluetoothPermissions()) }
                 var route by remember { mutableStateOf<AppRoute>(AppRoute.Home) }
 
@@ -128,7 +129,8 @@ class MainActivity : ComponentActivity() {
                             },
                             onDisconnect = viewModel::disconnect,
                             onSelectHapticStrength = viewModel::setHapticStrength,
-                            onToggleBluetoothPcProfile = viewModel::setBluetoothPcProfile,
+                            onToggleSound = viewModel::setSoundEnabled,
+                            onSelectAccentTheme = viewModel::setAccentTheme,
                             onClearBanner = viewModel::clearBanner
                         )
                     }
@@ -168,6 +170,12 @@ class MainActivity : ComponentActivity() {
                             onConnectManualIp = { host, category ->
                                 viewModel.addAndConnectManualWifi(host, current.brand.name, category)
                             },
+                            onScanBulbs = viewModel::startBulbScan,
+                            onSelectBulb = viewModel::selectBulb,
+                            onConnectManualBulb = viewModel::connectManualBulb,
+                            onBulbAction = { power, bright, rgb, kelvin, irAction ->
+                                viewModel.setBulbState(power, bright, rgb, kelvin, irAction)
+                            },
                             onEnableIr = { viewModel.setIrMode(true) },
                             onSubmitWifiPin = viewModel::submitWifiPin,
                             onDisconnect = viewModel::disconnect,
@@ -189,7 +197,8 @@ class MainActivity : ComponentActivity() {
                             onMouseMove = viewModel::moveMouse,
                             onMouseClick = viewModel::clickMouse,
                             onSelectHapticStrength = viewModel::setHapticStrength,
-                            onToggleBluetoothPcProfile = viewModel::setBluetoothPcProfile,
+                            onToggleSound = viewModel::setSoundEnabled,
+                            onSelectAccentTheme = viewModel::setAccentTheme,
                             onClearBanner = viewModel::clearBanner
                         )
                     }

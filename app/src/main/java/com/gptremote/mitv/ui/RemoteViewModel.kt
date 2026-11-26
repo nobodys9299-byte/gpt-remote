@@ -13,6 +13,9 @@ import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.model.TvDevice
+import com.gptremote.mitv.ui.theme.AppAccentTheme
+import com.gptremote.mitv.wifi.DiscoveredSmartBulb
+import com.gptremote.mitv.wifi.SmartTvProtocol
 import kotlinx.coroutines.flow.StateFlow
 
 class RemoteViewModel(application: Application) : AndroidViewModel(application) {
@@ -31,6 +34,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setHapticStrength(strength: HapticStrength) = repository.setHapticStrength(strength)
 
+    fun setSoundEnabled(enabled: Boolean) = repository.setSoundEnabled(enabled)
+
+    fun setAccentTheme(theme: AppAccentTheme) = repository.setAccentTheme(theme)
+
     fun setBluetoothPcProfile(enabled: Boolean) = repository.setBluetoothPcProfile(enabled)
 
     fun startBluetoothScan() = repository.startBluetoothScan()
@@ -43,8 +50,25 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun startWifiPcScan() = repository.startWifiPcScan()
 
+    fun startBulbScan() = repository.startBulbScan()
+
+    fun selectBulb(bulb: DiscoveredSmartBulb) = repository.selectBulb(bulb)
+
+    fun connectManualBulb(host: String) = repository.connectManualBulb(host)
+
+    fun setBulbState(
+        power: Boolean? = null,
+        brightness: Int? = null,
+        rgb: Triple<Int, Int, Int>? = null,
+        tempKelvin: Int? = null,
+        irFallbackAction: String? = null
+    ) = repository.setBulbState(power, brightness, rgb, tempKelvin, irFallbackAction)
+
     fun connectWifi(device: TvDevice.WifiTv, forcePair: Boolean = false) =
         repository.connectWifi(device, forcePair)
+
+    fun connectSmartTvWifi(host: String, name: String, protocol: SmartTvProtocol) =
+        repository.connectSmartTvWifi(host, name, protocol)
 
     fun connectWifiPc(device: TvDevice.WifiPc) = repository.connectWifiPc(device)
 

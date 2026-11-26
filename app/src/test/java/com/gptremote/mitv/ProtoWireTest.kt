@@ -3,6 +3,7 @@ package com.gptremote.mitv.wifi
 import com.gptremote.mitv.ir.IrBlasterManager
 import com.gptremote.mitv.model.ProductCatalog
 import com.gptremote.mitv.model.ProductType
+import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.wifi.TvCertificateManager.Companion.toUnsignedBigEndianBytes
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -67,6 +68,12 @@ class ProtoWireTest {
         for (product in ProductType.entries) {
             assertTrue("Missing brands for $product", ProductCatalog.brandsFor(product).isNotEmpty())
         }
+        assertTrue(ProductType.entries.contains(ProductType.SMART_BULB))
+        assertEquals(3, ProductCatalog.brandsFor(ProductType.PC_LAPTOP).size)
+        assertTrue(ProductCatalog.tvApps.size >= 10)
+        assertTrue(ProductCatalog.tvApps.all { it.shortBadge.isNotBlank() })
+        assertTrue(ProductCatalog.brandsFor(ProductType.SMART_TV).all { it.supportsWifiTv })
+        assertEquals(5, AppAccentTheme.entries.size)
     }
 
     @Test
