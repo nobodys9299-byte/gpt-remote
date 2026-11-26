@@ -98,6 +98,8 @@ class WifiPcRemoteClient {
     private var senderJob: Job? = null
     private var mouseTickerJob: Job? = null
     private var scanJob: Job? = null
+    private var connectJob: Job? = null
+    private var readerJob: Job? = null
     private var mirrorJob: Job? = null
     private var mirrorSocket: Socket? = null
 
@@ -176,10 +178,13 @@ class WifiPcRemoteClient {
                                 add(InetAddress.getByName("255.255.255.255"))
                                 interfaceInfo.forEach { info -> info.broadcast?.let { add(it) } }
                             }
-                            for (target in targets) {
-                                runCatching {
-                                    udpSocket.send(DatagramPacket(probe, probe.size, target, DISCOVERY_PORT))
+                            for (attempt in 0..1) {
+                                for (target in targets) {
+                                    runCatching {
+                                        udpSocket.send(DatagramPacket(probe, probe.size, target, DISCOVERY_PORT))
+                                    }
                                 }
+                                if (attempt == 0) delay(250)
                             }
 
                             val deadline = System.currentTimeMillis() + 2200L
@@ -210,7 +215,7 @@ class WifiPcRemoteClient {
 
                     val tcpSweepJob = launch {
                         val prefixes = interfaceInfo.mapNotNull { it.slash24Prefix }.distinct()
-                        val semaphore = Semaphore(32)
+                        val semaphore = Semaphore(48)
                         val jobs = prefixes.flatMap { prefix ->
                             (1..254).map { hostOctet ->
                                 val candidateIp = "$prefix.$hostOctet"
@@ -269,8 +274,8 @@ class WifiPcRemoteClient {
         var s: Socket? = null
         return try {
             s = Socket()
-            s.connect(InetSocketAddress(host, port), 320)
-            s.soTimeout = 350
+            s.connect(InetSocketAddress(host, port), 600)
+            s.soTimeout = 450
             val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
             val line = runCatching { reader.readLine() }.getOrNull()
             val json = line?.let { runCatching { JSONObject(it) }.getOrNull() }
@@ -294,25 +299,50 @@ class WifiPcRemoteClient {
         activeDevice = device
         _connectionStatus.value = ConnectionStatus.Connecting(device.name, TransportMode.WIFI_PC)
 
-        scope.launch {
+        connectJob = CoroutineScope(Dispatchers.IO).launch {
             try {
                 val tcp = Socket()
                 tcp.tcpNoDelay = true
+                tcp.keepAlive = true
                 tcp.connect(InetSocketAddress(device.host, device.port), 5000)
+                if (!isActive || activeDevice?.id != device.id) {
+                    runCatching { tcp.close() }
+                    return@launch
+                }
                 socket = tcp
                 writer = BufferedWriter(OutputStreamWriter(tcp.getOutputStream(), Charsets.UTF_8))
                 _connectionStatus.value = ConnectionStatus.Connected(device)
                 refreshSharedFiles()
-            } catch (_: Exception) {
-                _connectionStatus.value = ConnectionStatus.Error(
-                    message = "Cannot reach PC at ${device.host}:${device.port}. Make sure GPT Remote PC is open on your computer.",
-                    transport = TransportMode.WIFI_PC
-                )
+
+                val reader = BufferedReader(InputStreamReader(tcp.getInputStream(), Charsets.UTF_8))
+                readerJob = launch {
+                    runCatching {
+                        while (isActive && !tcp.isClosed) {
+                            val line = reader.readLine() ?: break
+                            if (line.isBlank()) continue
+                        }
+                    }
+                    if (socket === tcp) {
+                        handleConnectionLost("PC companion closed connection")
+                    }
+                }
+            } catch (e: Exception) {
+                if (isActive && activeDevice?.id == device.id) {
+                    activeDevice = null
+                    _connectionStatus.value = ConnectionStatus.Error(
+                        message = "Cannot reach PC at ${device.host}:${device.port}. Open GPT Remote PC & allow Windows Firewall (${e.message ?: "timeout"}).",
+                        transport = TransportMode.WIFI_PC
+                    )
+                }
             }
         }
     }
 
     fun disconnect() {
+        connectJob?.cancel()
+        connectJob = null
+        readerJob?.cancel()
+        readerJob = null
         stopPcScreenMirror()
         runCatching { writer?.close() }
         runCatching { socket?.close() }

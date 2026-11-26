@@ -209,6 +209,7 @@ class BluetoothHidManager(private val context: Context) {
 
             if (activeHost != null) {
                 connectedHost = activeHost
+                pendingConnectAddress = null
                 val name = safeDeviceName(activeHost)
                 _connectionStatus.value = ConnectionStatus.Connected(
                     TvDevice.BluetoothTv(
@@ -219,6 +220,16 @@ class BluetoothHidManager(private val context: Context) {
                     )
                 )
                 RemoteHidService.start(context, name)
+            } else {
+                val targetAddr = pendingConnectAddress
+                val adapter = bluetoothAdapter
+                if (targetAddr != null && adapter != null && hasConnectPermission()) {
+                    val targetDev = runCatching { adapter.getRemoteDevice(targetAddr) }.getOrNull()
+                    if (targetDev != null && targetDev.bondState == BluetoothDevice.BOND_BONDED) {
+                        pendingConnectAddress = null
+                        hidDevice?.connect(targetDev)
+                    }
+                }
             }
         }
 
@@ -454,23 +465,30 @@ class BluetoothHidManager(private val context: Context) {
         }
 
         stopDiscovery()
+        val device = adapter.getRemoteDevice(address)
+        val name = safeDeviceName(device)
+        val previousHost = connectedHost
+        if (previousHost != null && previousHost.address != address) {
+            hidDevice?.disconnect(previousHost)
+            connectedHost = null
+        }
+
         connectedCategory = category
         val shouldBePc = category == DeviceCategory.LAPTOP_PC
         if (_isPcProfile.value != shouldBePc) {
+            pendingConnectAddress = address
+            _connectionStatus.value = ConnectionStatus.Connecting(name, TransportMode.BLUETOOTH_HID)
             setPcProfile(shouldBePc)
+            return
         }
-        val device = adapter.getRemoteDevice(address)
         val hid = hidDevice
         if (hid == null || !_isAppRegistered.value) {
+            pendingConnectAddress = address
+            _connectionStatus.value = ConnectionStatus.Connecting(name, TransportMode.BLUETOOTH_HID)
             ensureInitialized()
-            _connectionStatus.value = ConnectionStatus.Error(
-                "Bluetooth HID service is still initializing. Try again in a moment.",
-                TransportMode.BLUETOOTH_HID
-            )
             return
         }
 
-        val name = safeDeviceName(device)
         _connectionStatus.value = ConnectionStatus.Connecting(name, TransportMode.BLUETOOTH_HID)
 
         if (device.bondState != BluetoothDevice.BOND_BONDED) {
@@ -481,8 +499,13 @@ class BluetoothHidManager(private val context: Context) {
 
         val initiated = hid.connect(device)
         if (!initiated) {
+            val hint = if (shouldBePc) {
+                "Pair your phone from Windows/Mac Bluetooth settings, or tap Discoverable."
+            } else {
+                "On TV, open Settings -> Remotes & Accessories -> Add accessory and tap Discoverable."
+            }
             _connectionStatus.value = ConnectionStatus.Error(
-                "Connection not initiated. On Mi TV, open Settings -> Remotes & Accessories -> Add accessory and tap 'Discoverable'.",
+                "Bluetooth connection not initiated. $hint",
                 TransportMode.BLUETOOTH_HID
             )
         }

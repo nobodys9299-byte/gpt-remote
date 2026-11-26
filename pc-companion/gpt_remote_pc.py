@@ -397,9 +397,17 @@ class RemoteServerState:
         self.allow_pc_screen_share: bool = True
         self.latest_phone_frame: bytes | None = None
         self.latest_phone_frame_ts: float = 0.0
+        self.bind_errors: list[str] = []
         self.on_change = None
         self.on_files_change = None
         self.on_phone_frame = None
+
+    def report_bind_error(self, msg: str) -> None:
+        with self._lock:
+            self.bind_errors.append(msg)
+            cb = self.on_change
+        if cb:
+            cb()
 
     def add_client(self, addr_str: str) -> None:
         with self._lock:
@@ -433,11 +441,23 @@ class RemoteServerState:
             cb(jpeg_bytes)
 
 
-def udp_discovery_loop(stop_event: threading.Event) -> None:
+def _bind_server_sock(sock: socket.socket) -> None:
+    if platform.system() == "Windows" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+
+def udp_discovery_loop(state: RemoteServerState, stop_event: threading.Event) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _bind_server_sock(sock)
     sock.settimeout(1.0)
-    sock.bind(("", UDP_DISCOVERY_PORT))
+    try:
+        sock.bind(("", UDP_DISCOVERY_PORT))
+    except OSError as exc:
+        state.report_bind_error(f"UDP {UDP_DISCOVERY_PORT}: {exc}")
+        sock.close()
+        return
     announce = json.dumps({
         "type": "announce",
         "name": socket.gethostname(),
@@ -525,10 +545,15 @@ def tcp_server_loop(
     stop_event: threading.Event,
 ) -> None:
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _bind_server_sock(server)
     server.settimeout(1.0)
-    server.bind(("0.0.0.0", TCP_PORT))
-    server.listen(8)
+    try:
+        server.bind(("0.0.0.0", TCP_PORT))
+        server.listen(8)
+    except OSError as exc:
+        state.report_bind_error(f"TCP {TCP_PORT}: {exc}")
+        server.close()
+        return
 
     try:
         while not stop_event.is_set():
@@ -574,10 +599,15 @@ def handle_screen_viewer(
 
 def screen_server_loop(state: RemoteServerState, stop_event: threading.Event) -> None:
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _bind_server_sock(server)
     server.settimeout(1.0)
-    server.bind(("0.0.0.0", SCREEN_PORT))
-    server.listen(4)
+    try:
+        server.bind(("0.0.0.0", SCREEN_PORT))
+        server.listen(4)
+    except OSError as exc:
+        state.report_bind_error(f"Screen {SCREEN_PORT}: {exc}")
+        server.close()
+        return
 
     try:
         while not stop_event.is_set():
@@ -704,7 +734,11 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
             else:
                 self.send_error(404)
 
-    httpd = ThreadingHttpServer(("0.0.0.0", FILE_HTTP_PORT), Handler)
+    try:
+        httpd = ThreadingHttpServer(("0.0.0.0", FILE_HTTP_PORT), Handler)
+    except OSError as exc:
+        state.report_bind_error(f"HTTP {FILE_HTTP_PORT}: {exc}")
+        return
     httpd.timeout = 0.5
     try:
         while not stop_event.is_set():
@@ -774,6 +808,7 @@ def toggle_autostart() -> tuple[bool, str]:
 
 def allow_windows_firewall() -> None:
     cmd = (
+        'netsh advfirewall firewall delete rule name="gptremotepc.exe" >nul 2>&1 & '
         'netsh advfirewall firewall delete rule name="GPT Remote PC TCP 58765" >nul 2>&1 & '
         'netsh advfirewall firewall delete rule name="GPT Remote PC UDP 58766" >nul 2>&1 & '
         'netsh advfirewall firewall delete rule name="GPT Remote PC Screen 58767" >nul 2>&1 & '
@@ -784,6 +819,34 @@ def allow_windows_firewall() -> None:
         'netsh advfirewall firewall add rule name="GPT Remote PC Files 58768" dir=in action=allow protocol=TCP localport=58768 profile=any'
     )
     ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f"/c {cmd}", None, 0)
+
+
+def stop_stale_windows_instances() -> None:
+    """Terminate older GptRemotePC.exe instances so one clean instance owns all ports."""
+    if platform.system() != "Windows":
+        return
+    my_pid = os.getpid()
+    parent_pid = os.getppid()
+    try:
+        subprocess.run(
+            [
+                "taskkill",
+                "/F",
+                "/FI",
+                f"PID ne {my_pid}",
+                "/FI",
+                f"PID ne {parent_pid}",
+                "/IM",
+                "GptRemotePC.exe",
+            ],
+            creationflags=0x08000000,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=4,
+        )
+        time.sleep(0.35)
+    except Exception:
+        pass
 
 
 # ---- Windows Desktop GUI + System Tray ----
@@ -834,10 +897,13 @@ def run_windows_desktop_app(
         ips = get_local_ips()
         ip_str = ", ".join(ips) if ips else "Not connected to Wi-Fi"
         ip_var.set(f"PC Name: {socket.gethostname()}   •   Wi-Fi IP: {ip_str}")
-        c = state.count()
-        clients_var.set(
-            f"Connected Phones: {c}   •   Ports: {TCP_PORT} / {SCREEN_PORT} / {FILE_HTTP_PORT}"
-        )
+        if state.bind_errors:
+            clients_var.set("Port conflict: " + "; ".join(state.bind_errors))
+        else:
+            c = state.count()
+            clients_var.set(
+                f"Connected Phones: {c}   •   Ports: {TCP_PORT} / {SCREEN_PORT} / {FILE_HTTP_PORT}"
+            )
 
     tk.Label(conn_card, textvariable=ip_var, bg=CARD, fg=BLUE, font=("Segoe UI", 10, "bold")).pack(
         anchor="w", padx=14, pady=(12, 2)
@@ -1243,11 +1309,12 @@ def run_windows_tray_bridge(
 
 
 def main() -> None:
+    stop_stale_windows_instances()
     backend = create_backend()
     state = RemoteServerState()
     stop_event = threading.Event()
 
-    threading.Thread(target=udp_discovery_loop, args=(stop_event,), daemon=True).start()
+    threading.Thread(target=udp_discovery_loop, args=(state, stop_event), daemon=True).start()
     threading.Thread(target=tcp_server_loop, args=(backend, state, stop_event), daemon=True).start()
     threading.Thread(target=screen_server_loop, args=(state, stop_event), daemon=True).start()
     threading.Thread(target=file_http_server_loop, args=(state, stop_event), daemon=True).start()

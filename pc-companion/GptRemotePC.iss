@@ -27,6 +27,8 @@ Name: "{autodesktop}\GPT Remote PC"; Filename: "{app}\GptRemotePC.exe"; Tasks: d
 Name: "{userstartup}\GptRemotePC"; Filename: "{app}\GptRemotePC.exe"; Parameters: "--tray"; Tasks: autostart
 
 [Run]
+Filename: "taskkill"; Parameters: "/IM GptRemotePC.exe /F"; Flags: runhidden waituntilterminated
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""gptremotepc.exe"""; Flags: runhidden waituntilterminated
 Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""GPT Remote PC TCP 58765"""; Flags: runhidden waituntilterminated
 Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""GPT Remote PC UDP 58766"""; Flags: runhidden waituntilterminated
 Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""GPT Remote PC Screen 58767"""; Flags: runhidden waituntilterminated

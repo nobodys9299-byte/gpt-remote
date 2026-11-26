@@ -40,6 +40,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -119,16 +120,32 @@ fun ConnectProductSheet(
     }
     var selectedIdx by remember(brand) {
         mutableIntStateOf(
-            if (brand.productType == ProductType.SMART_BULB) {
-                availableTabs.indexOf(ConnectTab.WIFI_SMART_BULB).coerceAtLeast(0)
-            } else {
-                0
+            when (brand.productType) {
+                ProductType.SMART_BULB -> availableTabs.indexOf(ConnectTab.WIFI_SMART_BULB).coerceAtLeast(0)
+                ProductType.PC_LAPTOP -> availableTabs.indexOf(ConnectTab.WIFI_PC).coerceAtLeast(0)
+                else -> 0
             }
         )
     }
     val activeTab = availableTabs.getOrElse(selectedIdx) { availableTabs.first() }
 
-    var manualIp by remember { mutableStateOf("") }
+    LaunchedEffect(brand) {
+        when (activeTab) {
+            ConnectTab.WIFI_PC -> onScanWifiPc()
+            ConnectTab.WIFI_SMART_BULB -> onScanBulbs()
+            else -> Unit
+        }
+    }
+
+    var manualIp by remember(brand, activeTab) {
+        mutableStateOf(
+            if (activeTab == ConnectTab.WIFI_PC) {
+                uiState.savedDevices.firstOrNull { it.category == DeviceCategory.LAPTOP_PC }?.addressOrHost ?: ""
+            } else {
+                ""
+            }
+        )
+    }
     var pinInput by remember { mutableStateOf("") }
 
     val awaitingPin = uiState.status as? ConnectionStatus.AwaitingWifiPin
