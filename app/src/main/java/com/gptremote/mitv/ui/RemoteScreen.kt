@@ -3,6 +3,7 @@ package com.gptremote.mitv.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,6 +54,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.Scaffold
@@ -94,8 +96,11 @@ import com.gptremote.mitv.ui.components.ConnectProductSheet
 import com.gptremote.mitv.ui.components.DPadControl
 import com.gptremote.mitv.ui.components.KeyboardSheet
 import com.gptremote.mitv.ui.components.MediaVolumeBar
+import com.gptremote.mitv.ui.components.PcFileSharePanel
+import com.gptremote.mitv.ui.components.PcScreenSharePanel
 import com.gptremote.mitv.ui.components.SettingsSheet
 import com.gptremote.mitv.ui.components.TouchpadControl
+import com.gptremote.mitv.wifi.SharedPcFile
 import com.gptremote.mitv.ui.theme.ConnectedGreen
 import com.gptremote.mitv.ui.theme.MiOrange
 import com.gptremote.mitv.ui.theme.RemoteBg
@@ -109,6 +114,8 @@ import com.gptremote.mitv.ui.theme.WifiBlue
 private enum class RemoteSubTab(val label: String) {
     PRIMARY("Remote"),
     TOUCHPAD("Touchpad"),
+    SCREEN("Screen"),
+    FILES("Files"),
     APPS("Apps")
 }
 
@@ -130,6 +137,14 @@ fun RemoteScreen(
     onEnableIr: () -> Unit,
     onSubmitWifiPin: (String) -> Unit,
     onDisconnect: () -> Unit,
+    onStartPcMirror: () -> Unit,
+    onStopPcMirror: () -> Unit,
+    onTapMirroredScreen: (Float, Float) -> Unit,
+    onStartPhoneCast: () -> Unit,
+    onStopPhoneCast: () -> Unit,
+    onRefreshPcFiles: () -> Unit,
+    onPickFileToSend: () -> Unit,
+    onDownloadPcFile: (SharedPcFile) -> Unit,
     onButtonPress: (RemoteButton, Boolean) -> Unit,
     onApplianceAction: (String) -> Unit,
     onLaunchApp: (LaunchableApp) -> Unit,
@@ -210,7 +225,16 @@ fun RemoteScreen(
                     onMouseMove = onMouseMove,
                     onMouseClick = onMouseClick,
                     onLaunchApp = onLaunchApp,
-                    onOpenKeyboard = { showKeyboardSheet = true }
+                    onOpenKeyboard = { showKeyboardSheet = true },
+                    onStartPcMirror = onStartPcMirror,
+                    onStopPcMirror = onStopPcMirror,
+                    onTapMirroredScreen = onTapMirroredScreen,
+                    onStartPhoneCast = onStartPhoneCast,
+                    onStopPhoneCast = onStopPhoneCast,
+                    onRefreshPcFiles = onRefreshPcFiles,
+                    onPickFileToSend = onPickFileToSend,
+                    onDownloadPcFile = onDownloadPcFile,
+                    onOpenConnect = { showConnectSheet = true }
                 )
 
                 ProductType.AC -> AcRemoteBody(
@@ -432,7 +456,7 @@ private fun TvRemoteBody(
             val icon = when (tab) {
                 RemoteSubTab.PRIMARY -> Icons.Rounded.Gamepad
                 RemoteSubTab.TOUCHPAD -> Icons.Rounded.TouchApp
-                RemoteSubTab.APPS -> Icons.Rounded.Apps
+                RemoteSubTab.SCREEN, RemoteSubTab.FILES, RemoteSubTab.APPS -> Icons.Rounded.Apps
             }
             SegmentedButton(
                 selected = selectedTab == tab,
@@ -522,6 +546,7 @@ private fun TvRemoteBody(
                 onLaunch = onLaunchApp
             )
         }
+        RemoteSubTab.SCREEN, RemoteSubTab.FILES -> Unit
     }
 }
 
@@ -532,24 +557,37 @@ private fun PcRemoteBody(
     onMouseMove: (Int, Int, Int) -> Unit,
     onMouseClick: (MouseButton) -> Unit,
     onLaunchApp: (LaunchableApp) -> Unit,
-    onOpenKeyboard: () -> Unit
+    onOpenKeyboard: () -> Unit,
+    onStartPcMirror: () -> Unit,
+    onStopPcMirror: () -> Unit,
+    onTapMirroredScreen: (Float, Float) -> Unit,
+    onStartPhoneCast: () -> Unit,
+    onStopPhoneCast: () -> Unit,
+    onRefreshPcFiles: () -> Unit,
+    onPickFileToSend: () -> Unit,
+    onDownloadPcFile: (SharedPcFile) -> Unit,
+    onOpenConnect: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(RemoteSubTab.TOUCHPAD) }
-    val pcTabs = listOf(RemoteSubTab.TOUCHPAD to "Touchpad", RemoteSubTab.PRIMARY to "Keys", RemoteSubTab.APPS to "Apps")
+    val pcTabs = listOf(
+        RemoteSubTab.TOUCHPAD to "Touchpad",
+        RemoteSubTab.PRIMARY to "Keys",
+        RemoteSubTab.SCREEN to "Screen",
+        RemoteSubTab.FILES to "Files",
+        RemoteSubTab.APPS to "Apps"
+    )
 
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-        pcTabs.forEachIndexed { idx, (tab, title) ->
-            val icon = when (tab) {
-                RemoteSubTab.TOUCHPAD -> Icons.Rounded.TouchApp
-                RemoteSubTab.PRIMARY -> Icons.Rounded.Keyboard
-                RemoteSubTab.APPS -> Icons.Rounded.Apps
-            }
-            SegmentedButton(
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        pcTabs.forEach { (tab, title) ->
+            FilterChip(
                 selected = selectedTab == tab,
                 onClick = { selectedTab = tab },
-                shape = SegmentedButtonDefaults.itemShape(index = idx, count = pcTabs.size),
-                icon = { Icon(icon, contentDescription = null) },
-                label = { Text(title, fontSize = 12.sp) }
+                label = { Text(title, fontSize = 13.sp, fontWeight = FontWeight.Medium) }
             )
         }
     }
@@ -614,7 +652,6 @@ private fun PcRemoteBody(
                     ) { Text(label, fontSize = 12.sp) }
                 }
             }
-            // Volume + Media ONLY (NO Channel +/- for PC!)
             PcMediaVolumeRow(onButtonPress = { btn -> onButtonPress(btn, btn == RemoteButton.MUTE) })
             Button(
                 onClick = onOpenKeyboard,
@@ -626,6 +663,28 @@ private fun PcRemoteBody(
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Open Full PC Keyboard")
             }
+        }
+
+        RemoteSubTab.SCREEN -> {
+            PcScreenSharePanel(
+                uiState = uiState,
+                onStartPcMirror = onStartPcMirror,
+                onStopPcMirror = onStopPcMirror,
+                onTapMirroredScreen = onTapMirroredScreen,
+                onStartPhoneCast = onStartPhoneCast,
+                onStopPhoneCast = onStopPhoneCast,
+                onOpenConnect = onOpenConnect
+            )
+        }
+
+        RemoteSubTab.FILES -> {
+            PcFileSharePanel(
+                uiState = uiState,
+                onRefreshFiles = onRefreshPcFiles,
+                onPickFileToSend = onPickFileToSend,
+                onDownloadFile = onDownloadPcFile,
+                onOpenConnect = onOpenConnect
+            )
         }
 
         RemoteSubTab.APPS -> {

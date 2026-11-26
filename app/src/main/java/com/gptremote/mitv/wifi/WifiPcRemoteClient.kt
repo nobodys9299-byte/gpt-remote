@@ -1,5 +1,14 @@
 package com.gptremote.mitv.wifi
 
+import android.content.ContentValues
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.provider.OpenableColumns
 import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
@@ -25,23 +34,35 @@ import kotlinx.coroutines.sync.withPermit
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import java.io.DataInputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.net.URL
+import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
+data class SharedPcFile(
+    val name: String,
+    val sizeBytes: Long,
+    val modifiedMs: Long
+)
+
 /**
- * Client for controlling a Windows / macOS / Linux laptop or PC over Wi-Fi using the
- * lightweight companion script (pc-companion/gpt_remote_pc.py).
+ * Client for controlling a Windows / macOS / Linux PC over Wi-Fi, plus live PC screen mirroring
+ * and two-way file sharing via GPT Remote PC companion.
  */
 class WifiPcRemoteClient {
 
@@ -57,6 +78,18 @@ class WifiPcRemoteClient {
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
+    private val _pcScreenBitmap = MutableStateFlow<Bitmap?>(null)
+    val pcScreenBitmap: StateFlow<Bitmap?> = _pcScreenBitmap.asStateFlow()
+
+    private val _isMirroringPc = MutableStateFlow(false)
+    val isMirroringPc: StateFlow<Boolean> = _isMirroringPc.asStateFlow()
+
+    private val _sharedFiles = MutableStateFlow<List<SharedPcFile>>(emptyList())
+    val sharedFiles: StateFlow<List<SharedPcFile>> = _sharedFiles.asStateFlow()
+
+    private val _isTransferringFile = MutableStateFlow(false)
+    val isTransferringFile: StateFlow<Boolean> = _isTransferringFile.asStateFlow()
+
     private var socket: Socket? = null
     private var writer: BufferedWriter? = null
     private var activeDevice: TvDevice.WifiPc? = null
@@ -65,6 +98,8 @@ class WifiPcRemoteClient {
     private var senderJob: Job? = null
     private var mouseTickerJob: Job? = null
     private var scanJob: Job? = null
+    private var mirrorJob: Job? = null
+    private var mirrorSocket: Socket? = null
 
     private val pendingDx = AtomicInteger(0)
     private val pendingDy = AtomicInteger(0)
@@ -73,6 +108,9 @@ class WifiPcRemoteClient {
     init {
         startWorkers()
     }
+
+    val connectedHostIp: String?
+        get() = activeDevice?.host
 
     private fun startWorkers() {
         senderJob = scope.launch {
@@ -126,7 +164,6 @@ class WifiPcRemoteClient {
                 coroutineScope {
                     val interfaceInfo = collectLocalIpv4Info()
 
-                    // 1. UDP discovery to 255.255.255.255 + every interface broadcast (works on hotspots)
                     val udpJob = launch {
                         var udpSocket: DatagramSocket? = null
                         try {
@@ -137,15 +174,11 @@ class WifiPcRemoteClient {
                             val probe = DISCOVER_MAGIC.toByteArray(Charsets.UTF_8)
                             val targets = buildSet {
                                 add(InetAddress.getByName("255.255.255.255"))
-                                interfaceInfo.forEach { info ->
-                                    info.broadcast?.let { add(it) }
-                                }
+                                interfaceInfo.forEach { info -> info.broadcast?.let { add(it) } }
                             }
                             for (target in targets) {
                                 runCatching {
-                                    udpSocket.send(
-                                        DatagramPacket(probe, probe.size, target, DISCOVERY_PORT)
-                                    )
+                                    udpSocket.send(DatagramPacket(probe, probe.size, target, DISCOVERY_PORT))
                                 }
                             }
 
@@ -163,27 +196,18 @@ class WifiPcRemoteClient {
                                         val name = json.optString("name", "Laptop ($host)")
                                         val os = json.optString("os", "Desktop")
                                         val id = "$host:$port"
-                                        found[id] = TvDevice.WifiPc(
-                                            id = id,
-                                            name = name,
-                                            host = host,
-                                            port = port,
-                                            osName = os
-                                        )
+                                        found[id] = TvDevice.WifiPc(id, name, host, port, os)
                                         publishFound()
                                     }
                                 } catch (_: SocketTimeoutException) {
-                                    // continue until deadline
                                 }
                             }
                         } catch (_: Exception) {
-                            // Ignore UDP errors when network offline
                         } finally {
                             runCatching { udpSocket?.close() }
                         }
                     }
 
-                    // 2. Fast parallel TCP /24 subnet sweep on port 58765 (works even if UDP broadcast is dropped)
                     val tcpSweepJob = launch {
                         val prefixes = interfaceInfo.mapNotNull { it.slash24Prefix }.distinct()
                         val semaphore = Semaphore(32)
@@ -234,11 +258,7 @@ class WifiPcRemoteClient {
                     val fallbackBroadcast = prefix?.let {
                         runCatching { InetAddress.getByName("$it.255") }.getOrNull()
                     }
-                    list += LocalNetInfo(
-                        localIp = host,
-                        broadcast = addr.broadcast ?: fallbackBroadcast,
-                        slash24Prefix = prefix
-                    )
+                    list += LocalNetInfo(host, addr.broadcast ?: fallbackBroadcast, prefix)
                 }
             }
         }
@@ -256,13 +276,7 @@ class WifiPcRemoteClient {
             val json = line?.let { runCatching { JSONObject(it) }.getOrNull() }
             val name = json?.optString("name")?.takeIf { it.isNotBlank() } ?: "PC ($host)"
             val os = json?.optString("os")?.takeIf { it.isNotBlank() } ?: "Desktop"
-            TvDevice.WifiPc(
-                id = "$host:$port",
-                name = name,
-                host = host,
-                port = port,
-                osName = os
-            )
+            TvDevice.WifiPc("$host:$port", name, host, port, os)
         } catch (_: Exception) {
             null
         } finally {
@@ -288,9 +302,10 @@ class WifiPcRemoteClient {
                 socket = tcp
                 writer = BufferedWriter(OutputStreamWriter(tcp.getOutputStream(), Charsets.UTF_8))
                 _connectionStatus.value = ConnectionStatus.Connected(device)
-            } catch (e: Exception) {
+                refreshSharedFiles()
+            } catch (_: Exception) {
                 _connectionStatus.value = ConnectionStatus.Error(
-                    message = "Cannot reach PC at ${device.host}:${device.port}. Start gpt_remote_pc.py on your laptop first.",
+                    message = "Cannot reach PC at ${device.host}:${device.port}. Make sure GPT Remote PC is open on your computer.",
                     transport = TransportMode.WIFI_PC
                 )
             }
@@ -298,12 +313,216 @@ class WifiPcRemoteClient {
     }
 
     fun disconnect() {
+        stopPcScreenMirror()
         runCatching { writer?.close() }
         runCatching { socket?.close() }
         writer = null
         socket = null
         activeDevice = null
+        _sharedFiles.value = emptyList()
         _connectionStatus.value = ConnectionStatus.Disconnected
+    }
+
+    fun startPcScreenMirror(onError: (String) -> Unit = {}) {
+        val host = activeDevice?.host
+        if (host == null) {
+            onError("Connect to your PC via Wi-Fi first.")
+            return
+        }
+        stopPcScreenMirror()
+        _isMirroringPc.value = true
+        mirrorJob = CoroutineScope(Dispatchers.IO).launch {
+            var s: Socket? = null
+            try {
+                s = Socket()
+                s.connect(InetSocketAddress(host, SCREEN_PORT), 4000)
+                s.soTimeout = 5000
+                mirrorSocket = s
+                val input = DataInputStream(s.getInputStream())
+                while (isActive && !s.isClosed) {
+                    val frameLen = input.readInt()
+                    if (frameLen <= 0 || frameLen > 6 * 1024 * 1024) break
+                    val bytes = ByteArray(frameLen)
+                    input.readFully(bytes)
+                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (bmp != null) {
+                        _pcScreenBitmap.value = bmp
+                    }
+                }
+            } catch (e: Exception) {
+                if (isActive) {
+                    onError("Screen mirror stopped: ${e.message ?: "check PC app"}")
+                }
+            } finally {
+                runCatching { s?.close() }
+                mirrorSocket = null
+                _isMirroringPc.value = false
+            }
+        }
+    }
+
+    fun stopPcScreenMirror() {
+        mirrorJob?.cancel()
+        mirrorJob = null
+        runCatching { mirrorSocket?.close() }
+        mirrorSocket = null
+        _isMirroringPc.value = false
+        _pcScreenBitmap.value = null
+    }
+
+    fun refreshSharedFiles(onError: (String) -> Unit = {}) {
+        val host = activeDevice?.host ?: return
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val conn = (URL("http://$host:$FILE_HTTP_PORT/files").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                }
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                conn.disconnect()
+                val json = JSONObject(body)
+                val arr = json.getJSONArray("files")
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val item = arr.getJSONObject(i)
+                        add(
+                            SharedPcFile(
+                                name = item.getString("name"),
+                                sizeBytes = item.optLong("size", 0L),
+                                modifiedMs = item.optLong("modifiedMs", 0L)
+                            )
+                        )
+                    }
+                }
+            }.onSuccess { list ->
+                _sharedFiles.value = list
+            }.onFailure { err ->
+                onError("Could not load PC files: ${err.message ?: "check PC app"}")
+            }
+        }
+    }
+
+    fun uploadFile(context: Context, uri: Uri, onComplete: (String) -> Unit) {
+        val host = activeDevice?.host
+        if (host == null) {
+            onComplete("Connect to your PC via Wi-Fi first.")
+            return
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            _isTransferringFile.value = true
+            try {
+                val resolver = context.contentResolver
+                val filename = resolveFileName(context, uri)
+                val size = resolveFileSize(context, uri)
+                val encodedName = URLEncoder.encode(filename, "UTF-8").replace("+", "%20")
+
+                val conn = (URL("http://$host:$FILE_HTTP_PORT/upload").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 5000
+                    readTimeout = 30_000
+                    doOutput = true
+                    setRequestProperty("X-Filename", encodedName)
+                    if (size > 0) {
+                        setFixedLengthStreamingMode(size)
+                    } else {
+                        setChunkedStreamingMode(65536)
+                    }
+                }
+
+                resolver.openInputStream(uri)?.use { input ->
+                    conn.outputStream.use { out ->
+                        input.copyTo(out, bufferSize = 65536)
+                    }
+                } ?: throw IllegalStateException("Cannot read selected file")
+
+                val code = conn.responseCode
+                val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                conn.disconnect()
+                if (code !in 200..299) {
+                    throw IllegalStateException("Upload failed (HTTP $code)")
+                }
+                val savedAs = runCatching { JSONObject(resp).optString("savedAs", filename) }.getOrDefault(filename)
+                refreshSharedFiles()
+                onComplete("Sent '$savedAs' to PC (Downloads/GptRemote).")
+            } catch (e: Exception) {
+                onComplete("File send failed: ${e.message ?: "error"}")
+            } finally {
+                _isTransferringFile.value = false
+            }
+        }
+    }
+
+    fun downloadFile(context: Context, fileName: String, onComplete: (String) -> Unit) {
+        val host = activeDevice?.host
+        if (host == null) {
+            onComplete("Connect to your PC via Wi-Fi first.")
+            return
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            _isTransferringFile.value = true
+            try {
+                val encoded = URLEncoder.encode(fileName, "UTF-8")
+                val conn = (URL("http://$host:$FILE_HTTP_PORT/download?name=$encoded").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 5000
+                    readTimeout = 30_000
+                }
+                if (conn.responseCode !in 200..299) {
+                    throw IllegalStateException("HTTP ${conn.responseCode}")
+                }
+
+                conn.inputStream.use { input ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val values = ContentValues().apply {
+                            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/GptRemote")
+                        }
+                        val resolver = context.contentResolver
+                        val outUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                            ?: throw IllegalStateException("Could not create Download entry")
+                        resolver.openOutputStream(outUri)?.use { out ->
+                            input.copyTo(out, bufferSize = 65536)
+                        }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val dir = File(
+                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                            "GptRemote"
+                        ).apply { mkdirs() }
+                        FileOutputStream(File(dir, fileName)).use { out ->
+                            input.copyTo(out, bufferSize = 65536)
+                        }
+                    }
+                }
+                conn.disconnect()
+                onComplete("Saved '$fileName' to Downloads/GptRemote.")
+            } catch (e: Exception) {
+                onComplete("Download failed: ${e.message ?: "error"}")
+            } finally {
+                _isTransferringFile.value = false
+            }
+        }
+    }
+
+    private fun resolveFileName(context: Context, uri: Uri): String {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) {
+                    cursor.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it }
+                }
+            }
+        }
+        return uri.lastPathSegment?.substringAfterLast('/') ?: "shared_file.bin"
+    }
+
+    private fun resolveFileSize(context: Context, uri: Uri): Long {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (idx >= 0 && !cursor.isNull(idx)) return cursor.getLong(idx)
+            }
+        }
+        return -1L
     }
 
     fun sendMouseMove(dx: Int, dy: Int, wheel: Int = 0) {
@@ -311,6 +530,17 @@ class WifiPcRemoteClient {
         if (dx != 0) pendingDx.addAndGet(dx)
         if (dy != 0) pendingDy.addAndGet(dy)
         if (wheel != 0) pendingWheel.addAndGet(wheel)
+    }
+
+    fun sendTapAbs(nx: Float, ny: Float) {
+        if (writer == null) return
+        sendQueue.trySend(
+            JSONObject()
+                .put("t", "tap_abs")
+                .put("nx", nx.toDouble())
+                .put("ny", ny.toDouble())
+                .toString()
+        )
     }
 
     fun sendMouseClick(button: MouseButton) {
@@ -341,6 +571,7 @@ class WifiPcRemoteClient {
 
     private fun handleConnectionLost(reason: String?) {
         if (activeDevice != null) {
+            stopPcScreenMirror()
             runCatching { writer?.close() }
             runCatching { socket?.close() }
             writer = null
@@ -365,6 +596,8 @@ class WifiPcRemoteClient {
     companion object {
         const val DEFAULT_PORT = 58765
         const val DISCOVERY_PORT = 58766
+        const val SCREEN_PORT = 58767
+        const val FILE_HTTP_PORT = 58768
         const val DISCOVER_MAGIC = "GPT_REMOTE_DISCOVER_V1"
 
         fun buttonToPcKeyName(button: RemoteButton): String? = when (button) {

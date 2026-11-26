@@ -1,6 +1,8 @@
 package com.gptremote.mitv.ui
 
 import android.app.Application
+import android.content.Intent
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import com.gptremote.mitv.data.RemoteRepository
 import com.gptremote.mitv.haptic.HapticStrength
@@ -10,8 +12,6 @@ import com.gptremote.mitv.model.LaunchableApp
 import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
-import com.gptremote.mitv.model.SavedDevice
-import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
 import kotlinx.coroutines.flow.StateFlow
 
@@ -33,8 +33,6 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setBluetoothPcProfile(enabled: Boolean) = repository.setBluetoothPcProfile(enabled)
 
-    fun selectTransport(mode: TransportMode) = repository.selectTransport(mode)
-
     fun startBluetoothScan() = repository.startBluetoothScan()
 
     fun refreshPairedBluetooth() = repository.refreshPairedBluetooth()
@@ -50,14 +48,30 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun connectWifiPc(device: TvDevice.WifiPc) = repository.connectWifiPc(device)
 
-    fun connectSavedDevice(saved: SavedDevice) = repository.connectSavedDevice(saved)
-
     fun addAndConnectManualWifi(host: String, nickname: String, category: DeviceCategory) =
         repository.addAndConnectManualWifi(host, nickname, category)
 
     fun submitWifiPin(pin: String) = repository.submitWifiPin(pin)
 
     fun disconnect() = repository.disconnect()
+
+    fun startPcScreenMirror() = repository.startPcScreenMirror()
+
+    fun stopPcScreenMirror() = repository.stopPcScreenMirror()
+
+    fun sendPcScreenTap(nx: Float, ny: Float) = repository.sendPcScreenTap(nx, ny)
+
+    fun getConnectedPcHost(): String? = repository.getConnectedPcHost()
+
+    fun startPhoneCast(resultCode: Int, data: Intent) = repository.startPhoneCast(resultCode, data)
+
+    fun stopPhoneCast() = repository.stopPhoneCast()
+
+    fun refreshPcFiles() = repository.refreshPcFiles()
+
+    fun uploadFileToPc(uri: Uri) = repository.uploadFileToPc(uri)
+
+    fun downloadFileFromPc(fileName: String) = repository.downloadFileFromPc(fileName)
 
     fun pressButton(button: RemoteButton, strongHaptic: Boolean = false) =
         repository.sendButton(button, strongHaptic)

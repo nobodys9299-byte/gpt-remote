@@ -53,17 +53,28 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pip pyinstaller
+      - name: Install PyInstaller, mss, and Pillow
+        run: python -m pip install --upgrade pip pyinstaller mss pillow
 
       - name: Build standalone GptRemotePC.exe
         run: pyinstaller --onefile --noconsole --name GptRemotePC pc-companion/gpt_remote_pc.py
 
-      - name: Upload Windows EXE artifact
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build GptRemotePC-Setup.exe installer
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = (Get-Command iscc.exe).Source }
+          & $iscc "pc-companion\GptRemotePC.iss"
+
+      - name: Upload Windows Installer & Portable EXE artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: GptRemotePC-exe
-          path: dist/GptRemotePC.exe
+          name: GptRemotePC-windows
+          path: |
+            dist/GptRemotePC-Setup.exe
+            dist/GptRemotePC.exe
 
   release:
     needs: [build-apk, build-pc-exe]
@@ -76,10 +87,10 @@ jobs:
           name: GptRemote-debug-apk
           path: release-assets
 
-      - name: Download Windows EXE
+      - name: Download Windows Installer & EXE
         uses: actions/download-artifact@v4
         with:
-          name: GptRemotePC-exe
+          name: GptRemotePC-windows
           path: release-assets
 
       - name: Publish latest GitHub Release
@@ -91,9 +102,11 @@ jobs:
             Automated build from commit `${{ github.sha }}`.
 
             - **Android App:** Download `GptRemote-debug.apk` (Android 9.0+).
-            - **Windows Wi-Fi PC Receiver:** Download `GptRemotePC.exe` (System Tray app, no Python required).
+            - **Windows PC Installer:** Download `GptRemotePC-Setup.exe` (installs desktop app, tray mode, screen share, two-way file sharing, and firewall rules).
+            - **Windows Portable App:** Download `GptRemotePC.exe`.
           files: |
             release-assets/GptRemote-debug.apk
+            release-assets/GptRemotePC-Setup.exe
             release-assets/GptRemotePC.exe
           overwrite_files: true
           make_latest: true

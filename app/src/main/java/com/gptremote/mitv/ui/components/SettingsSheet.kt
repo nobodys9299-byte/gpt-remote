@@ -146,18 +146,12 @@ fun SettingsSheet(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "1. On your laptop, run the script from the repo's pc-companion folder:",
+                    text = "1. Install GptRemotePC-Setup.exe on your Windows PC (from GitHub Releases) and open GPT Remote PC.",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
                 Text(
-                    text = "python pc-companion/gpt_remote_pc.py",
-                    color = MiOrange,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-                Text(
-                    text = "2. Make sure phone & laptop are on the same Wi-Fi, then tap Scan on the Home Hub (or add your laptop's IP manually).",
+                    text = "2. On your phone, choose PC / Laptop -> Connect -> Wi-Fi PC -> Scan to control mouse/keyboard, mirror screens, and share files.",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )

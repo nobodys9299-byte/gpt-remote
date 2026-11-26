@@ -1,6 +1,9 @@
 package com.gptremote.mitv.data
 
 import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
 import com.gptremote.mitv.bluetooth.BluetoothHidManager
 import com.gptremote.mitv.haptic.HapticManager
 import com.gptremote.mitv.haptic.HapticStrength
@@ -17,6 +20,8 @@ import com.gptremote.mitv.model.SavedDevice
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
 import com.gptremote.mitv.wifi.AndroidTvNsdDiscovery
+import com.gptremote.mitv.wifi.ScreenCastService
+import com.gptremote.mitv.wifi.SharedPcFile
 import com.gptremote.mitv.wifi.TvCertificateManager
 import com.gptremote.mitv.wifi.WifiPcRemoteClient
 import com.gptremote.mitv.wifi.WifiTvRemoteClient
@@ -32,8 +37,8 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 
 /**
- * Coordinates Bluetooth HID, Wi-Fi Android TV Remote v2, Wi-Fi PC Companion,
- * built-in IR Blaster, Saved Devices, and hardware vibration haptics.
+ * Coordinates Bluetooth HID, Wi-Fi Android TV Remote v2, Wi-Fi PC Companion (control,
+ * live screen mirror/cast, two-way file sharing), built-in IR Blaster, and vibration haptics.
  */
 class RemoteRepository(context: Context) {
 
@@ -81,6 +86,14 @@ class RemoteRepository(context: Context) {
         val banner: String?,
         val brand: BrandOption?,
         val irEnabled: Boolean
+    )
+
+    private data class MediaShareFlows(
+        val pcScreen: Bitmap?,
+        val isMirroringPc: Boolean,
+        val isCastingPhone: Boolean,
+        val files: List<SharedPcFile>,
+        val isTransferring: Boolean
     )
 
     private val coreFlows = combine(
@@ -132,11 +145,22 @@ class RemoteRepository(context: Context) {
         )
     }
 
+    private val mediaShareFlows = combine(
+        wifiPcClient.pcScreenBitmap,
+        wifiPcClient.isMirroringPc,
+        ScreenCastService.isCasting,
+        wifiPcClient.sharedFiles,
+        wifiPcClient.isTransferringFile
+    ) { screen, mirroring, casting, files, transferring ->
+        MediaShareFlows(screen, mirroring, casting, files, transferring)
+    }
+
     val uiState: StateFlow<RemoteUiState> = combine(
         coreFlows,
         discoveryFlows,
-        flagsFlows
-    ) { core, disc, flags ->
+        flagsFlows,
+        mediaShareFlows
+    ) { core, disc, flags, media ->
         val effectiveStatus = when {
             core.btStatus is ConnectionStatus.Connected -> core.btStatus
             core.wifiTvStatus is ConnectionStatus.Connected -> core.wifiTvStatus
@@ -174,6 +198,11 @@ class RemoteRepository(context: Context) {
             isScanningBluetooth = flags.btScanning,
             isScanningWifi = flags.wifiTvScanning,
             isScanningWifiPc = flags.wifiPcScanning,
+            pcScreenBitmap = media.pcScreen,
+            isMirroringPc = media.isMirroringPc,
+            isCastingPhoneScreen = media.isCastingPhone,
+            sharedPcFiles = media.files,
+            isTransferringFile = media.isTransferring,
             lastStatusBanner = flags.banner
         )
     }.stateIn(
@@ -195,9 +224,7 @@ class RemoteRepository(context: Context) {
         }.launchIn(scope)
     }
 
-    fun initializeBluetooth() {
-        bluetoothHid.ensureInitialized()
-    }
+    fun initializeBluetooth() = bluetoothHid.ensureInitialized()
 
     fun selectProductBrand(brand: BrandOption) {
         selectedBrand.value = brand
@@ -223,7 +250,7 @@ class RemoteRepository(context: Context) {
         }
         irActive.value = enabled
         if (enabled) {
-            statusBanner.value = "IR Blaster mode active — point your phone at the ${selectedBrand.value?.name ?: "device"}."
+            statusBanner.value = "IR Blaster mode active — point phone at ${selectedBrand.value?.name ?: "device"}."
         }
     }
 
@@ -235,35 +262,7 @@ class RemoteRepository(context: Context) {
         }
     }
 
-    fun setBluetoothPcProfile(enabled: Boolean) {
-        bluetoothHid.setPcProfile(enabled)
-    }
-
-    fun selectTransport(mode: TransportMode) {
-        activeTransport.value = mode
-        when (mode) {
-            TransportMode.BLUETOOTH_HID -> {
-                wifiDiscovery.stopDiscovery()
-                wifiPcClient.stopDiscovery()
-                bluetoothHid.ensureInitialized()
-            }
-            TransportMode.WIFI_ANDROID_TV -> {
-                wifiPcClient.stopDiscovery()
-                wifiDiscovery.startDiscovery()
-            }
-            TransportMode.WIFI_PC -> {
-                wifiDiscovery.stopDiscovery()
-                wifiPcClient.startDiscovery()
-            }
-        }
-    }
-
-    fun scanAllDevices() {
-        bluetoothHid.ensureInitialized()
-        bluetoothHid.startDiscovery()
-        wifiDiscovery.startDiscovery()
-        wifiPcClient.startDiscovery()
-    }
+    fun setBluetoothPcProfile(enabled: Boolean) = bluetoothHid.setPcProfile(enabled)
 
     fun startBluetoothScan() {
         activeTransport.value = TransportMode.BLUETOOTH_HID
@@ -317,80 +316,80 @@ class RemoteRepository(context: Context) {
         wifiPcClient.connect(device)
     }
 
-    fun connectSavedDevice(saved: SavedDevice) {
-        when (saved.transport) {
-            TransportMode.BLUETOOTH_HID -> {
-                connectBluetooth(
-                    TvDevice.BluetoothTv(
-                        id = saved.addressOrHost,
-                        name = saved.nickname,
-                        isBonded = true,
-                        category = saved.category
-                    )
-                )
-            }
-            TransportMode.WIFI_ANDROID_TV -> {
-                connectWifi(
-                    TvDevice.WifiTv(
-                        id = saved.id,
-                        name = saved.nickname,
-                        host = saved.addressOrHost,
-                        port = if (saved.port > 0) saved.port else 6466,
-                        pairingPort = (if (saved.port > 0) saved.port else 6466) + 1,
-                        isPaired = certManager.isHostPaired(saved.addressOrHost)
-                    )
-                )
-            }
-            TransportMode.WIFI_PC -> {
-                connectWifiPc(
-                    TvDevice.WifiPc(
-                        id = saved.id,
-                        name = saved.nickname,
-                        host = saved.addressOrHost,
-                        port = if (saved.port > 0) saved.port else WifiPcRemoteClient.DEFAULT_PORT
-                    )
-                )
-            }
-        }
-    }
-
-    fun addAndConnectManualWifi(
-        host: String,
-        nickname: String,
-        category: DeviceCategory
-    ) {
+    fun addAndConnectManualWifi(host: String, nickname: String, category: DeviceCategory) {
         val cleanHost = host.trim()
         if (cleanHost.isEmpty()) return
         val name = nickname.trim().ifEmpty {
-            if (category == DeviceCategory.LAPTOP_PC) "Laptop ($cleanHost)" else "Smart TV ($cleanHost)"
+            if (category == DeviceCategory.LAPTOP_PC) "PC ($cleanHost)" else "Smart TV ($cleanHost)"
         }
-        val port = if (category == DeviceCategory.LAPTOP_PC) WifiPcRemoteClient.DEFAULT_PORT else 6466
-        val transport = if (category == DeviceCategory.LAPTOP_PC) TransportMode.WIFI_PC else TransportMode.WIFI_ANDROID_TV
-
-        val saved = SavedDevice(
-            id = "$cleanHost:$port",
-            nickname = name,
-            originalName = name,
-            addressOrHost = cleanHost,
-            port = port,
-            transport = transport,
-            category = category,
-            iconKey = if (category == DeviceCategory.LAPTOP_PC) "laptop" else "tv",
-            lastConnectedMs = System.currentTimeMillis()
-        )
-        savedStore.upsertCustomDevice(saved)
-        connectSavedDevice(saved)
+        if (category == DeviceCategory.LAPTOP_PC) {
+            connectWifiPc(
+                TvDevice.WifiPc(
+                    id = "$cleanHost:${WifiPcRemoteClient.DEFAULT_PORT}",
+                    name = name,
+                    host = cleanHost
+                )
+            )
+        } else {
+            connectWifi(
+                TvDevice.WifiTv(
+                    id = "$cleanHost:6466",
+                    name = name,
+                    host = cleanHost,
+                    isPaired = certManager.isHostPaired(cleanHost)
+                )
+            )
+        }
     }
 
-    fun submitWifiPin(pin: String) {
-        wifiTvClient.submitPairingPin(pin)
-    }
+    fun submitWifiPin(pin: String) = wifiTvClient.submitPairingPin(pin)
 
     fun disconnect() {
+        ScreenCastService.stop(appContext)
         bluetoothHid.disconnect()
         wifiTvClient.disconnect()
         wifiPcClient.disconnect()
         irActive.value = false
+    }
+
+    fun startPcScreenMirror() {
+        wifiPcClient.startPcScreenMirror { err -> statusBanner.value = err }
+    }
+
+    fun stopPcScreenMirror() = wifiPcClient.stopPcScreenMirror()
+
+    fun sendPcScreenTap(nx: Float, ny: Float) {
+        haptics.click()
+        wifiPcClient.sendTapAbs(nx, ny)
+    }
+
+    fun getConnectedPcHost(): String? = wifiPcClient.connectedHostIp
+
+    fun startPhoneCast(resultCode: Int, data: Intent) {
+        val host = wifiPcClient.connectedHostIp
+        if (host == null) {
+            statusBanner.value = "Connect to your PC via Wi-Fi first to cast phone screen."
+            return
+        }
+        ScreenCastService.start(appContext, resultCode, data, host)
+    }
+
+    fun stopPhoneCast() {
+        ScreenCastService.stop(appContext)
+    }
+
+    fun refreshPcFiles() {
+        wifiPcClient.refreshSharedFiles { err -> statusBanner.value = err }
+    }
+
+    fun uploadFileToPc(uri: Uri) {
+        haptics.click()
+        wifiPcClient.uploadFile(appContext, uri) { msg -> statusBanner.value = msg }
+    }
+
+    fun downloadFileFromPc(fileName: String) {
+        haptics.click()
+        wifiPcClient.downloadFile(appContext, fileName) { msg -> statusBanner.value = msg }
     }
 
     fun sendButton(button: RemoteButton, strongHaptic: Boolean = false) {
@@ -409,11 +408,9 @@ class RemoteRepository(context: Context) {
                 val brand = selectedBrand.value
                 if (irActive.value && brand != null && irBlaster.hasIrEmitter) {
                     val sent = irBlaster.sendButton(brand, button)
-                    if (!sent) {
-                        statusBanner.value = "No IR mapping for this button on ${brand.name}."
-                    }
+                    if (!sent) statusBanner.value = "No IR mapping for this button on ${brand.name}."
                 } else {
-                    statusBanner.value = "Tap Connect at the top to pair with your ${brand?.name ?: "device"}."
+                    statusBanner.value = "Tap Connect at the top to pair with ${brand?.name ?: "your device"}."
                 }
             }
         }
@@ -434,35 +431,20 @@ class RemoteRepository(context: Context) {
         when (val current = uiState.value.status) {
             is ConnectionStatus.Connected -> {
                 when (current.device.transport) {
-                    TransportMode.WIFI_ANDROID_TV -> {
-                        val link = app.tvAppLink
-                        if (link != null) {
-                            wifiTvClient.launchApp(link)
-                        }
-                    }
-                    TransportMode.WIFI_PC -> {
-                        val key = app.pcAppKey
-                        if (key != null) {
-                            wifiPcClient.launchApp(key)
-                        }
-                    }
+                    TransportMode.WIFI_ANDROID_TV -> app.tvAppLink?.let { wifiTvClient.launchApp(it) }
+                    TransportMode.WIFI_PC -> app.pcAppKey?.let { wifiPcClient.launchApp(it) }
                     TransportMode.BLUETOOTH_HID -> {
                         if (selectedBrand.value?.productType == ProductType.PC_LAPTOP ||
                             current.device.category == DeviceCategory.LAPTOP_PC
                         ) {
-                            val cmd = app.pcFallbackCommand
-                            if (cmd != null) {
-                                bluetoothHid.launchPcApp(cmd)
-                            }
+                            app.pcFallbackCommand?.let { bluetoothHid.launchPcApp(it) }
                         } else {
-                            statusBanner.value = "Direct TV app launch requires Wi-Fi Android TV connection (tap Connect -> Wi-Fi)."
+                            statusBanner.value = "Direct TV app launch requires Wi-Fi Android TV connection."
                         }
                     }
                 }
             }
-            else -> {
-                statusBanner.value = "Connect via Wi-Fi or Bluetooth first to launch ${app.name}."
-            }
+            else -> statusBanner.value = "Connect via Wi-Fi or Bluetooth first to launch ${app.name}."
         }
     }
 
@@ -477,9 +459,7 @@ class RemoteRepository(context: Context) {
                     TransportMode.WIFI_PC -> wifiPcClient.sendText(text)
                 }
             }
-            else -> {
-                statusBanner.value = "Connect to your device first to send text."
-            }
+            else -> statusBanner.value = "Connect to your device first to send text."
         }
     }
 
@@ -521,6 +501,7 @@ class RemoteRepository(context: Context) {
     }
 
     fun release() {
+        ScreenCastService.stop(appContext)
         bluetoothHid.release()
         wifiDiscovery.stopDiscovery()
         wifiTvClient.disconnect()

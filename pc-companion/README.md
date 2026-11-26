@@ -1,30 +1,24 @@
-# Wi-Fi PC / Laptop Companion
+# GPT Remote PC (Windows / macOS / Linux)
 
-Run the companion on your laptop or desktop to control its mouse, keyboard, and media over Wi-Fi from the **GPT Remote** Android app.
+Installable PC companion app for **GPT Remote** with remote mouse/keyboard, live **Screen Sharing**, and **Two-Way File Transfer** over Wi-Fi.
 
-## Option A: Standalone Windows Tray App `.exe` (No Python or CMD Window)
+## Option A: Windows Installer (Recommended)
 
-Download **`GptRemotePC.exe`** from the [GitHub Releases](https://github.com/nobodys9299-byte/gpt-remote/releases) page and double-click it.
-- Runs silently in the **Windows System Tray** (bottom-right near the clock) with **no black CMD window**.
-- Click or right-click the tray icon to see your **Wi-Fi IP**, enable **Run at Windows Startup** (automatically installs into `%LOCALAPPDATA%\GptRemotePC`), or click **Allow Windows Firewall (Admin)** if Windows treats your Wi-Fi/Hotspot as Public.
+Download **`GptRemotePC-Setup.exe`** from [GitHub Releases](https://github.com/nobodys9299-byte/gpt-remote/releases) and run the installer.
+- Installs **GPT Remote PC** into Program Files with Desktop/Start Menu shortcuts and clean Uninstall support.
+- Automatically configures Windows Firewall ports (`58765`, `58766`, `58767`, `58768`).
+- Closing the window minimizes it to the **Windows System Tray** so your phone can connect anytime.
 
-## Option B: One-Click Scripts (Windows with Python)
+## Option B: Run from Python Source
 
-- **`start_pc_companion.bat`**: Double-click to start immediately in a status window (shows your Wi-Fi IP and connection logs).
-- **`allow_firewall.bat`**: Double-click once if Windows set your Wi-Fi or Hotspot to **Public** and blocks incoming phone connections (opens TCP `58765` and UDP `58766` in Windows Firewall).
-- **`install_autostart.bat`**: Adds a silent Windows Startup shortcut (`GptRemotePC.lnk`) and starts the companion in the background automatically whenever you log in.
-- **`uninstall_autostart.bat`**: Stops the background companion and removes the Startup shortcut.
-
-Or run from terminal:
+On Windows (install `mss` & `pillow` for screen sharing):
 ```powershell
+pip install mss pillow
 python pc-companion/gpt_remote_pc.py
 ```
 
-## macOS / Linux
-
+On macOS / Linux:
 ```bash
-pip install pynput
+pip install pynput mss pillow
 python3 pc-companion/gpt_remote_pc.py
 ```
-
-Make sure your phone and laptop are on the same Wi-Fi network, and allow Private network access in Windows Firewall if prompted (TCP port `58765` / UDP port `58766`).

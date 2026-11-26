@@ -1,6 +1,8 @@
 package com.gptremote.mitv.model
 
+import android.graphics.Bitmap
 import com.gptremote.mitv.haptic.HapticStrength
+import com.gptremote.mitv.wifi.SharedPcFile
 
 sealed interface ConnectionStatus {
     data object Disconnected : ConnectionStatus
@@ -27,6 +29,11 @@ data class RemoteUiState(
     val isScanningWifi: Boolean = false,
     val isScanningWifiPc: Boolean = false,
     val isScanningBluetooth: Boolean = false,
+    val pcScreenBitmap: Bitmap? = null,
+    val isMirroringPc: Boolean = false,
+    val isCastingPhoneScreen: Boolean = false,
+    val sharedPcFiles: List<SharedPcFile> = emptyList(),
+    val isTransferringFile: Boolean = false,
     val lastStatusBanner: String? = null
 ) {
     val isConnected: Boolean

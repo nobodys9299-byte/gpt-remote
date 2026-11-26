@@ -2,7 +2,9 @@ package com.gptremote.mitv
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
+import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -61,6 +63,23 @@ class MainActivity : ComponentActivity() {
                     contract = ActivityResultContracts.StartActivityForResult()
                 ) {
                     viewModel.refreshPairedBluetooth()
+                }
+
+                val screenCastLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartActivityForResult()
+                ) { result ->
+                    val data = result.data
+                    if (result.resultCode == RESULT_OK && data != null) {
+                        viewModel.startPhoneCast(result.resultCode, data)
+                    }
+                }
+
+                val pickFileLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.OpenDocument()
+                ) { uri ->
+                    if (uri != null) {
+                        viewModel.uploadFileToPc(uri)
+                    }
                 }
 
                 val requestBtPermissions = {
@@ -152,6 +171,17 @@ class MainActivity : ComponentActivity() {
                             onEnableIr = { viewModel.setIrMode(true) },
                             onSubmitWifiPin = viewModel::submitWifiPin,
                             onDisconnect = viewModel::disconnect,
+                            onStartPcMirror = viewModel::startPcScreenMirror,
+                            onStopPcMirror = viewModel::stopPcScreenMirror,
+                            onTapMirroredScreen = viewModel::sendPcScreenTap,
+                            onStartPhoneCast = {
+                                val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                                screenCastLauncher.launch(mgr.createScreenCaptureIntent())
+                            },
+                            onStopPhoneCast = viewModel::stopPhoneCast,
+                            onRefreshPcFiles = viewModel::refreshPcFiles,
+                            onPickFileToSend = { pickFileLauncher.launch(arrayOf("*/*")) },
+                            onDownloadPcFile = { file -> viewModel.downloadFileFromPc(file.name) },
                             onButtonPress = viewModel::pressButton,
                             onApplianceAction = viewModel::sendApplianceAction,
                             onLaunchApp = viewModel::launchApp,

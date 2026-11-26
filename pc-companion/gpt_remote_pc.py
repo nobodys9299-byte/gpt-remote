@@ -1,34 +1,51 @@
 #!/usr/bin/env python3
 """
-GPT Remote - Wi-Fi PC/Laptop Companion
-Runs silently in the Windows System Tray (no CMD window when compiled with --noconsole)
-or as a CLI service on macOS/Linux.
-
-Features:
-- Zero external dependencies on Windows (ctypes SendInput + Win32 System Tray)
-- UDP subnet discovery (port 58766) + TCP control & announce (port 58765)
-- 1-click "Run at Windows Startup" (copies to %LOCALAPPDATA%\\GptRemotePC if run from Temp)
-- 1-click "Allow Windows Firewall" helper for Private & Public/Hotspot Wi-Fi
+GPT Remote PC - Windows/macOS/Linux Desktop Companion App
+Provides:
+1. Dark Desktop Dashboard GUI + System Tray Icon
+2. Remote Mouse, Touchpad, Absolute Tap, Keyboard, Media & App Launch (TCP 58765)
+3. UDP Auto-Discovery (UDP 58766)
+4. Live PC-to-Phone Screen Streaming (TCP 58767)
+5. Two-Way File Transfer & Phone-to-PC Screen Viewer (HTTP 58768)
 """
 
 import ctypes
+import http.server
+import io
 import json
 import os
 import platform
 import shutil
 import socket
+import socketserver
+import struct
 import subprocess
 import sys
 import threading
+import time
+import urllib.parse
 import webbrowser
 
 TCP_PORT = 58765
 UDP_DISCOVERY_PORT = 58766
+SCREEN_PORT = 58767
+FILE_HTTP_PORT = 58768
 DISCOVER_MAGIC = b"GPT_REMOTE_DISCOVER_V1"
 
 
+def default_shared_dir() -> str:
+    downloads = os.path.join(os.path.expanduser("~"), "Downloads", "GptRemote")
+    os.makedirs(downloads, exist_ok=True)
+    return downloads
+
+
+# ---- Input Backends ----
+
 class InputBackend:
     def move(self, dx: int, dy: int) -> None:
+        raise NotImplementedError
+
+    def move_abs(self, nx: float, ny: float, click: bool = False) -> None:
         raise NotImplementedError
 
     def scroll(self, dy: int) -> None:
@@ -101,6 +118,7 @@ class WindowsBackend(InputBackend):
     MOUSEEVENTF_MIDDLEDOWN = 0x0020
     MOUSEEVENTF_MIDDLEUP = 0x0040
     MOUSEEVENTF_WHEEL = 0x0800
+    MOUSEEVENTF_ABSOLUTE = 0x8000
     KEYEVENTF_KEYUP = 0x0002
     KEYEVENTF_UNICODE = 0x0004
 
@@ -194,6 +212,15 @@ class WindowsBackend(InputBackend):
     def move(self, dx: int, dy: int) -> None:
         self._mouse(self.MOUSEEVENTF_MOVE, dx=dx, dy=dy)
 
+    def move_abs(self, nx: float, ny: float, click: bool = False) -> None:
+        nx = max(0.0, min(1.0, nx))
+        ny = max(0.0, min(1.0, ny))
+        ax = int(nx * 65535)
+        ay = int(ny * 65535)
+        self._mouse(self.MOUSEEVENTF_MOVE | self.MOUSEEVENTF_ABSOLUTE, dx=ax, dy=ay)
+        if click:
+            self.click("left")
+
     def scroll(self, dy: int) -> None:
         self._mouse(self.MOUSEEVENTF_WHEEL, data=int(dy * 120) & 0xFFFFFFFF)
 
@@ -279,6 +306,11 @@ class PynputBackend(InputBackend):
     def move(self, dx: int, dy: int) -> None:
         self.mouse.move(dx, dy)
 
+    def move_abs(self, nx: float, ny: float, click: bool = False) -> None:
+        # Basic fallback without screen dimensions
+        if click:
+            self.click("left")
+
     def scroll(self, dy: int) -> None:
         self.mouse.scroll(0, dy)
 
@@ -297,6 +329,44 @@ class PynputBackend(InputBackend):
     def text(self, s: str) -> None:
         self.kb.type(s)
 
+
+# ---- Screen Capture Helper ----
+
+def capture_pc_jpeg(max_width: int = 1080, quality: int = 58) -> bytes | None:
+    """Captures the primary PC screen as JPEG bytes. Uses mss + Pillow if available, or Pillow ImageGrab."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    img = None
+    try:
+        import mss  # type: ignore
+        with mss.mss() as sct:
+            mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+            raw = sct.grab(mon)
+            img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+    except Exception:
+        try:
+            from PIL import ImageGrab
+            img = ImageGrab.grab()
+        except Exception:
+            img = None
+
+    if img is None:
+        return None
+
+    w, h = img.size
+    if w > max_width:
+        new_h = max(1, int(h * (max_width / float(w))))
+        img = img.resize((max_width, new_h), Image.Resampling.BILINEAR)
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=False)
+    return buf.getvalue()
+
+
+# ---- Networking Helpers & State ----
 
 def get_local_ips() -> list[str]:
     ips: list[str] = []
@@ -323,7 +393,13 @@ class RemoteServerState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.active_clients: set[str] = set()
+        self.shared_dir: str = default_shared_dir()
+        self.allow_pc_screen_share: bool = True
+        self.latest_phone_frame: bytes | None = None
+        self.latest_phone_frame_ts: float = 0.0
         self.on_change = None
+        self.on_files_change = None
+        self.on_phone_frame = None
 
     def add_client(self, addr_str: str) -> None:
         with self._lock:
@@ -343,6 +419,19 @@ class RemoteServerState:
         with self._lock:
             return len(self.active_clients)
 
+    def notify_files_changed(self) -> None:
+        cb = self.on_files_change
+        if cb:
+            cb()
+
+    def update_phone_frame(self, jpeg_bytes: bytes) -> None:
+        with self._lock:
+            self.latest_phone_frame = jpeg_bytes
+            self.latest_phone_frame_ts = time.time()
+            cb = self.on_phone_frame
+        if cb:
+            cb(jpeg_bytes)
+
 
 def udp_discovery_loop(stop_event: threading.Event) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -354,6 +443,8 @@ def udp_discovery_loop(stop_event: threading.Event) -> None:
         "name": socket.gethostname(),
         "os": platform.system(),
         "port": TCP_PORT,
+        "screenPort": SCREEN_PORT,
+        "filePort": FILE_HTTP_PORT,
     }).encode("utf-8")
 
     try:
@@ -385,6 +476,8 @@ def handle_client(
             "name": socket.gethostname(),
             "os": platform.system(),
             "port": TCP_PORT,
+            "screenPort": SCREEN_PORT,
+            "filePort": FILE_HTTP_PORT,
         }) + "\n"
         conn.sendall(hello.encode("utf-8"))
     except OSError:
@@ -405,6 +498,10 @@ def handle_client(
                 t = msg.get("t")
                 if t == "move":
                     backend.move(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
+                elif t == "tap_abs":
+                    backend.move_abs(float(msg.get("nx", 0.5)), float(msg.get("ny", 0.5)), click=True)
+                elif t == "move_abs":
+                    backend.move_abs(float(msg.get("nx", 0.5)), float(msg.get("ny", 0.5)), click=False)
                 elif t == "scroll":
                     backend.scroll(int(msg.get("dy", 0)))
                 elif t == "click":
@@ -450,6 +547,172 @@ def tcp_server_loop(
         server.close()
 
 
+def handle_screen_viewer(
+    conn: socket.socket,
+    state: RemoteServerState,
+    stop_event: threading.Event,
+) -> None:
+    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    try:
+        while not stop_event.is_set():
+            if not state.allow_pc_screen_share:
+                time.sleep(0.25)
+                continue
+            t0 = time.time()
+            jpeg = capture_pc_jpeg(max_width=1080, quality=58)
+            if jpeg:
+                header = struct.pack(">I", len(jpeg))
+                conn.sendall(header + jpeg)
+            elapsed = time.time() - t0
+            sleep_for = max(0.02, (1.0 / 14.0) - elapsed)
+            time.sleep(sleep_for)
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+        pass
+    finally:
+        conn.close()
+
+
+def screen_server_loop(state: RemoteServerState, stop_event: threading.Event) -> None:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.settimeout(1.0)
+    server.bind(("0.0.0.0", SCREEN_PORT))
+    server.listen(4)
+
+    try:
+        while not stop_event.is_set():
+            try:
+                conn, _ = server.accept()
+                threading.Thread(
+                    target=handle_screen_viewer,
+                    args=(conn, state, stop_event),
+                    daemon=True,
+                ).start()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+    finally:
+        server.close()
+
+
+def sanitize_filename(raw: str) -> str:
+    base = os.path.basename(raw or "received_file.bin").strip()
+    if not base or base in (".", ".."):
+        base = "received_file.bin"
+    return "".join(ch if ch not in '<>:"/\\|?*' else "_" for ch in base)
+
+
+def unique_target_path(folder: str, filename: str) -> str:
+    os.makedirs(folder, exist_ok=True)
+    candidate = os.path.join(folder, filename)
+    if not os.path.exists(candidate):
+        return candidate
+    stem, ext = os.path.splitext(filename)
+    idx = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(folder, f"{stem} ({idx}){ext}")
+        idx += 1
+    return candidate
+
+
+class ThreadingHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
+def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event) -> None:
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/files":
+                folder = state.shared_dir
+                os.makedirs(folder, exist_ok=True)
+                items = []
+                for entry in sorted(os.listdir(folder)):
+                    full = os.path.join(folder, entry)
+                    if os.path.isfile(full):
+                        st = os.stat(full)
+                        items.append({
+                            "name": entry,
+                            "size": st.st_size,
+                            "modifiedMs": int(st.st_mtime * 1000),
+                        })
+                body = json.dumps({"folder": folder, "files": items}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif parsed.path == "/download":
+                params = urllib.parse.parse_qs(parsed.query)
+                raw_name = params.get("name", [""])[0]
+                safe_name = sanitize_filename(raw_name)
+                full = os.path.join(state.shared_dir, safe_name)
+                if not os.path.isfile(full):
+                    self.send_error(404, "File not found")
+                    return
+                size = os.path.getsize(full)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
+                self.send_header("Content-Length", str(size))
+                self.end_headers()
+                with open(full, "rb") as fh:
+                    while True:
+                        chunk = fh.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            else:
+                self.send_error(404)
+
+        def do_POST(self):
+            parsed = urllib.parse.urlparse(self.path)
+            length = int(self.headers.get("Content-Length", "0"))
+            if parsed.path == "/upload":
+                raw_name = urllib.parse.unquote(self.headers.get("X-Filename", "shared_file.bin"))
+                safe_name = sanitize_filename(raw_name)
+                dest = unique_target_path(state.shared_dir, safe_name)
+                remaining = length
+                with open(dest, "wb") as out:
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(65536, remaining))
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        remaining -= len(chunk)
+                state.notify_files_changed()
+                resp = json.dumps({"ok": True, "savedAs": os.path.basename(dest)}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+            elif parsed.path == "/phone-frame":
+                if length <= 0 or length > 5 * 1024 * 1024:
+                    self.send_error(400)
+                    return
+                data = self.rfile.read(length)
+                state.update_phone_frame(data)
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"OK")
+            else:
+                self.send_error(404)
+
+    httpd = ThreadingHttpServer(("0.0.0.0", FILE_HTTP_PORT), Handler)
+    httpd.timeout = 0.5
+    try:
+        while not stop_event.is_set():
+            httpd.handle_request()
+    finally:
+        httpd.server_close()
+
+
 # ---- Windows Startup, Install & Firewall Helpers ----
 
 def _startup_shortcut_path() -> str:
@@ -461,7 +724,7 @@ def _startup_shortcut_path() -> str:
 
 def _installed_exe_path() -> str:
     local_appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-    return os.path.join(local_appdata, "GptRemotePC", "GptRemotePC.exe")
+    return os.path.join(local_appdata, "Programs", "GPT Remote PC", "GptRemotePC.exe")
 
 
 def is_autostart_enabled() -> bool:
@@ -477,7 +740,6 @@ def toggle_autostart() -> tuple[bool, str]:
     is_frozen = getattr(sys, "frozen", False)
     if is_frozen:
         target_exe = os.path.abspath(sys.executable)
-        # If running out of a Temp folder/zip, copy into %LOCALAPPDATA%\GptRemotePC first
         if "temp" in target_exe.lower():
             dest_exe = _installed_exe_path()
             os.makedirs(os.path.dirname(dest_exe), exist_ok=True)
@@ -485,7 +747,7 @@ def toggle_autostart() -> tuple[bool, str]:
                 shutil.copy2(target_exe, dest_exe)
             target_exe = dest_exe
         target_path = target_exe
-        args = ""
+        args = "--tray"
         workdir = os.path.dirname(target_exe)
     else:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -504,25 +766,337 @@ def toggle_autostart() -> tuple[bool, str]:
     )
     subprocess.run(
         ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
-        creationflags=0x08000000,  # CREATE_NO_WINDOW
+        creationflags=0x08000000,
         check=True,
     )
-    return True, f"Installed auto-start shortcut for:\n{target_path}"
+    return True, f"Auto-start enabled for:\n{target_path}"
 
 
 def allow_windows_firewall() -> None:
     cmd = (
         'netsh advfirewall firewall delete rule name="GPT Remote PC TCP 58765" >nul 2>&1 & '
         'netsh advfirewall firewall delete rule name="GPT Remote PC UDP 58766" >nul 2>&1 & '
+        'netsh advfirewall firewall delete rule name="GPT Remote PC Screen 58767" >nul 2>&1 & '
+        'netsh advfirewall firewall delete rule name="GPT Remote PC Files 58768" >nul 2>&1 & '
         'netsh advfirewall firewall add rule name="GPT Remote PC TCP 58765" dir=in action=allow protocol=TCP localport=58765 profile=any & '
-        'netsh advfirewall firewall add rule name="GPT Remote PC UDP 58766" dir=in action=allow protocol=UDP localport=58766 profile=any'
+        'netsh advfirewall firewall add rule name="GPT Remote PC UDP 58766" dir=in action=allow protocol=UDP localport=58766 profile=any & '
+        'netsh advfirewall firewall add rule name="GPT Remote PC Screen 58767" dir=in action=allow protocol=TCP localport=58767 profile=any & '
+        'netsh advfirewall firewall add rule name="GPT Remote PC Files 58768" dir=in action=allow protocol=TCP localport=58768 profile=any'
     )
     ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f"/c {cmd}", None, 0)
 
 
-# ---- Windows System Tray UI (Zero Console Window) ----
+# ---- Windows Desktop GUI + System Tray ----
 
-def run_windows_tray(backend: InputBackend, state: RemoteServerState, stop_event: threading.Event) -> None:
+def run_windows_desktop_app(
+    state: RemoteServerState,
+    stop_event: threading.Event,
+    start_minimized: bool = False,
+) -> None:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+
+    root = tk.Tk()
+    root.title("GPT Remote PC")
+    root.geometry("460x600")
+    root.configure(bg="#0E1015")
+    root.resizable(False, False)
+
+    BG = "#0E1015"
+    CARD = "#181B23"
+    ELEV = "#232834"
+    ORANGE = "#FF6900"
+    BLUE = "#38BDF8"
+    GREEN = "#34D399"
+    TXT = "#F3F4F6"
+    SUB = "#9CA3AF"
+
+    # Header
+    hdr = tk.Frame(root, bg=BG)
+    hdr.pack(fill="x", padx=20, pady=(18, 10))
+    tk.Label(hdr, text="GPT Remote PC", bg=BG, fg=TXT, font=("Segoe UI", 18, "bold")).pack(anchor="w")
+    tk.Label(
+        hdr,
+        text="Control PC, share screen, and transfer files with your phone",
+        bg=BG,
+        fg=SUB,
+        font=("Segoe UI", 9),
+    ).pack(anchor="w")
+
+    # Connection Card
+    conn_card = tk.Frame(root, bg=CARD, highlightbackground="#2F3545", highlightthickness=1)
+    conn_card.pack(fill="x", padx=20, pady=6)
+
+    ip_var = tk.StringVar()
+    clients_var = tk.StringVar()
+
+    def refresh_status():
+        ips = get_local_ips()
+        ip_str = ", ".join(ips) if ips else "Not connected to Wi-Fi"
+        ip_var.set(f"PC Name: {socket.gethostname()}   •   Wi-Fi IP: {ip_str}")
+        c = state.count()
+        clients_var.set(
+            f"Connected Phones: {c}   •   Ports: {TCP_PORT} / {SCREEN_PORT} / {FILE_HTTP_PORT}"
+        )
+
+    tk.Label(conn_card, textvariable=ip_var, bg=CARD, fg=BLUE, font=("Segoe UI", 10, "bold")).pack(
+        anchor="w", padx=14, pady=(12, 2)
+    )
+    tk.Label(conn_card, textvariable=clients_var, bg=CARD, fg=GREEN, font=("Segoe UI", 9)).pack(
+        anchor="w", padx=14, pady=(0, 12)
+    )
+
+    # Screen Share Card
+    scr_card = tk.Frame(root, bg=CARD, highlightbackground="#2F3545", highlightthickness=1)
+    scr_card.pack(fill="x", padx=20, pady=6)
+    tk.Label(scr_card, text="Screen Sharing", bg=CARD, fg=TXT, font=("Segoe UI", 11, "bold")).pack(
+        anchor="w", padx=14, pady=(12, 4)
+    )
+    allow_screen_var = tk.BooleanVar(value=state.allow_pc_screen_share)
+
+    def on_toggle_screen():
+        state.allow_pc_screen_share = allow_screen_var.get()
+
+    tk.Checkbutton(
+        scr_card,
+        text="Allow phone app to view & touch-control this PC screen",
+        variable=allow_screen_var,
+        command=on_toggle_screen,
+        bg=CARD,
+        fg=TXT,
+        selectcolor=ELEV,
+        activebackground=CARD,
+        activeforeground=TXT,
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", padx=12, pady=(0, 8))
+
+    phone_win_ref: dict[str, tk.Toplevel | None] = {"win": None}
+    phone_label_ref: dict[str, tk.Label | None] = {"lbl": None}
+    phone_photo_ref: dict[str, object | None] = {"img": None}
+
+    def open_phone_mirror_window():
+        existing = phone_win_ref["win"]
+        if existing and existing.winfo_exists():
+            existing.lift()
+            return
+        win = tk.Toplevel(root)
+        win.title("Phone Screen Mirror")
+        win.geometry("400x720")
+        win.configure(bg="#000000")
+        lbl = tk.Label(
+            win,
+            text="Waiting for phone screen cast...\n\nOn your phone, open:\nPC Remote -> Screen -> Cast Phone Screen",
+            bg="#000000",
+            fg=SUB,
+            font=("Segoe UI", 10),
+        )
+        lbl.pack(fill="both", expand=True)
+        phone_win_ref["win"] = win
+        phone_label_ref["lbl"] = lbl
+        if state.latest_phone_frame:
+            render_phone_frame(state.latest_phone_frame)
+
+    def render_phone_frame(jpeg_bytes: bytes):
+        win = phone_win_ref.get("win")
+        lbl = phone_label_ref.get("lbl")
+        if not win or not win.winfo_exists() or not lbl:
+            return
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(io.BytesIO(jpeg_bytes))
+            w = max(240, win.winfo_width() - 12)
+            h = max(360, win.winfo_height() - 12)
+            img.thumbnail((w, h), Image.Resampling.BILINEAR)
+            photo = ImageTk.PhotoImage(img)
+            phone_photo_ref["img"] = photo
+            lbl.configure(image=photo, text="")
+        except Exception:
+            pass
+
+    tk.Button(
+        scr_card,
+        text="Open Phone Screen Viewer",
+        command=open_phone_mirror_window,
+        bg=ELEV,
+        fg=TXT,
+        relief="flat",
+        font=("Segoe UI", 9, "bold"),
+        padx=12,
+        pady=6,
+    ).pack(anchor="w", padx=14, pady=(0, 12))
+
+    # File Sharing Card
+    file_card = tk.Frame(root, bg=CARD, highlightbackground="#2F3545", highlightthickness=1)
+    file_card.pack(fill="both", expand=True, padx=20, pady=6)
+    tk.Label(file_card, text="Two-Way File Share", bg=CARD, fg=TXT, font=("Segoe UI", 11, "bold")).pack(
+        anchor="w", padx=14, pady=(12, 2)
+    )
+    folder_lbl = tk.Label(
+        file_card,
+        text=f"Folder: {state.shared_dir}",
+        bg=CARD,
+        fg=SUB,
+        font=("Segoe UI", 8),
+    )
+    folder_lbl.pack(anchor="w", padx=14, pady=(0, 6))
+
+    files_listbox = tk.Listbox(
+        file_card,
+        bg=ELEV,
+        fg=TXT,
+        borderwidth=0,
+        highlightthickness=0,
+        font=("Segoe UI", 9),
+        height=7,
+    )
+    files_listbox.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+
+    def refresh_files():
+        files_listbox.delete(0, tk.END)
+        os.makedirs(state.shared_dir, exist_ok=True)
+        entries = sorted(
+            e for e in os.listdir(state.shared_dir) if os.path.isfile(os.path.join(state.shared_dir, e))
+        )
+        if not entries:
+            files_listbox.insert(tk.END, "(No files yet — add a file or send from phone)")
+        else:
+            for e in entries:
+                sz = os.path.getsize(os.path.join(state.shared_dir, e))
+                kb = max(1, sz // 1024)
+                files_listbox.insert(tk.END, f"{e}  ({kb} KB)")
+
+    def add_files_to_share():
+        picked = filedialog.askopenfilenames(title="Select file(s) to share with phone")
+        for src in picked:
+            dest = unique_target_path(state.shared_dir, sanitize_filename(src))
+            shutil.copy2(src, dest)
+        refresh_files()
+
+    def open_shared_folder():
+        os.makedirs(state.shared_dir, exist_ok=True)
+        os.startfile(state.shared_dir)
+
+    btn_row = tk.Frame(file_card, bg=CARD)
+    btn_row.pack(fill="x", padx=14, pady=(0, 12))
+    tk.Button(
+        btn_row,
+        text="+ Share File to Phone",
+        command=add_files_to_share,
+        bg=ORANGE,
+        fg="#FFFFFF",
+        relief="flat",
+        font=("Segoe UI", 9, "bold"),
+        padx=10,
+        pady=6,
+    ).pack(side="left")
+    tk.Button(
+        btn_row,
+        text="Open Folder",
+        command=open_shared_folder,
+        bg=ELEV,
+        fg=TXT,
+        relief="flat",
+        font=("Segoe UI", 9),
+        padx=10,
+        pady=6,
+    ).pack(side="left", padx=8)
+
+    # Bottom Controls Row
+    bot = tk.Frame(root, bg=BG)
+    bot.pack(fill="x", padx=20, pady=(6, 16))
+
+    autostart_var = tk.BooleanVar(value=is_autostart_enabled())
+
+    def on_toggle_autostart():
+        try:
+            enabled, msg = toggle_autostart()
+            autostart_var.set(enabled)
+            messagebox.showinfo("GPT Remote Startup", msg)
+        except Exception as exc:
+            autostart_var.set(is_autostart_enabled())
+            messagebox.showerror("Error", f"Could not update startup: {exc}")
+
+    tk.Checkbutton(
+        bot,
+        text="Run at Windows Startup",
+        variable=autostart_var,
+        command=on_toggle_autostart,
+        bg=BG,
+        fg=TXT,
+        selectcolor=ELEV,
+        activebackground=BG,
+        activeforeground=TXT,
+        font=("Segoe UI", 9),
+    ).pack(side="left")
+
+    tk.Button(
+        bot,
+        text="Allow Firewall",
+        command=allow_windows_firewall,
+        bg=ELEV,
+        fg=BLUE,
+        relief="flat",
+        font=("Segoe UI", 9),
+        padx=8,
+        pady=4,
+    ).pack(side="right")
+
+    tk.Button(
+        bot,
+        text="Exit App",
+        command=lambda: quit_completely(),
+        bg="#341A1D",
+        fg="#F87171",
+        relief="flat",
+        font=("Segoe UI", 9),
+        padx=8,
+        pady=4,
+    ).pack(side="right", padx=6)
+
+    def quit_completely():
+        stop_event.set()
+        root.quit()
+        root.destroy()
+
+    def minimize_to_tray():
+        root.withdraw()
+
+    root.protocol("WM_DELETE_WINDOW", minimize_to_tray)
+
+    # Wire live background state updates safely onto Tk thread
+    state.on_change = lambda: root.after(0, refresh_status)
+    state.on_files_change = lambda: root.after(0, refresh_files)
+    state.on_phone_frame = lambda data: root.after(0, lambda d=data: (
+        open_phone_mirror_window() if not (phone_win_ref["win"] and phone_win_ref["win"].winfo_exists()) else None,
+        render_phone_frame(d),
+    ))
+
+    refresh_status()
+    refresh_files()
+
+    # Background Win32 Tray Icon so closing window keeps service alive in System Tray
+    def tray_thread():
+        run_windows_tray_bridge(
+            state=state,
+            stop_event=stop_event,
+            on_show_window=lambda: root.after(0, lambda: (root.deiconify(), root.lift())),
+            on_exit=lambda: root.after(0, quit_completely),
+        )
+
+    threading.Thread(target=tray_thread, daemon=True).start()
+
+    if start_minimized:
+        root.withdraw()
+
+    root.mainloop()
+
+
+def run_windows_tray_bridge(
+    state: RemoteServerState,
+    stop_event: threading.Event,
+    on_show_window,
+    on_exit,
+) -> None:
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
@@ -538,26 +1112,19 @@ def run_windows_tray(backend: InputBackend, state: RemoteServerState, stop_event
     WM_TRAY = 0x8001
 
     NIM_ADD = 0x00000000
-    NIM_MODIFY = 0x00000001
     NIM_DELETE = 0x00000002
     NIF_MESSAGE = 0x00000001
     NIF_ICON = 0x00000002
     NIF_TIP = 0x00000004
-    NIF_INFO = 0x00000010
-    NIIF_INFO = 0x00000001
 
     MF_STRING = 0x00000000
-    MF_CHECKED = 0x00000008
-    MF_GRAYED = 0x00000001
     MF_SEPARATOR = 0x00000800
     TPM_LEFTALIGN = 0x0000
     TPM_BOTTOMALIGN = 0x0020
     TPM_RETURNCMD = 0x0100
 
-    ID_SHOW_INFO = 1001
-    ID_AUTOSTART = 1002
-    ID_FIREWALL = 1003
-    ID_EXIT = 1004
+    ID_OPEN = 1001
+    ID_EXIT = 1002
 
     class WNDCLASSEXW(ctypes.Structure):
         _fields_ = [
@@ -595,7 +1162,7 @@ def run_windows_tray(backend: InputBackend, state: RemoteServerState, stop_event
             ("dwState", wintypes.DWORD),
             ("dwStateMask", wintypes.DWORD),
             ("szInfo", wintypes.WCHAR * 256),
-            ("uVersion", wintypes.UINT),
+            ("uTimeoutOrVersion", wintypes.UINT),
             ("szInfoTitle", wintypes.WCHAR * 64),
             ("dwInfoFlags", wintypes.DWORD),
             ("guidItem", GUID),
@@ -606,137 +1173,66 @@ def run_windows_tray(backend: InputBackend, state: RemoteServerState, stop_event
     user32.DefWindowProcW.restype = LRESULT
 
     hinstance = kernel32.GetModuleHandleW(None)
-    # Try nice computer/network icon from shell32.dll (index 15 = This PC / monitor), fallback to default app icon
     hicon = shell32.ExtractIconW(hinstance, "shell32.dll", 15)
     if not hicon or hicon == 1:
         hicon = user32.LoadIconW(None, ctypes.cast(32512, wintypes.LPCWSTR))
 
-    hwnd_holder: dict[str, wintypes.HWND] = {}
-
-    def build_tip() -> str:
-        ips = get_local_ips()
-        ip_str = ips[0] if ips else "Check Wi-Fi"
-        return f"GPT Remote ({ip_str}) • Connected: {state.count()}"[:127]
-
-    def update_tray_tip() -> None:
-        hwnd = hwnd_holder.get("hwnd")
-        if not hwnd:
-            return
-        nid = NOTIFYICONDATAW()
-        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
-        nid.hWnd = hwnd
-        nid.uID = 1
-        nid.uFlags = NIF_TIP
-        nid.szTip = build_tip()
-        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
-
-    state.on_change = update_tray_tip
-
-    def show_info_popup() -> None:
-        ips = get_local_ips()
-        ip_text = ", ".join(ips) if ips else "Not connected to Wi-Fi"
-        msg = (
-            f"Computer Name: {socket.gethostname()}\n"
-            f"Wi-Fi IP: {ip_text}\n"
-            f"Port: {TCP_PORT} (UDP Discovery: {UDP_DISCOVERY_PORT})\n"
-            f"Connected Phones: {state.count()}\n\n"
-            "On your phone, open GPT Remote -> Wi-Fi PC -> Scan\n"
-            "or tap + and enter the Wi-Fi IP above."
-        )
-        user32.MessageBoxW(None, msg, "GPT Remote PC Companion", 0x00000040)
-
-    def show_tray_menu(hwnd: wintypes.HWND) -> None:
+    def show_menu(hwnd):
         hmenu = user32.CreatePopupMenu()
-        ips = get_local_ips()
-        ip_label = ips[0] if ips else "No Wi-Fi IP"
-        user32.AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, f"IP: {ip_label}  (Port {TCP_PORT})")
-        user32.AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, f"Connected Phones: {state.count()}")
-        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(hmenu, MF_STRING, ID_SHOW_INFO, "Show Status && IP...")
-        autostart_flags = MF_STRING | (MF_CHECKED if is_autostart_enabled() else 0)
-        user32.AppendMenuW(hmenu, autostart_flags, ID_AUTOSTART, "Run at Windows Startup")
-        user32.AppendMenuW(hmenu, MF_STRING, ID_FIREWALL, "Allow Windows Firewall (Admin)")
+        user32.AppendMenuW(hmenu, MF_STRING, ID_OPEN, "Open GPT Remote PC")
         user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(hmenu, MF_STRING, ID_EXIT, "Exit")
-
         pt = wintypes.POINT()
         user32.GetCursorPos(ctypes.byref(pt))
         user32.SetForegroundWindow(hwnd)
         cmd = user32.TrackPopupMenu(
-            hmenu,
-            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
-            pt.x,
-            pt.y,
-            0,
-            hwnd,
-            None,
+            hmenu, TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, None
         )
         user32.DestroyMenu(hmenu)
-
-        if cmd == ID_SHOW_INFO:
-            threading.Thread(target=show_info_popup, daemon=True).start()
-        elif cmd == ID_AUTOSTART:
-            try:
-                _, info_msg = toggle_autostart()
-                threading.Thread(
-                    target=lambda: user32.MessageBoxW(None, info_msg, "GPT Remote Startup", 0x40),
-                    daemon=True,
-                ).start()
-            except Exception as exc:
-                err_msg = f"Failed to update startup shortcut: {exc}"
-                threading.Thread(
-                    target=lambda: user32.MessageBoxW(None, err_msg, "GPT Remote Error", 0x10),
-                    daemon=True,
-                ).start()
-        elif cmd == ID_FIREWALL:
-            allow_windows_firewall()
+        if cmd == ID_OPEN:
+            on_show_window()
         elif cmd == ID_EXIT:
-            stop_event.set()
-            user32.PostQuitMessage(0)
+            on_exit()
 
     def wnd_proc(hwnd, msg, wparam, lparam):
         if msg == WM_TRAY:
-            event = lparam & 0xFFFF
-            if event in (WM_LBUTTONUP, WM_RBUTTONUP):
-                show_tray_menu(hwnd)
+            ev = lparam & 0xFFFF
+            if ev == WM_LBUTTONUP:
+                on_show_window()
+            elif ev == WM_RBUTTONUP:
+                show_menu(hwnd)
             return 0
         if msg == WM_DESTROY:
-            stop_event.set()
             user32.PostQuitMessage(0)
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
-    wnd_proc_cb = WNDPROC(wnd_proc)
-    class_name = "GptRemoteTrayWindow"
-
+    cb = WNDPROC(wnd_proc)
+    cls_name = "GptRemotePcTrayBridge"
     wc = WNDCLASSEXW()
     wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-    wc.lpfnWndProc = wnd_proc_cb
+    wc.lpfnWndProc = cb
     wc.hInstance = hinstance
     wc.hIcon = hicon
-    wc.lpszClassName = class_name
+    wc.lpszClassName = cls_name
     user32.RegisterClassExW(ctypes.byref(wc))
 
-    hwnd = user32.CreateWindowExW(
-        0, class_name, "GPT Remote", 0, 0, 0, 0, 0, None, None, hinstance, None
-    )
-    hwnd_holder["hwnd"] = hwnd
-
-    ips = get_local_ips()
-    ip_summary = ", ".join(ips) if ips else "Check Wi-Fi"
-
+    hwnd = user32.CreateWindowExW(0, cls_name, "GPT Remote Tray", 0, 0, 0, 0, 0, None, None, hinstance, None)
     nid = NOTIFYICONDATAW()
     nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
     nid.hWnd = hwnd
     nid.uID = 1
-    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
     nid.uCallbackMessage = WM_TRAY
     nid.hIcon = hicon
-    nid.szTip = build_tip()
-    nid.szInfoTitle = "GPT Remote Ready"
-    nid.szInfo = f"Running in System Tray • Wi-Fi IP: {ip_summary}"[:255]
-    nid.dwInfoFlags = NIIF_INFO
+    nid.szTip = "GPT Remote PC"
     shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+
+    def watch_stop():
+        stop_event.wait()
+        user32.PostMessageW(hwnd, WM_DESTROY, 0, 0)
+
+    threading.Thread(target=watch_stop, daemon=True).start()
 
     msg_struct = wintypes.MSG()
     while user32.GetMessageW(ctypes.byref(msg_struct), None, 0, 0) > 0:
@@ -753,13 +1249,16 @@ def main() -> None:
 
     threading.Thread(target=udp_discovery_loop, args=(stop_event,), daemon=True).start()
     threading.Thread(target=tcp_server_loop, args=(backend, state, stop_event), daemon=True).start()
+    threading.Thread(target=screen_server_loop, args=(state, stop_event), daemon=True).start()
+    threading.Thread(target=file_http_server_loop, args=(state, stop_event), daemon=True).start()
 
     if platform.system() == "Windows":
-        run_windows_tray(backend, state, stop_event)
+        start_minimized = "--tray" in sys.argv
+        run_windows_desktop_app(state, stop_event, start_minimized=start_minimized)
     else:
         ips = get_local_ips()
-        print(f"GPT Remote PC Companion running on '{socket.gethostname()}' ({platform.system()})")
-        print(f"Wi-Fi IP(s): {', '.join(ips) if ips else 'unknown'} | TCP {TCP_PORT} / UDP {UDP_DISCOVERY_PORT}")
+        print(f"GPT Remote PC running on '{socket.gethostname()}' ({platform.system()})")
+        print(f"Wi-Fi IP(s): {', '.join(ips) if ips else 'unknown'} | Ports: {TCP_PORT}/{SCREEN_PORT}/{FILE_HTTP_PORT}")
         try:
             stop_event.wait()
         except KeyboardInterrupt:
