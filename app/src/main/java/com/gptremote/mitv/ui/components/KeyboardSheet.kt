@@ -50,7 +50,7 @@ fun KeyboardSheet(
     onDismiss: () -> Unit
 ) {
     var draft by remember { mutableStateOf("") }
-    var liveTyping by remember { mutableStateOf(false) }
+    var liveTyping by remember { mutableStateOf(true) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,

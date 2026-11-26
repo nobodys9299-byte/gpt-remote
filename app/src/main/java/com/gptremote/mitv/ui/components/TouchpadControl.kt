@@ -2,18 +2,16 @@ package com.gptremote.mitv.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilterChip
@@ -24,12 +22,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -43,7 +44,7 @@ import com.gptremote.mitv.ui.theme.RemoteSurface
 import com.gptremote.mitv.ui.theme.RemoteSurfaceElevated
 import com.gptremote.mitv.ui.theme.TextSecondary
 import kotlin.math.abs
-import kotlin.math.roundToInt
+import kotlin.math.truncate
 
 @Composable
 fun TouchpadControl(
@@ -55,12 +56,11 @@ fun TouchpadControl(
 ) {
     val haptic = LocalHapticFeedback.current
     var sensitivity by remember { mutableFloatStateOf(1.5f) }
-    var swipeAccumX by remember { mutableFloatStateOf(0f) }
-    var swipeAccumY by remember { mutableFloatStateOf(0f) }
-    var scrollAccum by remember { mutableFloatStateOf(0f) }
-    var isBluetoothHid by remember(transportMode) {
-        mutableStateOf(transportMode == TransportMode.BLUETOOTH_HID)
-    }
+    var isTouching by remember { mutableStateOf(false) }
+
+    val isBluetoothHid = transportMode == TransportMode.BLUETOOTH_HID
+    val latestIsBt by rememberUpdatedState(isBluetoothHid)
+    val latestSensitivity by rememberUpdatedState(sensitivity)
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -94,70 +94,123 @@ fun TouchpadControl(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(212.dp),
+                .height(216.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Main touchpad surface
+            // Unified single pointerInput surface: zero gesture competition, sub-pixel accumulator, instant tap
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
                     .clip(RoundedCornerShape(22.dp))
                     .background(RemoteSurfaceElevated)
-                    .border(1.5.dp, RemoteBorder, RoundedCornerShape(22.dp))
-                    .pointerInput(isBluetoothHid, sensitivity) {
-                        detectTapGestures(
-                            onTap = {
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onMouseClick(MouseButton.LEFT)
-                            },
-                            onDoubleTap = {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onMouseClick(MouseButton.RIGHT)
-                            }
-                        )
-                    }
-                    .pointerInput(isBluetoothHid, sensitivity) {
-                        detectDragGestures(
-                            onDragEnd = {
-                                swipeAccumX = 0f
-                                swipeAccumY = 0f
-                            },
-                            onDragCancel = {
-                                swipeAccumX = 0f
-                                swipeAccumY = 0f
-                            },
-                            onDrag = { change, dragAmount ->
-                                change.consume()
-                                if (isBluetoothHid) {
-                                    val dx = (dragAmount.x * sensitivity).roundToInt().coerceIn(-127, 127)
-                                    val dy = (dragAmount.y * sensitivity).roundToInt().coerceIn(-127, 127)
-                                    if (dx != 0 || dy != 0) {
-                                        onMouseMove(dx, dy, 0)
+                    .border(
+                        width = 1.5.dp,
+                        color = if (isTouching) MiOrange.copy(alpha = 0.7f) else RemoteBorder,
+                        shape = RoundedCornerShape(22.dp)
+                    )
+                    .pointerInput(Unit) {
+                        val tapSlopPx = viewConfiguration.touchSlop
+                        awaitEachGesture {
+                            val firstDown = awaitFirstDown(requireUnconsumed = false)
+                            firstDown.consume()
+                            isTouching = true
+
+                            var maxPointers = 1
+                            var movedBeyondTap = false
+                            var totalTravel = Offset.Zero
+                            var remX = 0f
+                            var remY = 0f
+                            var remScroll = 0f
+                            var swipeAccumX = 0f
+                            var swipeAccumY = 0f
+
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val activeChanges = event.changes.filter { it.pressed }
+                                if (activeChanges.size > maxPointers) {
+                                    maxPointers = activeChanges.size
+                                }
+
+                                if (activeChanges.isEmpty()) {
+                                    // All fingers lifted
+                                    if (!movedBeyondTap) {
+                                        haptic.performHapticFeedback(
+                                            if (maxPointers >= 2) HapticFeedbackType.LongPress
+                                            else HapticFeedbackType.TextHandleMove
+                                        )
+                                        onMouseClick(
+                                            if (maxPointers >= 2) MouseButton.RIGHT else MouseButton.LEFT
+                                        )
+                                    }
+                                    isTouching = false
+                                    break
+                                }
+
+                                if (activeChanges.size >= 2 && latestIsBt) {
+                                    // Two-finger vertical drag -> smooth mouse wheel scroll
+                                    val avgDeltaY = activeChanges
+                                        .map { it.positionChange().y }
+                                        .average()
+                                        .toFloat()
+                                    activeChanges.forEach { it.consume() }
+                                    totalTravel += Offset(0f, abs(avgDeltaY))
+                                    if (totalTravel.getDistance() > tapSlopPx) {
+                                        movedBeyondTap = true
+                                    }
+                                    remScroll += avgDeltaY
+                                    val step = 22f
+                                    if (abs(remScroll) >= step) {
+                                        val wheelTicks = (remScroll / step).toInt()
+                                        remScroll -= wheelTicks * step
+                                        onMouseMove(0, 0, -wheelTicks)
                                     }
                                 } else {
-                                    // Wi-Fi fallback: convert swipes into D-pad moves
-                                    swipeAccumX += dragAmount.x
-                                    swipeAccumY += dragAmount.y
-                                    val threshold = 64f
-                                    if (abs(swipeAccumX) > abs(swipeAccumY) && abs(swipeAccumX) >= threshold) {
-                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                        onButtonFallback(
-                                            if (swipeAccumX > 0) RemoteButton.DPAD_RIGHT else RemoteButton.DPAD_LEFT
-                                        )
-                                        swipeAccumX = 0f
-                                        swipeAccumY = 0f
-                                    } else if (abs(swipeAccumY) >= threshold) {
-                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                        onButtonFallback(
-                                            if (swipeAccumY > 0) RemoteButton.DPAD_DOWN else RemoteButton.DPAD_UP
-                                        )
-                                        swipeAccumX = 0f
-                                        swipeAccumY = 0f
+                                    val primary = activeChanges.first()
+                                    val delta = primary.positionChange()
+                                    primary.consume()
+
+                                    if (delta != Offset.Zero) {
+                                        totalTravel += Offset(abs(delta.x), abs(delta.y))
+                                        if (totalTravel.getDistance() > tapSlopPx) {
+                                            movedBeyondTap = true
+                                        }
+
+                                        if (latestIsBt) {
+                                            val factor = latestSensitivity
+                                            remX += delta.x * factor
+                                            remY += delta.y * factor
+                                            val sendX = truncate(remX).toInt()
+                                            val sendY = truncate(remY).toInt()
+                                            if (sendX != 0 || sendY != 0) {
+                                                remX -= sendX
+                                                remY -= sendY
+                                                onMouseMove(sendX, sendY, 0)
+                                            }
+                                        } else {
+                                            swipeAccumX += delta.x
+                                            swipeAccumY += delta.y
+                                            val threshold = 64f
+                                            if (abs(swipeAccumX) > abs(swipeAccumY) && abs(swipeAccumX) >= threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                onButtonFallback(
+                                                    if (swipeAccumX > 0) RemoteButton.DPAD_RIGHT else RemoteButton.DPAD_LEFT
+                                                )
+                                                swipeAccumX = 0f
+                                                swipeAccumY = 0f
+                                            } else if (abs(swipeAccumY) >= threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                onButtonFallback(
+                                                    if (swipeAccumY > 0) RemoteButton.DPAD_DOWN else RemoteButton.DPAD_UP
+                                                )
+                                                swipeAccumX = 0f
+                                                swipeAccumY = 0f
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        )
+                        }
                     },
                 contentAlignment = Alignment.Center
             ) {
@@ -170,8 +223,12 @@ fun TouchpadControl(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = if (isBluetoothHid) "Tap = Click • Double-tap = Back/Right-click" else "Tap = OK • Double-tap = Back",
-                        color = TextSecondary.copy(alpha = 0.7f),
+                        text = if (isBluetoothHid) {
+                            "Tap = Click • 2-finger tap = Back • 2-finger drag = Scroll"
+                        } else {
+                            "Tap = OK • 2-finger tap = Back"
+                        },
+                        color = TextSecondary.copy(alpha = 0.72f),
                         fontSize = 11.sp
                     )
                 }
@@ -187,19 +244,24 @@ fun TouchpadControl(
                         .background(RemoteSurface)
                         .border(1.dp, RemoteBorder, RoundedCornerShape(18.dp))
                         .pointerInput(Unit) {
-                            detectDragGestures(
-                                onDragEnd = { scrollAccum = 0f },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    scrollAccum += dragAmount.y
-                                    val step = 28f
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                down.consume()
+                                var scrollAccum = 0f
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val active = event.changes.firstOrNull { it.pressed } ?: break
+                                    val dy = active.positionChange().y
+                                    active.consume()
+                                    scrollAccum += dy
+                                    val step = 20f
                                     if (abs(scrollAccum) >= step) {
-                                        val wheel = if (scrollAccum > 0) -1 else 1
-                                        onMouseMove(0, 0, wheel)
-                                        scrollAccum = 0f
+                                        val ticks = (scrollAccum / step).toInt()
+                                        scrollAccum -= ticks * step
+                                        onMouseMove(0, 0, -ticks)
                                     }
                                 }
-                            )
+                            }
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -230,7 +292,7 @@ fun TouchpadControl(
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(14.dp)
             ) {
-                Text(if (isBluetoothHid) "Right Click" else "Back")
+                Text(if (isBluetoothHid) "Right Click / Back" else "Back")
             }
         }
     }

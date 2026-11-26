@@ -145,23 +145,23 @@ object HidDescriptor {
         RemoteButton.DPAD_DOWN -> HidAction.Keyboard(0x51)
         RemoteButton.DPAD_LEFT -> HidAction.Keyboard(0x50)
         RemoteButton.DPAD_RIGHT -> HidAction.Keyboard(0x4F)
-        RemoteButton.DPAD_CENTER -> HidAction.Keyboard(0x28) // Enter
-        RemoteButton.BACK -> HidAction.Consumer(0x0224)      // AC Back
-        RemoteButton.HOME -> HidAction.Consumer(0x0223)      // AC Home
-        RemoteButton.MENU -> HidAction.Consumer(0x0040)      // Menu
-        RemoteButton.POWER -> HidAction.Consumer(0x0030)     // Power
-        RemoteButton.VOLUME_UP -> HidAction.Consumer(0x00E9) // Volume Increment
+        RemoteButton.DPAD_CENTER -> HidAction.Consumer(0x0041) // Menu Pick -> KEY_SELECT -> DPAD_CENTER
+        RemoteButton.BACK -> HidAction.Consumer(0x0224)        // AC Back -> KEY_BACK
+        RemoteButton.HOME -> HidAction.Consumer(0x0223)        // AC Home -> KEY_HOMEPAGE
+        RemoteButton.MENU -> HidAction.Consumer(0x0040)        // Menu -> KEY_MENU
+        RemoteButton.POWER -> HidAction.Consumer(0x0030)       // Power -> KEY_POWER
+        RemoteButton.VOLUME_UP -> HidAction.Consumer(0x00E9)   // Volume Increment
         RemoteButton.VOLUME_DOWN -> HidAction.Consumer(0x00EA) // Volume Decrement
-        RemoteButton.MUTE -> HidAction.Consumer(0x00E2)      // Mute
-        RemoteButton.CHANNEL_UP -> HidAction.Consumer(0x009C)   // Channel Increment
+        RemoteButton.MUTE -> HidAction.Consumer(0x00E2)        // Mute
+        RemoteButton.CHANNEL_UP -> HidAction.Consumer(0x009C)  // Channel Increment
         RemoteButton.CHANNEL_DOWN -> HidAction.Consumer(0x009D) // Channel Decrement
         RemoteButton.MEDIA_PLAY_PAUSE -> HidAction.Consumer(0x00CD) // Play/Pause
         RemoteButton.MEDIA_NEXT -> HidAction.Consumer(0x00B5)       // Scan Next Track
         RemoteButton.MEDIA_PREVIOUS -> HidAction.Consumer(0x00B6)   // Scan Previous Track
         RemoteButton.MEDIA_STOP -> HidAction.Consumer(0x00B7)       // Stop
         RemoteButton.SEARCH -> HidAction.Consumer(0x0221)           // AC Search
-        RemoteButton.SETTINGS -> HidAction.Keyboard(0x76)           // Menu/Settings fallback (or Consumer)
-        RemoteButton.TV_INPUT -> HidAction.Keyboard(0x3B)           // F2 / Input fallback
+        RemoteButton.SETTINGS -> HidAction.Consumer(0x0183)         // AL Consumer Config -> KEY_CONFIG -> SETTINGS
+        RemoteButton.TV_INPUT -> HidAction.Consumer(0x0089)         // Media Select TV -> KEY_TV
         RemoteButton.DIGIT_1 -> HidAction.Keyboard(0x1E)
         RemoteButton.DIGIT_2 -> HidAction.Keyboard(0x1F)
         RemoteButton.DIGIT_3 -> HidAction.Keyboard(0x20)

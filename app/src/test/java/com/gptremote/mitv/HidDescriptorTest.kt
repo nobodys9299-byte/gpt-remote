@@ -61,6 +61,9 @@ class HidDescriptorTest {
             val action = HidDescriptor.buttonToHidAction(button)
             assertNotNull("Missing mapping for $button", action)
         }
+        assertEquals(HidDescriptor.HidAction.Consumer(0x0041), HidDescriptor.buttonToHidAction(RemoteButton.DPAD_CENTER))
+        assertEquals(HidDescriptor.HidAction.Consumer(0x0183), HidDescriptor.buttonToHidAction(RemoteButton.SETTINGS))
+        assertEquals(HidDescriptor.HidAction.Consumer(0x0089), HidDescriptor.buttonToHidAction(RemoteButton.TV_INPUT))
     }
 
     @Test

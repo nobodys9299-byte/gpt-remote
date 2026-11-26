@@ -22,22 +22,33 @@ import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Manages Android's BluetoothHidDevice profile so this phone emulates a Bluetooth HID
- * combo remote (Keyboard + Consumer Control + Mouse/Touchpad) for Mi Android TV.
+ * remote (Keyboard + Consumer Control + Mouse/Touchpad) for Mi Android TV.
+ *
+ * All HID reports run off the main thread:
+ * - Button and text events are serialized sequentially to prevent press/release races.
+ * - Mouse deltas are accumulated atomically and flushed at ~80Hz (12ms) to eliminate Binder/L2CAP lag.
  */
 @SuppressLint("MissingPermission")
 class BluetoothHidManager(private val context: Context) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val hidExecutor = Executors.newSingleThreadExecutor()
+    private val hidDispatcher = hidExecutor.asCoroutineDispatcher()
+    private val scope = CoroutineScope(SupervisorJob() + hidDispatcher)
     private val callbackExecutor = Executors.newSingleThreadExecutor()
 
     private val bluetoothManager: BluetoothManager? =
@@ -46,7 +57,18 @@ class BluetoothHidManager(private val context: Context) {
 
     private var hidDevice: BluetoothHidDevice? = null
     private var connectedHost: BluetoothDevice? = null
+    private var pendingConnectAddress: String? = null
     private var receiverRegistered = false
+
+    // Serialized queue for discrete key/consumer/click/text actions
+    private val actionQueue = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+    private var queueConsumerJob: Job? = null
+
+    // Coalesced atomic mouse delta accumulators flushed by mouseTickerJob at ~80Hz
+    private val pendingDx = AtomicInteger(0)
+    private val pendingDy = AtomicInteger(0)
+    private val pendingWheel = AtomicInteger(0)
+    private var mouseTickerJob: Job? = null
 
     private val _isBluetoothEnabled = MutableStateFlow(bluetoothAdapter?.isEnabled == true)
     val isBluetoothEnabled: StateFlow<Boolean> = _isBluetoothEnabled.asStateFlow()
@@ -64,6 +86,50 @@ class BluetoothHidManager(private val context: Context) {
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
     private val discoveredDevicesMap = LinkedHashMap<String, TvDevice.BluetoothTv>()
+
+    init {
+        startWorkers()
+    }
+
+    private fun startWorkers() {
+        queueConsumerJob = scope.launch {
+            for (action in actionQueue) {
+                runCatching { action() }
+            }
+        }
+
+        mouseTickerJob = scope.launch {
+            while (isActive) {
+                val dxTotal = pendingDx.getAndSet(0)
+                val dyTotal = pendingDy.getAndSet(0)
+                val wheelTotal = pendingWheel.getAndSet(0)
+
+                if (dxTotal != 0 || dyTotal != 0 || wheelTotal != 0) {
+                    val host = connectedHost
+                    val hid = hidDevice
+                    if (host != null && hid != null && hasConnectPermission()) {
+                        var remX = dxTotal
+                        var remY = dyTotal
+                        var remW = wheelTotal
+                        while (remX != 0 || remY != 0 || remW != 0) {
+                            val stepX = remX.coerceIn(-127, 127)
+                            val stepY = remY.coerceIn(-127, 127)
+                            val stepW = remW.coerceIn(-127, 127)
+                            hid.sendReport(
+                                host,
+                                HidDescriptor.REPORT_ID_MOUSE,
+                                HidDescriptor.mouseReport(0, stepX, stepY, stepW)
+                            )
+                            remX -= stepX
+                            remY -= stepY
+                            remW -= stepW
+                        }
+                    }
+                }
+                delay(12)
+            }
+        }
+    }
 
     private val discoveryReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -98,6 +164,21 @@ class BluetoothHidManager(private val context: Context) {
 
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
                     refreshPairedDevices()
+                    if (!hasConnectPermission()) return
+                    val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    }
+                    val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+                    if (device != null &&
+                        bondState == BluetoothDevice.BOND_BONDED &&
+                        pendingConnectAddress == device.address
+                    ) {
+                        pendingConnectAddress = null
+                        hidDevice?.connect(device)
+                    }
                 }
             }
         }
@@ -109,17 +190,24 @@ class BluetoothHidManager(private val context: Context) {
             if (!registered) {
                 connectedHost = null
                 _connectionStatus.value = ConnectionStatus.Disconnected
-            } else if (pluggedDevice != null) {
-                // Host already connected
-                connectedHost = pluggedDevice
-                val name = safeDeviceName(pluggedDevice)
+                return
+            }
+
+            val activeHost = pluggedDevice ?: runCatching {
+                if (hasConnectPermission()) hidDevice?.connectedDevices?.firstOrNull() else null
+            }.getOrNull()
+
+            if (activeHost != null) {
+                connectedHost = activeHost
+                val name = safeDeviceName(activeHost)
                 _connectionStatus.value = ConnectionStatus.Connected(
                     TvDevice.BluetoothTv(
-                        id = pluggedDevice.address,
+                        id = activeHost.address,
                         name = name,
                         isBonded = true
                     )
                 )
+                RemoteHidService.start(context, name)
             }
         }
 
@@ -127,6 +215,7 @@ class BluetoothHidManager(private val context: Context) {
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     connectedHost = device
+                    pendingConnectAddress = null
                     val address = device?.address ?: "unknown"
                     val name = safeDeviceName(device)
                     _connectionStatus.value = ConnectionStatus.Connected(
@@ -168,8 +257,11 @@ class BluetoothHidManager(private val context: Context) {
         }
 
         override fun onSetReport(device: BluetoothDevice?, type: Byte, id: Byte, data: ByteArray?) {
-            // Acknowledge LED/output reports cleanly
             hidDevice?.reportError(device, BluetoothHidDevice.ERROR_RSP_SUCCESS)
+        }
+
+        override fun onSetProtocol(device: BluetoothDevice?, protocol: Byte) {
+            // Keep Report Protocol active; no-op acknowledgement
         }
     }
 
@@ -261,7 +353,7 @@ class BluetoothHidManager(private val context: Context) {
             "Mi TV Remote",
             "Bluetooth HID Remote Control for Android TV",
             "GPT Remote",
-            BluetoothHidDevice.SUBCLASS1_COMBO,
+            BluetoothHidDevice.SUBCLASS2_REMOTE_CONTROL,
             HidDescriptor.DESCRIPTOR
         )
 
@@ -270,7 +362,7 @@ class BluetoothHidManager(private val context: Context) {
             800,
             9,
             0,
-            11250,
+            10000,
             BluetoothHidDeviceAppQosSettings.MAX
         )
 
@@ -338,13 +430,15 @@ class BluetoothHidManager(private val context: Context) {
         _connectionStatus.value = ConnectionStatus.Connecting(name, TransportMode.BLUETOOTH_HID)
 
         if (device.bondState != BluetoothDevice.BOND_BONDED) {
+            pendingConnectAddress = address
             device.createBond()
+            return
         }
 
         val initiated = hid.connect(device)
         if (!initiated) {
             _connectionStatus.value = ConnectionStatus.Error(
-                "Connection not initiated. On Mi TV, open Settings -> Remotes & Accessories -> Add accessory and tap 'Make Discoverable'.",
+                "Connection not initiated. On Mi TV, open Settings -> Remotes & Accessories -> Add accessory and tap 'Discoverable'.",
                 TransportMode.BLUETOOTH_HID
             )
         }
@@ -353,6 +447,7 @@ class BluetoothHidManager(private val context: Context) {
     fun disconnect() {
         val host = connectedHost ?: return
         if (!hasConnectPermission()) return
+        pendingConnectAddress = null
         hidDevice?.disconnect(host)
         connectedHost = null
         _connectionStatus.value = ConnectionStatus.Disconnected
@@ -360,11 +455,11 @@ class BluetoothHidManager(private val context: Context) {
     }
 
     fun sendButton(button: RemoteButton) {
-        val host = connectedHost ?: return
-        val hid = hidDevice ?: return
-        if (!hasConnectPermission()) return
+        if (connectedHost == null || hidDevice == null || !hasConnectPermission()) return
 
-        scope.launch {
+        actionQueue.trySend {
+            val host = connectedHost ?: return@trySend
+            val hid = hidDevice ?: return@trySend
             when (val action = HidDescriptor.buttonToHidAction(button)) {
                 is HidDescriptor.HidAction.Keyboard -> {
                     hid.sendReport(
@@ -372,7 +467,7 @@ class BluetoothHidManager(private val context: Context) {
                         HidDescriptor.REPORT_ID_KEYBOARD,
                         HidDescriptor.keyboardReport(action.keyCode, action.modifier)
                     )
-                    delay(45)
+                    delay(35)
                     hid.sendReport(
                         host,
                         HidDescriptor.REPORT_ID_KEYBOARD,
@@ -386,7 +481,7 @@ class BluetoothHidManager(private val context: Context) {
                         HidDescriptor.REPORT_ID_CONSUMER,
                         HidDescriptor.consumerReport(action.usage)
                     )
-                    delay(45)
+                    delay(35)
                     hid.sendReport(
                         host,
                         HidDescriptor.REPORT_ID_CONSUMER,
@@ -398,11 +493,11 @@ class BluetoothHidManager(private val context: Context) {
     }
 
     fun sendText(text: String) {
-        val host = connectedHost ?: return
-        val hid = hidDevice ?: return
-        if (!hasConnectPermission()) return
+        if (text.isEmpty() || connectedHost == null || hidDevice == null || !hasConnectPermission()) return
 
-        scope.launch {
+        actionQueue.trySend {
+            val host = connectedHost ?: return@trySend
+            val hid = hidDevice ?: return@trySend
             for (ch in text) {
                 val (keyCode, modifier) = HidDescriptor.charToHidKey(ch) ?: continue
                 hid.sendReport(
@@ -410,43 +505,37 @@ class BluetoothHidManager(private val context: Context) {
                     HidDescriptor.REPORT_ID_KEYBOARD,
                     HidDescriptor.keyboardReport(keyCode, modifier)
                 )
-                delay(25)
+                delay(20)
                 hid.sendReport(
                     host,
                     HidDescriptor.REPORT_ID_KEYBOARD,
                     HidDescriptor.KEYBOARD_RELEASE
                 )
-                delay(20)
+                delay(16)
             }
         }
     }
 
     fun sendMouseMove(dx: Int, dy: Int, wheel: Int = 0) {
-        val host = connectedHost ?: return
-        val hid = hidDevice ?: return
-        if (!hasConnectPermission()) return
-        if (dx == 0 && dy == 0 && wheel == 0) return
-
-        hid.sendReport(
-            host,
-            HidDescriptor.REPORT_ID_MOUSE,
-            HidDescriptor.mouseReport(buttonsMask = 0, dx = dx, dy = dy, wheel = wheel)
-        )
+        if (connectedHost == null || hidDevice == null) return
+        if (dx != 0) pendingDx.addAndGet(dx)
+        if (dy != 0) pendingDy.addAndGet(dy)
+        if (wheel != 0) pendingWheel.addAndGet(wheel)
     }
 
     fun sendMouseClick(button: MouseButton) {
-        val host = connectedHost ?: return
-        val hid = hidDevice ?: return
-        if (!hasConnectPermission()) return
+        if (connectedHost == null || hidDevice == null || !hasConnectPermission()) return
 
         val bit = HidDescriptor.mouseButtonBit(button)
-        scope.launch {
+        actionQueue.trySend {
+            val host = connectedHost ?: return@trySend
+            val hid = hidDevice ?: return@trySend
             hid.sendReport(
                 host,
                 HidDescriptor.REPORT_ID_MOUSE,
                 HidDescriptor.mouseReport(buttonsMask = bit)
             )
-            delay(40)
+            delay(35)
             hid.sendReport(
                 host,
                 HidDescriptor.REPORT_ID_MOUSE,
@@ -457,6 +546,9 @@ class BluetoothHidManager(private val context: Context) {
 
     fun release() {
         stopDiscovery()
+        mouseTickerJob?.cancel()
+        queueConsumerJob?.cancel()
+        actionQueue.close()
         if (receiverRegistered) {
             runCatching { context.unregisterReceiver(discoveryReceiver) }
             receiverRegistered = false
@@ -466,6 +558,8 @@ class BluetoothHidManager(private val context: Context) {
             bluetoothAdapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, hidDevice)
         }
         hidDevice = null
+        hidExecutor.shutdownNow()
+        callbackExecutor.shutdownNow()
         RemoteHidService.stop(context)
     }
 
