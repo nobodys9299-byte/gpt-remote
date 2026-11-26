@@ -1,0 +1,54 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run unit tests and build debug APK
+        run: ./gradlew testDebugUnitTest assembleDebug --no-daemon
+
+      - name: Prepare APK for download
+        run: cp app/build/outputs/apk/debug/app-debug.apk MiTvRemote-debug.apk
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiTvRemote-debug-apk
+          path: MiTvRemote-debug.apk
+
+      - name: Publish latest GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Mi TV Remote (Latest Build)
+          body: |
+            Automated build from commit `${{ github.sha }}`.
+            Download `MiTvRemote-debug.apk` below to install on Android 9.0+.
+          files: MiTvRemote-debug.apk
+          overwrite_files: true
+          make_latest: true
