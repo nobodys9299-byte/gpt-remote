@@ -4,7 +4,9 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.gptremote.mitv.data.RemoteRepository
 import com.gptremote.mitv.haptic.HapticStrength
+import com.gptremote.mitv.model.BrandOption
 import com.gptremote.mitv.model.DeviceCategory
+import com.gptremote.mitv.model.LaunchableApp
 import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
@@ -21,17 +23,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun hasBluetoothPermissions(): Boolean = repository.bluetoothHid.hasRequiredPermissions()
 
-    fun onPermissionsGranted() {
-        repository.initializeBluetooth()
-    }
+    fun onPermissionsGranted() = repository.initializeBluetooth()
+
+    fun selectProductBrand(brand: BrandOption) = repository.selectProductBrand(brand)
+
+    fun setIrMode(enabled: Boolean) = repository.setIrMode(enabled)
 
     fun setHapticStrength(strength: HapticStrength) = repository.setHapticStrength(strength)
 
     fun setBluetoothPcProfile(enabled: Boolean) = repository.setBluetoothPcProfile(enabled)
 
     fun selectTransport(mode: TransportMode) = repository.selectTransport(mode)
-
-    fun scanAllDevices() = repository.scanAllDevices()
 
     fun startBluetoothScan() = repository.startBluetoothScan()
 
@@ -53,17 +55,16 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     fun addAndConnectManualWifi(host: String, nickname: String, category: DeviceCategory) =
         repository.addAndConnectManualWifi(host, nickname, category)
 
-    fun customizeSavedDevice(id: String, nickname: String, category: DeviceCategory, iconKey: String) =
-        repository.customizeSavedDevice(id, nickname, category, iconKey)
-
-    fun removeSavedDevice(id: String) = repository.removeSavedDevice(id)
-
     fun submitWifiPin(pin: String) = repository.submitWifiPin(pin)
 
     fun disconnect() = repository.disconnect()
 
     fun pressButton(button: RemoteButton, strongHaptic: Boolean = false) =
         repository.sendButton(button, strongHaptic)
+
+    fun sendApplianceAction(actionKey: String) = repository.sendApplianceAction(actionKey)
+
+    fun launchApp(app: LaunchableApp) = repository.launchApp(app)
 
     fun sendText(text: String) = repository.sendText(text)
 

@@ -99,8 +99,8 @@ fun TouchpadControl(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(216.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                .height(252.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // Unified single pointerInput surface: zero gesture competition, sub-pixel accumulator, instant tap
             Box(
@@ -239,15 +239,15 @@ fun TouchpadControl(
                 }
             }
 
-            // Dedicated vertical scroll strip for cursor mode
+            // Large, easy-to-thumb vertical scroll strip for cursor mode
             if (isCursorMode) {
                 Box(
                     modifier = Modifier
-                        .width(44.dp)
+                        .width(74.dp)
                         .fillMaxHeight()
-                        .clip(RoundedCornerShape(18.dp))
+                        .clip(RoundedCornerShape(22.dp))
                         .background(RemoteSurface)
-                        .border(1.dp, RemoteBorder, RoundedCornerShape(18.dp))
+                        .border(1.5.dp, MiOrange.copy(alpha = 0.45f), RoundedCornerShape(22.dp))
                         .pointerInput(Unit) {
                             awaitEachGesture {
                                 val down = awaitFirstDown(requireUnconsumed = false)
@@ -259,7 +259,7 @@ fun TouchpadControl(
                                     val dy = active.positionChange().y
                                     active.consume()
                                     scrollAccum += dy
-                                    val step = 20f
+                                    val step = 18f
                                     if (abs(scrollAccum) >= step) {
                                         val ticks = (scrollAccum / step).toInt()
                                         scrollAccum -= ticks * step
@@ -270,13 +270,30 @@ fun TouchpadControl(
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "S\nC\nR\nO\nL\nL",
-                        color = MiOrange.copy(alpha = 0.85f),
-                        fontSize = 10.sp,
-                        lineHeight = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Text(
+                            text = "▲",
+                            color = MiOrange,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "S\nC\nR\nO\nL\nL",
+                            color = TextSecondary,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "▼",
+                            color = MiOrange,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }

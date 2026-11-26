@@ -334,6 +334,11 @@ class WifiPcRemoteClient {
         sendQueue.trySend(JSONObject().put("t", "text").put("s", text).toString())
     }
 
+    fun launchApp(appKey: String) {
+        if (writer == null || appKey.isBlank()) return
+        sendQueue.trySend(JSONObject().put("t", "launch").put("app", appKey).toString())
+    }
+
     private fun handleConnectionLost(reason: String?) {
         if (activeDevice != null) {
             runCatching { writer?.close() }
@@ -399,7 +404,13 @@ class WifiPcRemoteClient {
             RemoteButton.DIGIT_7 -> "7"
             RemoteButton.DIGIT_8 -> "8"
             RemoteButton.DIGIT_9 -> "9"
-            RemoteButton.TV_INPUT -> null
+            RemoteButton.TV_INPUT,
+            RemoteButton.GUIDE,
+            RemoteButton.INFO,
+            RemoteButton.BASS_UP,
+            RemoteButton.BASS_DOWN,
+            RemoteButton.EQ_MODE,
+            RemoteButton.KEYSTONE -> null
         }
     }
 }

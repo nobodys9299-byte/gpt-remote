@@ -1,5 +1,8 @@
 package com.gptremote.mitv.wifi
 
+import com.gptremote.mitv.ir.IrBlasterManager
+import com.gptremote.mitv.model.ProductCatalog
+import com.gptremote.mitv.model.ProductType
 import com.gptremote.mitv.wifi.TvCertificateManager.Companion.toUnsignedBigEndianBytes
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -47,6 +50,23 @@ class ProtoWireTest {
         val imeMsg = WifiTvRemoteClient.buildImeBatchEdit(1, 2, "netflix")
         val imeTop = ProtoWire.parseFields(imeMsg)
         assertEquals(21, imeTop.single().number)
+
+        val appLaunch = WifiTvRemoteClient.buildAppLinkLaunch("https://www.youtube.com")
+        val appFields = ProtoWire.parseFields(appLaunch)
+        assertEquals(90, appFields.single().number)
+        val inner = ProtoWire.parseFields(appFields.single().bytes)
+        assertEquals("https://www.youtube.com", inner.first { it.number == 1 }.bytes.toString(Charsets.UTF_8))
+    }
+
+    @Test
+    fun irEncodersAndProductCatalogProduceValidStructures() {
+        assertEquals(67, IrBlasterManager.buildNecAddressCmd(0x86, 0x0E).size)
+        assertEquals(67, IrBlasterManager.buildSamsung32(0xE0E040BFL).size)
+        assertEquals(26, IrBlasterManager.buildSonySirc12(0xA90).size)
+
+        for (product in ProductType.entries) {
+            assertTrue("Missing brands for $product", ProductCatalog.brandsFor(product).isNotEmpty())
+        }
     }
 
     @Test

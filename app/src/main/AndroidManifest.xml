@@ -30,6 +30,12 @@
     <!-- Haptic vibration feedback -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Optional built-in IR blaster support for TVs, ACs, Set-Top Boxes, Fans -->
+    <uses-permission android:name="android.permission.TRANSMIT_IR" />
+    <uses-feature
+        android:name="android.hardware.consumerir"
+        android:required="false" />
+
     <!-- Foreground service for keeping Bluetooth HID connection alive -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />

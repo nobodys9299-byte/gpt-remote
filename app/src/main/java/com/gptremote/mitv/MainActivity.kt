@@ -18,15 +18,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import com.gptremote.mitv.model.ConnectionStatus
+import com.gptremote.mitv.model.BrandOption
+import com.gptremote.mitv.model.DeviceCategory
+import com.gptremote.mitv.model.ProductCatalog
+import com.gptremote.mitv.model.ProductType
+import com.gptremote.mitv.ui.BrandPickerScreen
 import com.gptremote.mitv.ui.HomeHubScreen
 import com.gptremote.mitv.ui.RemoteScreen
 import com.gptremote.mitv.ui.RemoteViewModel
 import com.gptremote.mitv.ui.theme.MiTvRemoteTheme
 
-private enum class AppPage {
-    HOME_HUB,
-    REMOTE
+private sealed interface AppRoute {
+    data object Home : AppRoute
+    data class BrandList(val product: ProductType) : AppRoute
+    data class Remote(val brand: BrandOption) : AppRoute
 }
 
 class MainActivity : ComponentActivity() {
@@ -41,17 +46,7 @@ class MainActivity : ComponentActivity() {
             MiTvRemoteTheme {
                 val uiState by viewModel.uiState.collectAsState()
                 var hasBtPermissions by remember { mutableStateOf(viewModel.hasBluetoothPermissions()) }
-                var currentPage by remember { mutableStateOf(AppPage.HOME_HUB) }
-                var wasConnected by remember { mutableStateOf(false) }
-
-                // Automatically open RemoteScreen when a new connection succeeds
-                LaunchedEffect(uiState.status) {
-                    val isNowConnected = uiState.status is ConnectionStatus.Connected
-                    if (isNowConnected && !wasConnected) {
-                        currentPage = AppPage.REMOTE
-                    }
-                    wasConnected = isNowConnected
-                }
+                var route by remember { mutableStateOf<AppRoute>(AppRoute.Home) }
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -94,50 +89,80 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                if (currentPage == AppPage.REMOTE) {
-                    BackHandler {
-                        currentPage = AppPage.HOME_HUB
+                when (val current = route) {
+                    AppRoute.Home -> {
+                        HomeHubScreen(
+                            uiState = uiState,
+                            onSelectProduct = { product ->
+                                route = AppRoute.BrandList(product)
+                            },
+                            onOpenActiveRemote = {
+                                val activeBrand = uiState.selectedBrand ?: run {
+                                    val fallbackProduct = if (uiState.connectedCategory == DeviceCategory.LAPTOP_PC) {
+                                        ProductType.PC_LAPTOP
+                                    } else {
+                                        ProductType.SMART_TV
+                                    }
+                                    ProductCatalog.brandsFor(fallbackProduct).first()
+                                }
+                                route = AppRoute.Remote(activeBrand)
+                            },
+                            onDisconnect = viewModel::disconnect,
+                            onSelectHapticStrength = viewModel::setHapticStrength,
+                            onToggleBluetoothPcProfile = viewModel::setBluetoothPcProfile,
+                            onClearBanner = viewModel::clearBanner
+                        )
                     }
-                    RemoteScreen(
-                        uiState = uiState,
-                        onNavigateBackToHub = { currentPage = AppPage.HOME_HUB },
-                        onButtonPress = viewModel::pressButton,
-                        onSendText = viewModel::sendText,
-                        onMouseMove = viewModel::moveMouse,
-                        onMouseClick = viewModel::clickMouse,
-                        onSelectHapticStrength = viewModel::setHapticStrength,
-                        onToggleBluetoothPcProfile = viewModel::setBluetoothPcProfile,
-                        onClearBanner = viewModel::clearBanner
-                    )
-                } else {
-                    HomeHubScreen(
-                        uiState = uiState,
-                        hasBluetoothPermissions = hasBtPermissions,
-                        onRequestBluetoothPermissions = requestBtPermissions,
-                        onMakeDiscoverable = {
-                            val intent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
-                                putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120)
+
+                    is AppRoute.BrandList -> {
+                        BackHandler { route = AppRoute.Home }
+                        BrandPickerScreen(
+                            product = current.product,
+                            onBack = { route = AppRoute.Home },
+                            onSelectBrand = { brand ->
+                                viewModel.selectProductBrand(brand)
+                                route = AppRoute.Remote(brand)
                             }
-                            discoverableLauncher.launch(intent)
-                        },
-                        onScanAll = viewModel::scanAllDevices,
-                        onScanBluetooth = viewModel::startBluetoothScan,
-                        onScanWifiTv = viewModel::startWifiScan,
-                        onScanWifiPc = viewModel::startWifiPcScan,
-                        onConnectBluetooth = viewModel::connectBluetooth,
-                        onConnectWifiTv = viewModel::connectWifi,
-                        onConnectWifiPc = viewModel::connectWifiPc,
-                        onConnectSaved = viewModel::connectSavedDevice,
-                        onAddManualWifi = viewModel::addAndConnectManualWifi,
-                        onCustomizeSaved = viewModel::customizeSavedDevice,
-                        onRemoveSaved = viewModel::removeSavedDevice,
-                        onSubmitWifiPin = viewModel::submitWifiPin,
-                        onDisconnect = viewModel::disconnect,
-                        onOpenRemote = { currentPage = AppPage.REMOTE },
-                        onSelectHapticStrength = viewModel::setHapticStrength,
-                        onToggleBluetoothPcProfile = viewModel::setBluetoothPcProfile,
-                        onClearBanner = viewModel::clearBanner
-                    )
+                        )
+                    }
+
+                    is AppRoute.Remote -> {
+                        BackHandler { route = AppRoute.BrandList(current.brand.productType) }
+                        RemoteScreen(
+                            brand = current.brand,
+                            uiState = uiState,
+                            hasBluetoothPermissions = hasBtPermissions,
+                            onNavigateBack = { route = AppRoute.BrandList(current.brand.productType) },
+                            onRequestBluetoothPermissions = requestBtPermissions,
+                            onMakeDiscoverable = {
+                                val intent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
+                                    putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120)
+                                }
+                                discoverableLauncher.launch(intent)
+                            },
+                            onScanBluetooth = viewModel::startBluetoothScan,
+                            onConnectBluetooth = viewModel::connectBluetooth,
+                            onScanWifiTv = viewModel::startWifiScan,
+                            onConnectWifiTv = viewModel::connectWifi,
+                            onScanWifiPc = viewModel::startWifiPcScan,
+                            onConnectWifiPc = viewModel::connectWifiPc,
+                            onConnectManualIp = { host, category ->
+                                viewModel.addAndConnectManualWifi(host, current.brand.name, category)
+                            },
+                            onEnableIr = { viewModel.setIrMode(true) },
+                            onSubmitWifiPin = viewModel::submitWifiPin,
+                            onDisconnect = viewModel::disconnect,
+                            onButtonPress = viewModel::pressButton,
+                            onApplianceAction = viewModel::sendApplianceAction,
+                            onLaunchApp = viewModel::launchApp,
+                            onSendText = viewModel::sendText,
+                            onMouseMove = viewModel::moveMouse,
+                            onMouseClick = viewModel::clickMouse,
+                            onSelectHapticStrength = viewModel::setHapticStrength,
+                            onToggleBluetoothPcProfile = viewModel::setBluetoothPcProfile,
+                            onClearBanner = viewModel::clearBanner
+                        )
+                    }
                 }
             }
         }

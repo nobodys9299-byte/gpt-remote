@@ -551,6 +551,34 @@ class BluetoothHidManager(private val context: Context) {
         }
     }
 
+    fun launchPcApp(runCommand: String) {
+        if (runCommand.isBlank() || connectedHost == null || hidDevice == null || !hasConnectPermission()) return
+
+        actionQueue.trySend {
+            val host = connectedHost ?: return@trySend
+            val hid = hidDevice ?: return@trySend
+            // Win + R opens Run dialog on Windows
+            hid.sendReport(
+                host,
+                HidDescriptor.REPORT_ID_KEYBOARD,
+                HidDescriptor.keyboardReport(0x15, HidDescriptor.MOD_LEFT_GUI) // 'r' + Win
+            )
+            delay(40)
+            hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.KEYBOARD_RELEASE)
+            delay(220)
+            for (ch in runCommand) {
+                val (keyCode, modifier) = HidDescriptor.charToHidKey(ch) ?: continue
+                hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.keyboardReport(keyCode, modifier))
+                delay(18)
+                hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.KEYBOARD_RELEASE)
+                delay(14)
+            }
+            hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.keyboardReport(0x28)) // Enter
+            delay(35)
+            hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.KEYBOARD_RELEASE)
+        }
+    }
+
     fun sendMouseMove(dx: Int, dy: Int, wheel: Int = 0) {
         if (connectedHost == null || hidDevice == null) return
         if (dx != 0) pendingDx.addAndGet(dx)

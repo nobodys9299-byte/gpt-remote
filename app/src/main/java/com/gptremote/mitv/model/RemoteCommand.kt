@@ -44,7 +44,14 @@ enum class RemoteButton {
     PC_ALT_TAB,
     PC_COPY,
     PC_PASTE,
-    PC_SHOW_DESKTOP
+    PC_SHOW_DESKTOP,
+    // Set-Top Box / Soundbar / Projector buttons
+    GUIDE,
+    INFO,
+    BASS_UP,
+    BASS_DOWN,
+    EQ_MODE,
+    KEYSTONE
 }
 
 enum class MouseButton {

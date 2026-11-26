@@ -218,6 +218,15 @@ class WifiTvRemoteClient(
         }
     }
 
+    fun launchApp(appLink: String) {
+        if (appLink.isBlank()) return
+        scope.launch {
+            runCatching {
+                sendFrame(buildAppLinkLaunch(appLink))
+            }
+        }
+    }
+
     fun disconnect() {
         pairingJob?.cancel()
         pairingJob = null
@@ -353,6 +362,13 @@ class WifiTvRemoteClient(
                 }
             }.toByteArray()
 
+        fun buildAppLinkLaunch(appLink: String): ByteArray =
+            ProtoWire.Writer().apply {
+                writeMessageField(90) {
+                    writeStringField(1, appLink)
+                }
+            }.toByteArray()
+
         fun buttonToAndroidKeyCode(button: RemoteButton): Int? = when (button) {
             RemoteButton.DPAD_UP -> KeyEvent.KEYCODE_DPAD_UP
             RemoteButton.DPAD_DOWN -> KeyEvent.KEYCODE_DPAD_DOWN
@@ -393,7 +409,13 @@ class WifiTvRemoteClient(
             RemoteButton.PC_PASTE -> KeyEvent.KEYCODE_PASTE
             RemoteButton.PC_WIN_KEY,
             RemoteButton.PC_ALT_TAB,
-            RemoteButton.PC_SHOW_DESKTOP -> null
+            RemoteButton.PC_SHOW_DESKTOP,
+            RemoteButton.BASS_UP,
+            RemoteButton.BASS_DOWN,
+            RemoteButton.EQ_MODE,
+            RemoteButton.KEYSTONE -> null
+            RemoteButton.GUIDE -> KeyEvent.KEYCODE_GUIDE
+            RemoteButton.INFO -> KeyEvent.KEYCODE_INFO
         }
     }
 }

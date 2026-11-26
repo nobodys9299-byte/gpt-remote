@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">Mi TV Remote</string>
-    <string name="notification_channel_name">TV Remote Connection</string>
+    <string name="app_name">GPT Remote</string>
+    <string name="notification_channel_name">Device Remote Connection</string>
 </resources>

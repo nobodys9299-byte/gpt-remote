@@ -33,13 +33,13 @@ jobs:
         run: ./gradlew testDebugUnitTest assembleDebug --no-daemon
 
       - name: Prepare APK for download
-        run: cp app/build/outputs/apk/debug/app-debug.apk MiTvRemote-debug.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk GptRemote-debug.apk
 
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MiTvRemote-debug-apk
-          path: MiTvRemote-debug.apk
+          name: GptRemote-debug-apk
+          path: GptRemote-debug.apk
 
   build-pc-exe:
     runs-on: windows-latest
@@ -73,7 +73,7 @@ jobs:
       - name: Download Android APK
         uses: actions/download-artifact@v4
         with:
-          name: MiTvRemote-debug-apk
+          name: GptRemote-debug-apk
           path: release-assets
 
       - name: Download Windows EXE
@@ -90,10 +90,10 @@ jobs:
           body: |
             Automated build from commit `${{ github.sha }}`.
 
-            - **Android App:** Download `MiTvRemote-debug.apk` (Android 9.0+).
-            - **Windows Wi-Fi PC Receiver:** Download `GptRemotePC.exe` (no Python required).
+            - **Android App:** Download `GptRemote-debug.apk` (Android 9.0+).
+            - **Windows Wi-Fi PC Receiver:** Download `GptRemotePC.exe` (System Tray app, no Python required).
           files: |
-            release-assets/MiTvRemote-debug.apk
+            release-assets/GptRemote-debug.apk
             release-assets/GptRemotePC.exe
           overwrite_files: true
           make_latest: true

@@ -20,6 +20,7 @@ import socket
 import subprocess
 import sys
 import threading
+import webbrowser
 
 TCP_PORT = 58765
 UDP_DISCOVERY_PORT = 58766
@@ -41,6 +42,44 @@ class InputBackend:
 
     def text(self, s: str) -> None:
         raise NotImplementedError
+
+    def launch(self, app: str) -> None:
+        urls = {
+            "browser": "https://www.google.com",
+            "youtube": "https://www.youtube.com",
+            "netflix": "https://www.netflix.com",
+        }
+        if app in urls:
+            webbrowser.open(urls[app])
+            return
+        system = platform.system()
+        if system == "Windows":
+            cmds = {
+                "files": ["explorer.exe"],
+                "calc": ["calc.exe"],
+                "terminal": ["cmd.exe"],
+                "taskmgr": ["taskmgr.exe"],
+                "settings": ["cmd.exe", "/c", "start", "ms-settings:"],
+            }
+            if app in cmds:
+                subprocess.Popen(cmds[app])
+        elif system == "Darwin":
+            mac_apps = {
+                "files": ["open", "."],
+                "calc": ["open", "-a", "Calculator"],
+                "terminal": ["open", "-a", "Terminal"],
+                "settings": ["open", "x-apple.systempreferences:"],
+            }
+            if app in mac_apps:
+                subprocess.Popen(mac_apps[app])
+        else:
+            linux_apps = {
+                "files": ["xdg-open", "."],
+                "calc": ["gnome-calculator"],
+                "terminal": ["x-terminal-emulator"],
+            }
+            if app in linux_apps:
+                subprocess.Popen(linux_apps[app])
 
 
 def create_backend() -> InputBackend:
@@ -374,6 +413,8 @@ def handle_client(
                     backend.key(msg.get("code", ""))
                 elif t == "text":
                     backend.text(msg.get("s", ""))
+                elif t == "launch":
+                    backend.launch(msg.get("app", ""))
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
         pass
     finally:

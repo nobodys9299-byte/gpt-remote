@@ -204,6 +204,12 @@ object HidDescriptor {
         RemoteButton.PC_COPY -> HidAction.Keyboard(0x06, MOD_LEFT_CTRL)
         RemoteButton.PC_PASTE -> HidAction.Keyboard(0x19, MOD_LEFT_CTRL)
         RemoteButton.PC_SHOW_DESKTOP -> HidAction.Keyboard(0x07, MOD_LEFT_GUI) // Win + D
+        RemoteButton.GUIDE -> HidAction.Consumer(0x008D)         // Media Select Program Guide
+        RemoteButton.INFO -> HidAction.Consumer(0x0209)          // AC Properties / Info
+        RemoteButton.BASS_UP -> HidAction.Consumer(0x0152)       // Bass Increment
+        RemoteButton.BASS_DOWN -> HidAction.Consumer(0x0153)     // Bass Decrement
+        RemoteButton.EQ_MODE -> HidAction.Consumer(0x0150)       // Audio Balance/EQ
+        RemoteButton.KEYSTONE -> HidAction.Consumer(0x0040)      // Menu/Setup
     }
 
     /**

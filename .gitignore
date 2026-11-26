@@ -9,6 +9,7 @@
 .externalNativeBuild
 .cxx
 *.keystore
+!app/debug-signing.keystore
 *.jks
 __pycache__/
 *.pyc

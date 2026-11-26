@@ -13,6 +13,9 @@ sealed interface ConnectionStatus {
 data class RemoteUiState(
     val activeTransport: TransportMode = TransportMode.BLUETOOTH_HID,
     val status: ConnectionStatus = ConnectionStatus.Disconnected,
+    val selectedBrand: BrandOption? = null,
+    val irActive: Boolean = false,
+    val hasIrEmitter: Boolean = false,
     val bluetoothEnabled: Boolean = false,
     val bluetoothHidRegistered: Boolean = false,
     val bluetoothPcProfile: Boolean = false,

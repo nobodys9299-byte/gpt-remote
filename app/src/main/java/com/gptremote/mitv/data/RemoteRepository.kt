@@ -4,9 +4,13 @@ import android.content.Context
 import com.gptremote.mitv.bluetooth.BluetoothHidManager
 import com.gptremote.mitv.haptic.HapticManager
 import com.gptremote.mitv.haptic.HapticStrength
+import com.gptremote.mitv.ir.IrBlasterManager
+import com.gptremote.mitv.model.BrandOption
 import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.DeviceCategory
+import com.gptremote.mitv.model.LaunchableApp
 import com.gptremote.mitv.model.MouseButton
+import com.gptremote.mitv.model.ProductType
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.model.SavedDevice
@@ -28,8 +32,8 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 
 /**
- * Coordinates Bluetooth HID (TV & PC), Wi-Fi Android TV Remote v2, Wi-Fi PC Companion,
- * Saved Electronics Hub, and hardware vibration haptics.
+ * Coordinates Bluetooth HID, Wi-Fi Android TV Remote v2, Wi-Fi PC Companion,
+ * built-in IR Blaster, Saved Devices, and hardware vibration haptics.
  */
 class RemoteRepository(context: Context) {
 
@@ -38,6 +42,7 @@ class RemoteRepository(context: Context) {
 
     val bluetoothHid = BluetoothHidManager(appContext)
     val haptics = HapticManager(appContext)
+    val irBlaster = IrBlasterManager(appContext)
     private val savedStore = SavedDeviceStore(appContext)
 
     private val certManager = TvCertificateManager(appContext)
@@ -46,6 +51,8 @@ class RemoteRepository(context: Context) {
     private val wifiPcClient = WifiPcRemoteClient()
 
     private val activeTransport = MutableStateFlow(TransportMode.BLUETOOTH_HID)
+    private val selectedBrand = MutableStateFlow<BrandOption?>(null)
+    private val irActive = MutableStateFlow(false)
     private val hapticStrengthFlow = MutableStateFlow(haptics.strength)
     private val statusBanner = MutableStateFlow<String?>(null)
 
@@ -71,7 +78,9 @@ class RemoteRepository(context: Context) {
         val wifiTvScanning: Boolean,
         val wifiPcScanning: Boolean,
         val hapticStrength: HapticStrength,
-        val banner: String?
+        val banner: String?,
+        val brand: BrandOption?,
+        val irEnabled: Boolean
     )
 
     private val coreFlows = combine(
@@ -108,9 +117,19 @@ class RemoteRepository(context: Context) {
         wifiDiscovery.isScanning,
         wifiPcClient.isScanning,
         hapticStrengthFlow,
-        statusBanner
-    ) { btScan, wifiTvScan, wifiPcScan, haptic, banner ->
-        FlagsFlows(btScan, wifiTvScan, wifiPcScan, haptic, banner)
+        statusBanner,
+        selectedBrand,
+        irActive
+    ) { values ->
+        FlagsFlows(
+            btScanning = values[0] as Boolean,
+            wifiTvScanning = values[1] as Boolean,
+            wifiPcScanning = values[2] as Boolean,
+            hapticStrength = values[3] as HapticStrength,
+            banner = values[4] as String?,
+            brand = values[5] as BrandOption?,
+            irEnabled = values[6] as Boolean
+        )
     }
 
     val uiState: StateFlow<RemoteUiState> = combine(
@@ -127,7 +146,6 @@ class RemoteRepository(context: Context) {
             else -> core.wifiPcStatus
         }
 
-        // Apply user's saved nickname & category if saved
         val enrichedStatus = if (effectiveStatus is ConnectionStatus.Connected) {
             val saved = disc.savedDevices.firstOrNull { it.id == effectiveStatus.device.id }
             if (saved != null) {
@@ -142,6 +160,9 @@ class RemoteRepository(context: Context) {
         RemoteUiState(
             activeTransport = core.transport,
             status = enrichedStatus,
+            selectedBrand = flags.brand,
+            irActive = flags.irEnabled,
+            hasIrEmitter = irBlaster.hasIrEmitter,
             bluetoothEnabled = core.btEnabled,
             bluetoothHidRegistered = core.btRegistered,
             bluetoothPcProfile = core.btPcProfile,
@@ -158,21 +179,52 @@ class RemoteRepository(context: Context) {
     }.stateIn(
         scope = scope,
         started = SharingStarted.Eagerly,
-        initialValue = RemoteUiState(hapticStrength = haptics.strength)
+        initialValue = RemoteUiState(
+            hasIrEmitter = irBlaster.hasIrEmitter,
+            hapticStrength = haptics.strength
+        )
     )
 
     init {
-        // Automatically add/update any connected device into Saved Electronics Hub
         uiState.onEach { state ->
             val connected = (state.status as? ConnectionStatus.Connected)?.device
             if (connected != null) {
                 savedStore.saveOrUpdateFromConnection(connected)
+                irActive.value = false
             }
         }.launchIn(scope)
     }
 
     fun initializeBluetooth() {
         bluetoothHid.ensureInitialized()
+    }
+
+    fun selectProductBrand(brand: BrandOption) {
+        selectedBrand.value = brand
+        val isPc = brand.productType == ProductType.PC_LAPTOP
+        bluetoothHid.setPcProfile(isPc)
+        if (!isPc && !brand.supportsBluetoothHidOnly() && irBlaster.hasIrEmitter) {
+            irActive.value = true
+        }
+    }
+
+    private fun BrandOption.supportsBluetoothHidOnly(): Boolean =
+        productType == ProductType.SMART_TV ||
+            productType == ProductType.PC_LAPTOP ||
+            productType == ProductType.SET_TOP_BOX ||
+            productType == ProductType.SOUNDBAR ||
+            productType == ProductType.PROJECTOR
+
+    fun setIrMode(enabled: Boolean) {
+        if (enabled && !irBlaster.hasIrEmitter) {
+            statusBanner.value = "This phone does not have a built-in IR Blaster."
+            irActive.value = false
+            return
+        }
+        irActive.value = enabled
+        if (enabled) {
+            statusBanner.value = "IR Blaster mode active — point your phone at the ${selectedBrand.value?.name ?: "device"}."
+        }
     }
 
     fun setHapticStrength(strength: HapticStrength) {
@@ -227,8 +279,14 @@ class RemoteRepository(context: Context) {
     fun connectBluetooth(device: TvDevice.BluetoothTv) {
         wifiTvClient.disconnect()
         wifiPcClient.disconnect()
+        irActive.value = false
         activeTransport.value = TransportMode.BLUETOOTH_HID
-        bluetoothHid.connect(device.id, device.category)
+        val category = if (selectedBrand.value?.productType == ProductType.PC_LAPTOP) {
+            DeviceCategory.LAPTOP_PC
+        } else {
+            device.category
+        }
+        bluetoothHid.connect(device.id, category)
     }
 
     fun startWifiScan() {
@@ -244,6 +302,7 @@ class RemoteRepository(context: Context) {
     fun connectWifi(device: TvDevice.WifiTv, forcePair: Boolean = false) {
         bluetoothHid.disconnect()
         wifiPcClient.disconnect()
+        irActive.value = false
         activeTransport.value = TransportMode.WIFI_ANDROID_TV
         wifiDiscovery.stopDiscovery()
         wifiTvClient.connect(device, forcePair)
@@ -252,6 +311,7 @@ class RemoteRepository(context: Context) {
     fun connectWifiPc(device: TvDevice.WifiPc) {
         bluetoothHid.disconnect()
         wifiTvClient.disconnect()
+        irActive.value = false
         activeTransport.value = TransportMode.WIFI_PC
         wifiPcClient.stopDiscovery()
         wifiPcClient.connect(device)
@@ -302,7 +362,7 @@ class RemoteRepository(context: Context) {
         val cleanHost = host.trim()
         if (cleanHost.isEmpty()) return
         val name = nickname.trim().ifEmpty {
-            if (category == DeviceCategory.LAPTOP_PC) "Laptop ($cleanHost)" else "Mi TV ($cleanHost)"
+            if (category == DeviceCategory.LAPTOP_PC) "Laptop ($cleanHost)" else "Smart TV ($cleanHost)"
         }
         val port = if (category == DeviceCategory.LAPTOP_PC) WifiPcRemoteClient.DEFAULT_PORT else 6466
         val transport = if (category == DeviceCategory.LAPTOP_PC) TransportMode.WIFI_PC else TransportMode.WIFI_ANDROID_TV
@@ -322,19 +382,6 @@ class RemoteRepository(context: Context) {
         connectSavedDevice(saved)
     }
 
-    fun customizeSavedDevice(
-        id: String,
-        nickname: String,
-        category: DeviceCategory,
-        iconKey: String
-    ) {
-        savedStore.customizeDevice(id, nickname, category, iconKey)
-    }
-
-    fun removeSavedDevice(id: String) {
-        savedStore.removeDevice(id)
-    }
-
     fun submitWifiPin(pin: String) {
         wifiTvClient.submitPairingPin(pin)
     }
@@ -343,10 +390,12 @@ class RemoteRepository(context: Context) {
         bluetoothHid.disconnect()
         wifiTvClient.disconnect()
         wifiPcClient.disconnect()
+        irActive.value = false
     }
 
     fun sendButton(button: RemoteButton, strongHaptic: Boolean = false) {
         if (strongHaptic) haptics.heavyClick() else haptics.click()
+
         when (val current = uiState.value.status) {
             is ConnectionStatus.Connected -> {
                 when (current.device.transport) {
@@ -357,7 +406,62 @@ class RemoteRepository(context: Context) {
                 statusBanner.value = null
             }
             else -> {
-                statusBanner.value = "Not connected. Select a TV or Laptop from your Home Hub."
+                val brand = selectedBrand.value
+                if (irActive.value && brand != null && irBlaster.hasIrEmitter) {
+                    val sent = irBlaster.sendButton(brand, button)
+                    if (!sent) {
+                        statusBanner.value = "No IR mapping for this button on ${brand.name}."
+                    }
+                } else {
+                    statusBanner.value = "Tap Connect at the top to pair with your ${brand?.name ?: "device"}."
+                }
+            }
+        }
+    }
+
+    fun sendApplianceAction(actionKey: String) {
+        haptics.click()
+        val brand = selectedBrand.value
+        if (brand != null && irBlaster.hasIrEmitter) {
+            irBlaster.sendApplianceCommand(brand, actionKey)
+        } else {
+            statusBanner.value = "Phone has no built-in IR Blaster to transmit to ${brand?.name ?: "this appliance"}."
+        }
+    }
+
+    fun launchApp(app: LaunchableApp) {
+        haptics.heavyClick()
+        when (val current = uiState.value.status) {
+            is ConnectionStatus.Connected -> {
+                when (current.device.transport) {
+                    TransportMode.WIFI_ANDROID_TV -> {
+                        val link = app.tvAppLink
+                        if (link != null) {
+                            wifiTvClient.launchApp(link)
+                        }
+                    }
+                    TransportMode.WIFI_PC -> {
+                        val key = app.pcAppKey
+                        if (key != null) {
+                            wifiPcClient.launchApp(key)
+                        }
+                    }
+                    TransportMode.BLUETOOTH_HID -> {
+                        if (selectedBrand.value?.productType == ProductType.PC_LAPTOP ||
+                            current.device.category == DeviceCategory.LAPTOP_PC
+                        ) {
+                            val cmd = app.pcFallbackCommand
+                            if (cmd != null) {
+                                bluetoothHid.launchPcApp(cmd)
+                            }
+                        } else {
+                            statusBanner.value = "Direct TV app launch requires Wi-Fi Android TV connection (tap Connect -> Wi-Fi)."
+                        }
+                    }
+                }
+            }
+            else -> {
+                statusBanner.value = "Connect via Wi-Fi or Bluetooth first to launch ${app.name}."
             }
         }
     }
@@ -374,7 +478,7 @@ class RemoteRepository(context: Context) {
                 }
             }
             else -> {
-                statusBanner.value = "Connect to your TV or Laptop first to send text."
+                statusBanner.value = "Connect to your device first to send text."
             }
         }
     }
@@ -408,7 +512,7 @@ class RemoteRepository(context: Context) {
                 }
             }
         } else {
-            statusBanner.value = "Connect to your TV or Laptop first to use touchpad."
+            statusBanner.value = "Connect to your TV or PC first to use touchpad."
         }
     }
 
