@@ -3,7 +3,9 @@ package com.gptremote.mitv.model
 import android.graphics.Bitmap
 import com.gptremote.mitv.haptic.HapticStrength
 import com.gptremote.mitv.ui.theme.AppAccentTheme
+import com.gptremote.mitv.wifi.DiscoveredDlnaTv
 import com.gptremote.mitv.wifi.DiscoveredSmartBulb
+import com.gptremote.mitv.wifi.HostedMediaItem
 import com.gptremote.mitv.wifi.SharedPcFile
 
 data class TransferProgress(
@@ -72,6 +74,11 @@ data class RemoteUiState(
     val phoneHotspotSsid: String? = null,
     val phoneHotspotPassword: String? = null,
     val phoneHotspotError: String? = null,
+    val tvBrowserShareUrl: String? = null,
+    val phoneHostedMediaItems: List<HostedMediaItem> = emptyList(),
+    val dlnaRenderers: List<DiscoveredDlnaTv> = emptyList(),
+    val isScanningDlna: Boolean = false,
+    val activeDlnaRenderer: DiscoveredDlnaTv? = null,
     val discoveredTvCompanions: List<TvDevice.WifiPc> = emptyList(),
     val connectedTvCompanion: TvDevice.WifiPc? = null,
     val tvCompanionFiles: List<SharedPcFile> = emptyList(),

@@ -216,6 +216,36 @@ class SmartTvWebSocketClient(context: Context) {
         }
     }
 
+    fun openBrowserUrl(url: String) {
+        if (url.isBlank()) return
+        scope.launch {
+            when (activeProtocol) {
+                SmartTvProtocol.SAMSUNG_TIZEN -> {
+                    val out = output ?: return@launch
+                    val json = JSONObject().apply {
+                        put("method", "ms.channel.emit")
+                        put("params", JSONObject().apply {
+                            put("event", "ed.apps.launch")
+                            put("to", "host")
+                            put("data", JSONObject().apply {
+                                put("appId", "org.tizen.browser")
+                                put("action_type", "NATIVE_LAUNCH")
+                                put("metaTag", url)
+                            })
+                        })
+                    }
+                    runCatching { sendWsTextFrame(out, json.toString()) }
+                }
+                SmartTvProtocol.LG_WEBOS -> {
+                    sendLgCommand(
+                        "ssap://system.launcher/open",
+                        JSONObject().put("target", url)
+                    )
+                }
+            }
+        }
+    }
+
     fun sendText(text: String) {
         if (text.isEmpty()) return
         scope.launch {

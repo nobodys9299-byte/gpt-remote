@@ -14,6 +14,8 @@ import com.gptremote.mitv.wifi.TvCertificateManager.Companion.toUnsignedBigEndia
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -148,5 +150,51 @@ class ProtoWireTest {
         assertEquals("movie.mp4", hist.fileName)
         assertTrue(BulbProtocol.entries.contains(BulbProtocol.TUYA_LAN))
         assertTrue(BulbProtocol.entries.contains(BulbProtocol.BLE_LIGHT))
+    }
+
+    @Test
+    fun httpRangeParserAndDlnaSoapWorkCleanly() {
+        assertEquals(0L to 499L, PhoneShareServer.parseByteRange("bytes=0-499", 1000L))
+        assertEquals(200L to 999L, PhoneShareServer.parseByteRange("bytes=200-", 1000L))
+        assertEquals(900L to 999L, PhoneShareServer.parseByteRange("bytes=-100", 1000L))
+        assertEquals(500L to 999L, PhoneShareServer.parseByteRange("bytes=500-9999", 1000L))
+        assertNull(PhoneShareServer.parseByteRange("bytes=1200-1300", 1000L))
+        assertNull(PhoneShareServer.parseByteRange(null, 1000L))
+
+        val sampleXml = """
+            <?xml version="1.0"?>
+            <root xmlns="urn:schemas-upnp-org:device-1-0">
+              <device>
+                <friendlyName>[TV] Samsung Crystal UHD</friendlyName>
+                <manufacturer>Samsung Electronics</manufacturer>
+                <serviceList>
+                  <service>
+                    <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+                    <controlURL>/upnp/control/RenderingControl1</controlURL>
+                  </service>
+                  <service>
+                    <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+                    <controlURL>/upnp/control/AVTransport1</controlURL>
+                  </service>
+                </serviceList>
+              </device>
+            </root>
+        """.trimIndent()
+
+        val parsed = DlnaMediaCaster.parseDeviceDescription("http://192.168.1.45:9197/dmr", sampleXml)
+        assertNotNull(parsed)
+        assertEquals("[TV] Samsung Crystal UHD", parsed?.name)
+        assertEquals("Samsung Electronics", parsed?.manufacturer)
+        assertEquals("http://192.168.1.45:9197/upnp/control/AVTransport1", parsed?.controlUrl)
+
+        val envelope = DlnaMediaCaster.buildSetAvTransportEnvelope(
+            serviceType = "urn:schemas-upnp-org:service:AVTransport:1",
+            mediaUrl = "http://192.168.1.10:58770/view?id=1",
+            title = "Holiday & Fun <4K>",
+            mimeType = "video/mp4"
+        )
+        assertTrue(envelope.contains("u:SetAVTransportURI"))
+        assertTrue(envelope.contains("Holiday &amp;amp; Fun &amp;lt;4K&amp;gt;"))
+        assertTrue(envelope.contains("object.item.videoItem"))
     }
 }

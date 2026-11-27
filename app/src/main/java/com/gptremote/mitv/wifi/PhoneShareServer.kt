@@ -11,10 +11,12 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.gptremote.mitv.model.TransferHistoryItem
 import com.gptremote.mitv.model.TransferProgress
+import java.util.Locale
 import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,12 +45,22 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.CopyOnWriteArrayList
 
+data class HostedMediaItem(
+    val id: Int,
+    val name: String,
+    val sizeBytes: Long,
+    val mimeType: String,
+    val viewUrl: String,
+    val downloadUrl: String
+)
+
 private data class LocalSharedUri(
     val id: Int,
     val uri: Uri,
     val name: String,
     val sizeBytes: Long,
-    val addedMs: Long
+    val addedMs: Long,
+    val mimeType: String
 )
 
 /**
@@ -71,8 +83,14 @@ class PhoneShareServer(context: Context) {
     private val _hostQrUrl = MutableStateFlow<String?>(null)
     val hostQrUrl: StateFlow<String?> = _hostQrUrl.asStateFlow()
 
+    private val _browserShareUrl = MutableStateFlow<String?>(null)
+    val browserShareUrl: StateFlow<String?> = _browserShareUrl.asStateFlow()
+
     private val _hostedFiles = MutableStateFlow<List<SharedPcFile>>(emptyList())
     val hostedFiles: StateFlow<List<SharedPcFile>> = _hostedFiles.asStateFlow()
+
+    private val _hostedMediaItems = MutableStateFlow<List<HostedMediaItem>>(emptyList())
+    val hostedMediaItems: StateFlow<List<HostedMediaItem>> = _hostedMediaItems.asStateFlow()
 
     private val _peerName = MutableStateFlow<String?>(null)
     val peerName: StateFlow<String?> = _peerName.asStateFlow()
@@ -202,9 +220,12 @@ class PhoneShareServer(context: Context) {
         if (ip != null) {
             val encodedName = URLEncoder.encode(Build.MODEL, "UTF-8")
             _hostQrUrl.value = "gptremote://phone?host=$ip&port=$DEFAULT_PORT&name=$encodedName"
+            _browserShareUrl.value = "http://$ip:$DEFAULT_PORT/"
         } else {
             _hostQrUrl.value = null
+            _browserShareUrl.value = null
         }
+        publishHostedItems(ip)
 
         if (serverSocket != null && serverSocket?.isClosed == false) return
 
@@ -227,13 +248,30 @@ class PhoneShareServer(context: Context) {
         for (uri in uris) {
             val name = resolveFileName(uri)
             val size = resolveFileSize(uri).coerceAtLeast(0L)
-            val item = LocalSharedUri(nextId++, uri, name, size, now)
+            val mime = resolveMimeType(uri, name)
+            val item = LocalSharedUri(nextId++, uri, name, size, now, mime)
             hostedItems.add(0, item)
         }
+        publishHostedItems(findLocalIpv4())
+        startHostIfNeeded()
+    }
+
+    private fun publishHostedItems(ip: String?) {
         _hostedFiles.value = hostedItems.map {
             SharedPcFile(it.name, it.sizeBytes, it.addedMs)
         }
-        startHostIfNeeded()
+        val base = ip?.let { "http://$it:$DEFAULT_PORT" } ?: ""
+        _hostedMediaItems.value = hostedItems.map { item ->
+            val enc = URLEncoder.encode(item.name, "UTF-8")
+            HostedMediaItem(
+                id = item.id,
+                name = item.name,
+                sizeBytes = item.sizeBytes,
+                mimeType = item.mimeType,
+                viewUrl = if (base.isNotEmpty()) "$base/view?id=${item.id}" else "/view?id=${item.id}",
+                downloadUrl = if (base.isNotEmpty()) "$base/download?name=$enc" else "/download?name=$enc"
+            )
+        }
     }
 
     fun connectPeer(host: String, port: Int, name: String, onStatus: (String) -> Unit) {
@@ -464,6 +502,33 @@ class PhoneShareServer(context: Context) {
             }
 
             when {
+                method == "GET" && (path == "/" || path == "/index.html") -> {
+                    val html = buildTvBrowserHtml().toByteArray(Charsets.UTF_8)
+                    val head = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${html.size}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+                    out.write(head.toByteArray(Charsets.UTF_8))
+                    out.write(html)
+                    out.flush()
+                }
+
+                (method == "GET" || method == "HEAD") && path == "/view" -> {
+                    val reqId = query.split('&')
+                        .firstOrNull { it.startsWith("id=") }
+                        ?.substringAfter("id=")
+                        ?.toIntOrNull()
+                    val reqName = query.split('&')
+                        .firstOrNull { it.startsWith("name=") }
+                        ?.substringAfter("name=")
+                        ?.let { URLDecoder.decode(it, "UTF-8") }
+                    val item = (reqId?.let { id -> hostedItems.firstOrNull { it.id == id } })
+                        ?: (reqName?.let { n -> hostedItems.firstOrNull { it.name == n } })
+                    if (item == null) {
+                        out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray())
+                        out.flush()
+                        return
+                    }
+                    serveMediaWithRange(item, headerMap["range"], isHead = (method == "HEAD"), out = out)
+                }
+
                 method == "GET" && path == "/files" -> {
                     val arr = JSONArray()
                     hostedItems.forEach { item ->
@@ -600,6 +665,187 @@ class PhoneShareServer(context: Context) {
         }
     }
 
+    private fun serveMediaWithRange(
+        item: LocalSharedUri,
+        rangeHeader: String?,
+        isHead: Boolean,
+        out: BufferedOutputStream
+    ) {
+        val total = item.sizeBytes
+        val parsedRange = if (total > 0L) parseByteRange(rangeHeader, total) else null
+
+        if (parsedRange != null) {
+            val (start, end) = parsedRange
+            val len = (end - start + 1L).coerceAtLeast(0L)
+            val head = "HTTP/1.1 206 Partial Content\r\n" +
+                "Content-Type: ${item.mimeType}\r\n" +
+                "Accept-Ranges: bytes\r\n" +
+                "Content-Range: bytes $start-$end/$total\r\n" +
+                "Content-Length: $len\r\n" +
+                "transferMode.dlna.org: Streaming\r\n" +
+                "Connection: close\r\n\r\n"
+            out.write(head.toByteArray(Charsets.UTF_8))
+            if (!isHead && len > 0L) {
+                appContext.contentResolver.openInputStream(item.uri)?.use { fis ->
+                    skipFully(fis, start)
+                    var remaining = len
+                    val buf = ByteArray(65536)
+                    while (remaining > 0L) {
+                        val n = fis.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        remaining -= n
+                    }
+                }
+            }
+            out.flush()
+        } else {
+            val lenLine = if (total > 0L) "Content-Length: $total\r\n" else ""
+            val head = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: ${item.mimeType}\r\n" +
+                "Accept-Ranges: bytes\r\n" +
+                lenLine +
+                "transferMode.dlna.org: Streaming\r\n" +
+                "Connection: close\r\n\r\n"
+            out.write(head.toByteArray(Charsets.UTF_8))
+            if (!isHead) {
+                appContext.contentResolver.openInputStream(item.uri)?.use { fis ->
+                    val buf = ByteArray(65536)
+                    while (true) {
+                        val n = fis.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                    }
+                }
+            }
+            out.flush()
+        }
+    }
+
+    private fun skipFully(inp: java.io.InputStream, bytesToSkip: Long) {
+        var remaining = bytesToSkip
+        val scratch = ByteArray(16384)
+        while (remaining > 0L) {
+            val skipped = inp.skip(remaining)
+            if (skipped > 0L) {
+                remaining -= skipped
+            } else {
+                val r = inp.read(scratch, 0, minOf(scratch.size.toLong(), remaining).toInt())
+                if (r <= 0) break
+                remaining -= r
+            }
+        }
+    }
+
+    private fun resolveMimeType(uri: Uri, name: String): String {
+        val fromResolver = runCatching { appContext.contentResolver.getType(uri) }.getOrNull()
+        if (!fromResolver.isNullOrBlank() && fromResolver != "application/octet-stream") {
+            return fromResolver
+        }
+        val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
+        return when (ext) {
+            "mp4", "m4v" -> "video/mp4"
+            "mkv" -> "video/x-matroska"
+            "webm" -> "video/webm"
+            "mov" -> "video/quicktime"
+            "avi" -> "video/x-msvideo"
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
+            "mp3" -> "audio/mpeg"
+            "wav" -> "audio/wav"
+            "aac", "m4a" -> "audio/mp4"
+            "pdf" -> "application/pdf"
+            else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+        }
+    }
+
+    private fun buildTvBrowserHtml(): String {
+        val cards = if (hostedItems.isEmpty()) {
+            """<div class="empty">No files shared from phone yet.<br/>Open GPT Remote &rarr; Smart TV &rarr; Share to TV and pick photos, videos, or files.</div>"""
+        } else {
+            hostedItems.joinToString("\n") { item ->
+                val escName = htmlEscape(item.name)
+                val sizeLabel = formatBytesReadable(item.sizeBytes)
+                val viewUrl = "/view?id=${item.id}"
+                val dlUrl = "/download?name=${URLEncoder.encode(item.name, "UTF-8")}"
+                val mediaPreview = when {
+                    item.mimeType.startsWith("image/") ->
+                        """<a href="$viewUrl" target="_blank"><img class="thumb" src="$viewUrl" alt="$escName"/></a>"""
+                    item.mimeType.startsWith("video/") ->
+                        """<video class="player" controls preload="metadata" src="$viewUrl"></video>"""
+                    item.mimeType.startsWith("audio/") ->
+                        """<audio class="audio" controls preload="metadata" src="$viewUrl"></audio>"""
+                    else -> ""
+                }
+                """
+                <div class="card" tabindex="0">
+                  <div class="title">$escName</div>
+                  <div class="meta">$sizeLabel &bull; ${htmlEscape(item.mimeType)}</div>
+                  $mediaPreview
+                  <div class="actions">
+                    <a class="btn primary" href="$viewUrl" target="_blank">Open / Play</a>
+                    <a class="btn" href="$dlUrl" download="$escName">Download</a>
+                  </div>
+                </div>
+                """.trimIndent()
+            }
+        }
+
+        return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8"/>
+          <meta name="viewport" content="width=device-width,initial-scale=1"/>
+          <title>GPT Remote TV Share</title>
+          <style>
+            body{margin:0;padding:24px;background:#090d16;color:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+            .hdr{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid #1e293b;}
+            h1{margin:0;font-size:24px;color:#22d3ee;}
+            .sub{color:#94a3b8;font-size:14px;}
+            .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;}
+            .card{background:#111a2e;border:2px solid #1e293b;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:10px;}
+            .card:focus,.btn:focus{outline:none;border-color:#22d3ee;box-shadow:0 0 0 3px rgba(34,211,238,.35);}
+            .title{font-weight:700;font-size:17px;word-break:break-word;}
+            .meta{color:#94a3b8;font-size:13px;}
+            .thumb{width:100%;max-height:220px;object-fit:contain;border-radius:10px;background:#020617;}
+            .player{width:100%;max-height:240px;border-radius:10px;background:#000;}
+            .audio{width:100%;}
+            .actions{display:flex;gap:10px;margin-top:4px;}
+            .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#1e293b;color:#f8fafc;text-decoration:none;font-weight:600;font-size:14px;border:1px solid #334155;}
+            .btn.primary{background:#ff6b00;color:#fff;border-color:#ff6b00;}
+            .empty{background:#111a2e;border:1px solid #1e293b;border-radius:16px;padding:28px;color:#cbd5e1;font-size:16px;text-align:center;}
+          </style>
+        </head>
+        <body>
+          <div class="hdr">
+            <div>
+              <h1>GPT Remote &bull; TV Media &amp; File Share</h1>
+              <div class="sub">From ${htmlEscape(Build.MODEL)} &bull; Refresh page if you add new files on phone</div>
+            </div>
+            <a class="btn primary" href="/" onclick="location.reload();return false;">Refresh List</a>
+          </div>
+          <div class="grid">$cards</div>
+        </body>
+        </html>
+        """.trimIndent()
+    }
+
+    private fun htmlEscape(s: String): String = s
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "&#39;")
+
+    private fun formatBytesReadable(bytes: Long): String = when {
+        bytes >= 1024L * 1024L * 1024L -> String.format(Locale.US, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
+        bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+        else -> "${maxOf(1L, bytes / 1024L)} KB"
+    }
+
     private fun saveStreamToDownloads(
         fileName: String,
         input: java.io.InputStream,
@@ -734,5 +980,33 @@ class PhoneShareServer(context: Context) {
 
     companion object {
         const val DEFAULT_PORT = 58770
+
+        fun parseByteRange(rangeHeader: String?, totalLength: Long): Pair<Long, Long>? {
+            if (rangeHeader.isNullOrBlank() || totalLength <= 0L) return null
+            val clean = rangeHeader.trim()
+            if (!clean.startsWith("bytes=", ignoreCase = true)) return null
+            val spec = clean.substring(6).substringBefore(',').trim()
+            val dash = spec.indexOf('-')
+            if (dash < 0) return null
+            val startPart = spec.substring(0, dash).trim()
+            val endPart = spec.substring(dash + 1).trim()
+            val start: Long
+            val end: Long
+            if (startPart.isEmpty()) {
+                val suffix = endPart.toLongOrNull() ?: return null
+                if (suffix <= 0L) return null
+                start = (totalLength - suffix).coerceAtLeast(0L)
+                end = totalLength - 1L
+            } else {
+                start = startPart.toLongOrNull() ?: return null
+                end = if (endPart.isEmpty()) {
+                    totalLength - 1L
+                } else {
+                    (endPart.toLongOrNull() ?: return null).coerceAtMost(totalLength - 1L)
+                }
+            }
+            if (start < 0L || start > end || start >= totalLength) return null
+            return start to end
+        }
     }
 }

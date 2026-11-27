@@ -350,6 +350,16 @@ class MainActivity : ComponentActivity() {
                                     runCatching { startActivity(Intent(Settings.ACTION_DISPLAY_SETTINGS)) }
                                 }
                             },
+                            onStartTvBrowserHost = viewModel::startTvBrowserShareHost,
+                            onAddBrowserDlnaFiles = {
+                                filePickTarget = FilePickTarget.PHONE_HOST_ADD
+                                pickFilesLauncher.launch(arrayOf("*/*"))
+                            },
+                            onOpenInTvBrowser = viewModel::openSharedPortalInSmartTvBrowser,
+                            onScanDlna = viewModel::startDlnaScan,
+                            onSelectDlnaRenderer = viewModel::selectDlnaRenderer,
+                            onCastMediaDlna = viewModel::castHostedItemToDlnaTv,
+                            onDlnaPlaybackAction = viewModel::dlnaPlaybackCommand,
                             onButtonPress = viewModel::pressButton,
                             onApplianceAction = viewModel::sendApplianceAction,
                             onLaunchApp = viewModel::launchApp,

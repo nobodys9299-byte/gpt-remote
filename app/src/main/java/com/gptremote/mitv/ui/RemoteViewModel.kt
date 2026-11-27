@@ -15,7 +15,9 @@ import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.model.TvDevice
 import com.gptremote.mitv.ui.theme.AppAccentTheme
+import com.gptremote.mitv.wifi.DiscoveredDlnaTv
 import com.gptremote.mitv.wifi.DiscoveredSmartBulb
+import com.gptremote.mitv.wifi.HostedMediaItem
 import com.gptremote.mitv.wifi.SmartTvProtocol
 import kotlinx.coroutines.flow.StateFlow
 
@@ -140,6 +142,18 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     fun getConnectedTvCompanionHost(): String? = repository.getConnectedTvCompanionHost()
 
     fun startPhoneCastToTv(resultCode: Int, data: Intent) = repository.startPhoneCastToTv(resultCode, data)
+
+    fun startTvBrowserShareHost() = repository.startTvBrowserShareHost()
+
+    fun openSharedPortalInSmartTvBrowser() = repository.openSharedPortalInSmartTvBrowser()
+
+    fun startDlnaScan() = repository.startDlnaScan()
+
+    fun selectDlnaRenderer(renderer: DiscoveredDlnaTv) = repository.selectDlnaRenderer(renderer)
+
+    fun castHostedItemToDlnaTv(item: HostedMediaItem) = repository.castHostedItemToDlnaTv(item)
+
+    fun dlnaPlaybackCommand(action: String) = repository.dlnaPlaybackCommand(action)
 
     fun queryInstalledAppsForShare(): List<RemoteRepository.ShareableAppInfo> =
         repository.queryInstalledAppsForShare()

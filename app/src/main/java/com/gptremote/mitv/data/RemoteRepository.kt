@@ -31,7 +31,10 @@ import java.io.File
 import java.util.Locale
 import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.wifi.AndroidTvNsdDiscovery
+import com.gptremote.mitv.wifi.DiscoveredDlnaTv
 import com.gptremote.mitv.wifi.DiscoveredSmartBulb
+import com.gptremote.mitv.wifi.DlnaMediaCaster
+import com.gptremote.mitv.wifi.HostedMediaItem
 import com.gptremote.mitv.wifi.PhoneShareServer
 import com.gptremote.mitv.wifi.ScreenCastService
 import com.gptremote.mitv.wifi.SharedPcFile
@@ -75,6 +78,7 @@ class RemoteRepository(context: Context) {
     private val wifiPcClient = WifiPcRemoteClient()
     private val smartBulbClient = SmartBulbClient(appContext)
     private val phoneShareServer = PhoneShareServer(appContext)
+    private val dlnaMediaCaster = DlnaMediaCaster()
 
     private val activeTransport = MutableStateFlow(TransportMode.BLUETOOTH_HID)
     private val selectedBrand = MutableStateFlow<BrandOption?>(null)
@@ -138,7 +142,9 @@ class RemoteRepository(context: Context) {
         val phoneHistory: List<TransferHistoryItem>,
         val hotspotSsid: String?,
         val hotspotPassword: String?,
-        val hotspotError: String?
+        val hotspotError: String?,
+        val browserShareUrl: String?,
+        val hostedMediaItems: List<HostedMediaItem>
     )
 
     private data class TvCompanionFlows(
@@ -148,6 +154,12 @@ class RemoteRepository(context: Context) {
         val tvProgress: TransferProgress?,
         val tvHistory: List<TransferHistoryItem>,
         val castTargetKind: String?
+    )
+
+    private data class DlnaFlows(
+        val renderers: List<DiscoveredDlnaTv>,
+        val isScanning: Boolean,
+        val activeRenderer: DiscoveredDlnaTv?
     )
 
     private val coreFlows = combine(
@@ -249,7 +261,9 @@ class RemoteRepository(context: Context) {
         phoneShareServer.transferHistory,
         phoneShareServer.hotspotSsid,
         phoneShareServer.hotspotPassword,
-        phoneShareServer.hotspotError
+        phoneShareServer.hotspotError,
+        phoneShareServer.browserShareUrl,
+        phoneShareServer.hostedMediaItems
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         PhoneShareFlows(
@@ -261,8 +275,18 @@ class RemoteRepository(context: Context) {
             phoneHistory = values[5] as List<TransferHistoryItem>,
             hotspotSsid = values[6] as String?,
             hotspotPassword = values[7] as String?,
-            hotspotError = values[8] as String?
+            hotspotError = values[8] as String?,
+            browserShareUrl = values[9] as String?,
+            hostedMediaItems = values[10] as List<HostedMediaItem>
         )
+    }
+
+    private val dlnaFlows = combine(
+        dlnaMediaCaster.renderers,
+        dlnaMediaCaster.isScanning,
+        dlnaMediaCaster.activeRenderer
+    ) { list, scanning, active ->
+        DlnaFlows(list, scanning, active)
     }
 
     private val tvCompanionFlows = combine(
@@ -290,7 +314,8 @@ class RemoteRepository(context: Context) {
         flagsFlows,
         mediaShareFlows,
         phoneShareFlows,
-        tvCompanionFlows
+        tvCompanionFlows,
+        dlnaFlows
     ) { values ->
         val core = values[0] as CoreFlows
         val disc = values[1] as DiscoveryFlows
@@ -298,6 +323,7 @@ class RemoteRepository(context: Context) {
         val media = values[3] as MediaShareFlows
         val phone = values[4] as PhoneShareFlows
         val tv = values[5] as TvCompanionFlows
+        val dlna = values[6] as DlnaFlows
         val effectiveStatus = when {
             core.btStatus is ConnectionStatus.Connected -> core.btStatus
             core.wifiTvStatus is ConnectionStatus.Connected -> core.wifiTvStatus
@@ -364,6 +390,11 @@ class RemoteRepository(context: Context) {
             phoneHotspotSsid = phone.hotspotSsid,
             phoneHotspotPassword = phone.hotspotPassword,
             phoneHotspotError = phone.hotspotError,
+            tvBrowserShareUrl = phone.browserShareUrl,
+            phoneHostedMediaItems = phone.hostedMediaItems,
+            dlnaRenderers = dlna.renderers,
+            isScanningDlna = dlna.isScanning,
+            activeDlnaRenderer = dlna.activeRenderer,
             discoveredTvCompanions = tv.discoveredTvs,
             connectedTvCompanion = tv.connectedTv,
             tvCompanionFiles = tv.tvFiles,
@@ -761,6 +792,56 @@ class RemoteRepository(context: Context) {
             return
         }
         ScreenCastService.start(appContext, resultCode, data, pair.first, pair.second, "TV")
+    }
+
+    fun startTvBrowserShareHost() {
+        phoneShareServer.startHostIfNeeded()
+    }
+
+    fun openSharedPortalInSmartTvBrowser() {
+        phoneShareServer.startHostIfNeeded()
+        val url = phoneShareServer.browserShareUrl.value
+        if (url.isNullOrBlank()) {
+            statusBanner.value = "Turn on Wi-Fi or Hotspot first to generate the TV Browser link."
+            return
+        }
+        if (smartTvWsClient.connectionStatus.value is ConnectionStatus.Connected) {
+            haptics.click()
+            smartTvWsClient.openBrowserUrl(url)
+            statusBanner.value = "Opening $url on TV Browser..."
+        } else {
+            statusBanner.value = "Open $url in your TV Browser, or connect Samsung/LG Wi-Fi remote first."
+        }
+    }
+
+    fun startDlnaScan() {
+        phoneShareServer.startHostIfNeeded()
+        dlnaMediaCaster.discoverRenderers()
+    }
+
+    fun selectDlnaRenderer(renderer: DiscoveredDlnaTv) {
+        haptics.click()
+        dlnaMediaCaster.selectRenderer(renderer)
+        statusBanner.value = "Selected DLNA TV: ${renderer.name}"
+    }
+
+    fun castHostedItemToDlnaTv(item: HostedMediaItem) {
+        phoneShareServer.startHostIfNeeded()
+        val target = dlnaMediaCaster.activeRenderer.value ?: dlnaMediaCaster.renderers.value.firstOrNull()
+        if (target == null) {
+            statusBanner.value = "Scan Wi-Fi TVs below and select your Smart TV first."
+            return
+        }
+        haptics.heavyClick()
+        val url = phoneShareServer.hostedMediaItems.value.firstOrNull { it.id == item.id }?.viewUrl ?: item.viewUrl
+        dlnaMediaCaster.castMedia(target, url, item.name, item.mimeType) { msg ->
+            statusBanner.value = msg
+        }
+    }
+
+    fun dlnaPlaybackCommand(action: String) {
+        haptics.click()
+        dlnaMediaCaster.sendPlaybackCommand(action) { err -> statusBanner.value = err }
     }
 
     fun startPcScreenMirror() {

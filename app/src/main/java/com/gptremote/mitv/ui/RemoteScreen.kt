@@ -130,7 +130,9 @@ import com.gptremote.mitv.ui.theme.RemoteSurfaceElevated
 import com.gptremote.mitv.ui.theme.TextPrimary
 import com.gptremote.mitv.ui.theme.TextSecondary
 import com.gptremote.mitv.ui.theme.WifiBlue
+import com.gptremote.mitv.wifi.DiscoveredDlnaTv
 import com.gptremote.mitv.wifi.DiscoveredSmartBulb
+import com.gptremote.mitv.wifi.HostedMediaItem
 import com.gptremote.mitv.wifi.SharedPcFile
 import kotlin.math.roundToInt
 
@@ -196,6 +198,13 @@ fun RemoteScreen(
     onDownloadTvFile: (SharedPcFile) -> Unit,
     onStartPhoneCastToTv: () -> Unit,
     onOpenSystemCastSettings: () -> Unit,
+    onStartTvBrowserHost: () -> Unit,
+    onAddBrowserDlnaFiles: () -> Unit,
+    onOpenInTvBrowser: () -> Unit,
+    onScanDlna: () -> Unit,
+    onSelectDlnaRenderer: (DiscoveredDlnaTv) -> Unit,
+    onCastMediaDlna: (HostedMediaItem) -> Unit,
+    onDlnaPlaybackAction: (String) -> Unit,
     onButtonPress: (RemoteButton, Boolean) -> Unit,
     onApplianceAction: (String) -> Unit,
     onLaunchApp: (LaunchableApp) -> Unit,
@@ -233,6 +242,7 @@ fun RemoteScreen(
     if (showTvCompanionModal) {
         TvCompanionSheetDialog(
             uiState = uiState,
+            preferNonAndroidTab = brand.id == "tv_samsung" || brand.id == "tv_lg",
             onScanTvCompanion = onScanTvCompanion,
             onScanTvQr = { showPhoneQrScanner = true },
             onConnectTvManual = onConnectTvManual,
@@ -245,6 +255,13 @@ fun RemoteScreen(
             onStartPhoneCastToTv = onStartPhoneCastToTv,
             onStopPhoneCast = onStopPhoneCast,
             onOpenSystemCastSettings = onOpenSystemCastSettings,
+            onStartTvBrowserHost = onStartTvBrowserHost,
+            onAddBrowserDlnaFiles = onAddBrowserDlnaFiles,
+            onOpenInTvBrowser = onOpenInTvBrowser,
+            onScanDlna = onScanDlna,
+            onSelectDlnaRenderer = onSelectDlnaRenderer,
+            onCastMediaDlna = onCastMediaDlna,
+            onDlnaPlaybackAction = onDlnaPlaybackAction,
             onOpenHistoryFile = onOpenHistoryFile,
             onDismiss = { showTvCompanionModal = false }
         )

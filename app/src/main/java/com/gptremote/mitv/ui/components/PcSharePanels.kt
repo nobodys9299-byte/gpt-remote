@@ -41,10 +41,14 @@ import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.DesktopWindows
 import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.Wifi
@@ -106,6 +110,8 @@ import com.gptremote.mitv.ui.theme.RemoteSurfaceElevated
 import com.gptremote.mitv.ui.theme.TextPrimary
 import com.gptremote.mitv.ui.theme.TextSecondary
 import com.gptremote.mitv.ui.theme.WifiBlue
+import com.gptremote.mitv.wifi.DiscoveredDlnaTv
+import com.gptremote.mitv.wifi.HostedMediaItem
 import com.gptremote.mitv.wifi.SharedPcFile
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -872,6 +878,7 @@ fun PhoneSharePanel(
 @Composable
 fun TvCompanionSheetDialog(
     uiState: RemoteUiState,
+    preferNonAndroidTab: Boolean = false,
     onScanTvCompanion: () -> Unit,
     onScanTvQr: () -> Unit,
     onConnectTvManual: (host: String, token: String) -> Unit,
@@ -884,15 +891,28 @@ fun TvCompanionSheetDialog(
     onStartPhoneCastToTv: () -> Unit,
     onStopPhoneCast: () -> Unit,
     onOpenSystemCastSettings: () -> Unit,
+    onStartTvBrowserHost: () -> Unit,
+    onAddBrowserDlnaFiles: () -> Unit,
+    onOpenInTvBrowser: () -> Unit,
+    onScanDlna: () -> Unit,
+    onSelectDlnaRenderer: (DiscoveredDlnaTv) -> Unit,
+    onCastMediaDlna: (HostedMediaItem) -> Unit,
+    onDlnaPlaybackAction: (String) -> Unit,
     onOpenHistoryFile: (TransferHistoryItem) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var modeTab by remember(preferNonAndroidTab) {
+        mutableIntStateOf(if (preferNonAndroidTab && uiState.connectedTvCompanion == null) 1 else 0)
+    }
     var showManual by remember { mutableStateOf(false) }
     var manualHost by remember { mutableStateOf("") }
     var manualCode by remember { mutableStateOf("") }
+    var showBrowserQr by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         onScanTvCompanion()
+        onStartTvBrowserHost()
+        if (preferNonAndroidTab) onScanDlna()
     }
 
     Dialog(
@@ -905,7 +925,7 @@ fun TvCompanionSheetDialog(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(14.dp)
-                .heightIn(max = 680.dp)
+                .heightIn(max = 700.dp)
         ) {
             Column(
                 modifier = Modifier
@@ -926,7 +946,11 @@ fun TvCompanionSheetDialog(
                         Icon(Icons.Rounded.Tv, contentDescription = null, tint = MiOrange)
                         Column {
                             Text("Smart TV File Share & Cast", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                            Text("Requires GPT Remote TV app on TV (or System Cast)", color = TextSecondary, fontSize = 11.sp)
+                            Text(
+                                text = if (modeTab == 0) "Android TV / Google TV App Mode" else "Samsung / LG / Any TV (No TV App Needed)",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
                         }
                     }
                     IconButton(onClick = onDismiss) {
@@ -934,199 +958,433 @@ fun TvCompanionSheetDialog(
                     }
                 }
 
-                // Connected TV Companion status or scanner
-                val activeTv = uiState.connectedTvCompanion
-                if (activeTv != null) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(RemoteSurfaceElevated)
-                            .border(1.dp, ConnectedGreen.copy(alpha = 0.65f), RoundedCornerShape(14.dp))
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("TV Connected: ${activeTv.name}", color = ConnectedGreen, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Text("${activeTv.host} • Ready for Files, APKs & Live Cast", color = TextSecondary, fontSize = 11.sp)
+                // Switcher between Android TV App & Non-Android TV (Browser + DLNA)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = modeTab == 0,
+                        onClick = { modeTab = 0 },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("Android TV App", fontSize = 11.sp, maxLines = 1) }
+                    )
+                    FilterChip(
+                        selected = modeTab == 1,
+                        onClick = {
+                            modeTab = 1
+                            onStartTvBrowserHost()
+                            onScanDlna()
+                        },
+                        modifier = Modifier.weight(1.25f),
+                        label = { Text("Samsung/LG (DLNA & Web)", fontSize = 11.sp, maxLines = 1) }
+                    )
+                }
+
+                if (modeTab == 0) {
+                    // Connected TV Companion status or scanner
+                    val activeTv = uiState.connectedTvCompanion
+                    if (activeTv != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(RemoteSurfaceElevated)
+                                .border(1.dp, ConnectedGreen.copy(alpha = 0.65f), RoundedCornerShape(14.dp))
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("TV Connected: ${activeTv.name}", color = ConnectedGreen, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text("${activeTv.host} • Ready for Files, APKs & Live Cast", color = TextSecondary, fontSize = 11.sp)
+                            }
+                            TextButton(onClick = onDisconnectTv) {
+                                Text("Off", color = Color(0xFFF87171))
+                            }
                         }
-                        TextButton(onClick = onDisconnectTv) {
-                            Text("Off", color = Color(0xFFF87171))
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilledTonalButton(
+                                onClick = onScanTvCompanion,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Rounded.Wifi, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(if (uiState.isScanningWifiPc) "Scanning TVs..." else "Scan Wi-Fi TV", fontSize = 12.sp)
+                            }
+                            Button(
+                                onClick = onScanTvQr,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Scan TV QR", fontSize = 12.sp)
+                            }
+                        }
+
+                        if (uiState.discoveredTvCompanions.isNotEmpty()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                uiState.discoveredTvCompanions.forEach { tv ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(RemoteSurfaceElevated)
+                                            .border(1.dp, RemoteBorder, RoundedCornerShape(12.dp))
+                                            .clickable { onSelectTvCompanion(tv.host, tv.name, tv.osName) }
+                                            .padding(12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(tv.name, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                            Text("${tv.host} • GPT Remote TV Companion", color = WifiBlue, fontSize = 11.sp)
+                                        }
+                                        Text("Connect", color = MiOrange, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
+
+                        TextButton(onClick = { showManual = !showManual }) {
+                            Text(
+                                if (showManual) "Hide Manual TV IP" else "Enter TV IP & Pair Code Manually",
+                                color = WifiBlue,
+                                fontSize = 12.sp
+                            )
+                        }
+                        if (showManual) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(
+                                    value = manualHost,
+                                    onValueChange = { manualHost = it },
+                                    label = { Text("TV IP") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1.3f)
+                                )
+                                OutlinedTextField(
+                                    value = manualCode,
+                                    onValueChange = { manualCode = it },
+                                    label = { Text("Pair Code") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Button(
+                                    onClick = { onConnectTvManual(manualHost, manualCode) },
+                                    enabled = manualHost.isNotBlank() && manualCode.isNotBlank(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MiOrange)
+                                ) { Text("Go") }
+                            }
                         }
                     }
-                } else {
+
+                    // Live Cast section
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(RemoteSurfaceElevated)
+                            .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("Screen Cast to TV", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (uiState.isCastingToTv) {
+                                OutlinedButton(
+                                    onClick = onStopPhoneCast,
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) { Text("Stop TV Cast", color = Color(0xFFF87171), fontSize = 12.sp) }
+                            } else {
+                                Button(
+                                    onClick = onStartPhoneCastToTv,
+                                    enabled = activeTv != null,
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = WifiBlue),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Icon(Icons.Rounded.Cast, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF062033))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Cast via App", color = Color(0xFF062033), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = onOpenSystemCastSettings,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) { Text("Wireless Cast", fontSize = 12.sp, maxLines = 1) }
+                        }
+                    }
+
+                    // TV File Transfer Progress
+                    uiState.tvTransferProgress?.let { prog ->
+                        TransferProgressCard(prog)
+                    }
+
+                    // Send Files & APKs to TV
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        FilledTonalButton(
-                            onClick = onScanTvCompanion,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Rounded.Wifi, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (uiState.isScanningWifiPc) "Scanning TVs..." else "Scan Wi-Fi TV", fontSize = 12.sp)
-                        }
                         Button(
-                            onClick = onScanTvQr,
-                            modifier = Modifier.weight(1f),
+                            onClick = onSendFilesToTv,
+                            enabled = activeTv != null,
+                            modifier = Modifier.weight(1.2f),
                             colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
-                            shape = RoundedCornerShape(12.dp)
+                            shape = RoundedCornerShape(14.dp)
                         ) {
-                            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(17.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Scan TV QR", fontSize = 12.sp)
+                            Text("Send Files", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        FilledTonalButton(
+                            onClick = onSendAppsToTv,
+                            enabled = activeTv != null,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Rounded.Android, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Apps (.apk)", fontSize = 12.sp)
+                        }
+                        OutlinedButton(onClick = onRefreshTvFiles, enabled = activeTv != null, shape = RoundedCornerShape(14.dp)) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = "Refresh TV Files", modifier = Modifier.size(18.dp))
                         }
                     }
 
-                    if (uiState.discoveredTvCompanions.isNotEmpty()) {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            uiState.discoveredTvCompanions.forEach { tv ->
+                    if (uiState.tvCompanionFiles.isNotEmpty()) {
+                        Text("Files stored on TV (${uiState.tvCompanionFiles.size})", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        uiState.tvCompanionFiles.take(10).forEach { file ->
+                            SharedFileRow(file = file, enabled = true, onClick = { onDownloadTvFile(file) })
+                        }
+                    }
+
+                    TransferHistorySection(
+                        title = "TV Transfer History",
+                        items = uiState.tvTransferHistory,
+                        onOpenItem = onOpenHistoryFile
+                    )
+                } else {
+                    // NON-ANDROID TV MODE (Samsung Tizen, LG webOS, Hisense VIDAA, Sony, etc.)
+                    Button(
+                        onClick = onAddBrowserDlnaFiles,
+                        modifier = Modifier.fillMaxWidth().height(50.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Pick Photos / Videos / Files to Share", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    }
+
+                    // Card A: DLNA Media Push
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(RemoteSurfaceElevated)
+                            .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("DLNA TV Cast (Samsung / LG / Sony)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Pushes photos, videos & music straight to TV player", color = TextSecondary, fontSize = 11.sp)
+                            }
+                            FilledTonalButton(onClick = onScanDlna, shape = RoundedCornerShape(12.dp)) {
+                                if (uiState.isScanningDlna) {
+                                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Rounded.Wifi, contentDescription = null, modifier = Modifier.size(15.dp))
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(if (uiState.isScanningDlna) "Scanning" else "Scan TVs", fontSize = 11.sp)
+                            }
+                        }
+
+                        if (uiState.dlnaRenderers.isEmpty()) {
+                            Text(
+                                text = "Tap Scan TVs on the same Wi-Fi to detect Samsung/LG DLNA TVs.",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        } else {
+                            uiState.dlnaRenderers.forEach { dlnaTv ->
+                                val selected = uiState.activeDlnaRenderer?.id == dlnaTv.id
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(12.dp))
-                                        .background(RemoteSurfaceElevated)
-                                        .border(1.dp, RemoteBorder, RoundedCornerShape(12.dp))
-                                        .clickable { onSelectTvCompanion(tv.host, tv.name, tv.osName) }
-                                        .padding(12.dp),
+                                        .background(if (selected) Color(0xFF132C3E) else RemoteSurface)
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (selected) WifiBlue else RemoteBorder,
+                                            shape = RoundedCornerShape(12.dp)
+                                        )
+                                        .clickable { onSelectDlnaRenderer(dlnaTv) }
+                                        .padding(10.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(tv.name, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                                        Text("${tv.host} • GPT Remote TV Companion", color = WifiBlue, fontSize = 11.sp)
+                                        Text(dlnaTv.name, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                        Text("${dlnaTv.manufacturer} • ${dlnaTv.host}", color = TextSecondary, fontSize = 10.sp)
                                     }
-                                    Text("Connect", color = MiOrange, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    Text(
+                                        text = if (selected) "Selected" else "Use TV",
+                                        color = if (selected) ConnectedGreen else WifiBlue,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+
+                        if (uiState.activeDlnaRenderer != null) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(onClick = { onDlnaPlaybackAction("Play") }, modifier = Modifier.weight(1f)) {
+                                    Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Play", fontSize = 11.sp)
+                                }
+                                OutlinedButton(onClick = { onDlnaPlaybackAction("Pause") }, modifier = Modifier.weight(1f)) {
+                                    Icon(Icons.Rounded.Pause, contentDescription = "Pause", modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Pause", fontSize = 11.sp)
+                                }
+                                OutlinedButton(onClick = { onDlnaPlaybackAction("Stop") }, modifier = Modifier.weight(1f)) {
+                                    Icon(Icons.Rounded.Stop, contentDescription = "Stop", modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Stop", fontSize = 11.sp)
                                 }
                             }
                         }
                     }
 
-                    TextButton(onClick = { showManual = !showManual }) {
-                        Text(
-                            if (showManual) "Hide Manual TV IP" else "Enter TV IP & Pair Code Manually",
-                            color = WifiBlue,
-                            fontSize = 12.sp
-                        )
-                    }
-                    if (showManual) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedTextField(
-                                value = manualHost,
-                                onValueChange = { manualHost = it },
-                                label = { Text("TV IP") },
-                                singleLine = true,
-                                modifier = Modifier.weight(1.3f)
-                            )
-                            OutlinedTextField(
-                                value = manualCode,
-                                onValueChange = { manualCode = it },
-                                label = { Text("Pair Code") },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Button(
-                                onClick = { onConnectTvManual(manualHost, manualCode) },
-                                enabled = manualHost.isNotBlank() && manualCode.isNotBlank(),
-                                colors = ButtonDefaults.buttonColors(containerColor = MiOrange)
-                            ) { Text("Go") }
-                        }
-                    }
-                }
-
-                // Live Cast section
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(RemoteSurfaceElevated)
-                        .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("Screen Cast to TV", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        if (uiState.isCastingToTv) {
-                            OutlinedButton(
-                                onClick = onStopPhoneCast,
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(12.dp)
-                            ) { Text("Stop TV Cast", color = Color(0xFFF87171), fontSize = 12.sp) }
-                        } else {
-                            Button(
-                                onClick = onStartPhoneCastToTv,
-                                enabled = activeTv != null,
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(containerColor = WifiBlue),
-                                shape = RoundedCornerShape(12.dp)
+                    // Shared Files ready to Cast via DLNA or open in TV Browser
+                    if (uiState.phoneHostedMediaItems.isNotEmpty()) {
+                        Text("Ready to View / Cast on TV (${uiState.phoneHostedMediaItems.size})", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        uiState.phoneHostedMediaItems.take(12).forEach { media ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(RemoteSurfaceElevated)
+                                    .border(1.dp, RemoteBorder, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Rounded.Cast, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF062033))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Cast via App", color = Color(0xFF062033), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(media.name, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("${formatFileSize(media.sizeBytes)} • ${media.mimeType}", color = TextSecondary, fontSize = 10.sp, maxLines = 1)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                FilledTonalButton(
+                                    onClick = { onCastMediaDlna(media) },
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Icon(Icons.Rounded.Cast, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Cast TV", fontSize = 11.sp)
+                                }
                             }
                         }
-                        OutlinedButton(
-                            onClick = onOpenSystemCastSettings,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) { Text("Wireless Cast", fontSize = 12.sp, maxLines = 1) }
                     }
-                }
 
-                // TV File Transfer Progress
-                uiState.tvTransferProgress?.let { prog ->
-                    TransferProgressCard(prog)
-                }
-
-                // Send Files & APKs to TV
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = onSendFilesToTv,
-                        enabled = activeTv != null,
-                        modifier = Modifier.weight(1.2f),
-                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
-                        shape = RoundedCornerShape(14.dp)
+                    // Card B: TV Web Browser Portal (works for documents, videos, photos on any TV Browser)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(RemoteSurfaceElevated)
+                            .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Send Files", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Rounded.Language, contentDescription = null, tint = WifiBlue)
+                            Column {
+                                Text("TV Web Browser Link (All Smart TVs)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = uiState.tvBrowserShareUrl ?: "Turn on Wi-Fi or Hotspot for TV link",
+                                    color = WifiBlue,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Open that address in your Samsung/LG/Hisense TV Internet Browser to view photos, play videos, or download files.",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = onOpenInTvBrowser,
+                                modifier = Modifier.weight(1.2f),
+                                colors = ButtonDefaults.buttonColors(containerColor = WifiBlue),
+                                shape = RoundedCornerShape(12.dp)
+                            ) { Text("Open on TV", color = Color(0xFF062033), fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+                            OutlinedButton(
+                                onClick = { showBrowserQr = !showBrowserQr },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Rounded.QrCode2, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(if (showBrowserQr) "Hide QR" else "Browser QR", fontSize = 11.sp)
+                            }
+                        }
+                        if (showBrowserQr && uiState.tvBrowserShareUrl != null) {
+                            val qrBmp = remember(uiState.tvBrowserShareUrl) { generateQrBitmap(uiState.tvBrowserShareUrl, 360) }
+                            if (qrBmp != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(150.dp)
+                                        .align(Alignment.CenterHorizontally)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(Color.White)
+                                        .padding(6.dp)
+                                ) {
+                                    Image(bitmap = qrBmp.asImageBitmap(), contentDescription = "TV Browser URL QR", modifier = Modifier.fillMaxSize())
+                                }
+                            }
+                        }
                     }
-                    FilledTonalButton(
-                        onClick = onSendAppsToTv,
-                        enabled = activeTv != null,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(14.dp)
+
+                    OutlinedButton(
+                        onClick = onOpenSystemCastSettings,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
                     ) {
-                        Icon(Icons.Rounded.Android, contentDescription = null, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Apps (.apk)", fontSize = 12.sp)
-                    }
-                    OutlinedButton(onClick = onRefreshTvFiles, enabled = activeTv != null, shape = RoundedCornerShape(14.dp)) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh TV Files", modifier = Modifier.size(18.dp))
+                        Icon(Icons.Rounded.Cast, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Open Wireless Screen Mirroring (Smart View / Miracast)", fontSize = 12.sp)
                     }
                 }
-
-                if (uiState.tvCompanionFiles.isNotEmpty()) {
-                    Text("Files stored on TV (${uiState.tvCompanionFiles.size})", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    uiState.tvCompanionFiles.take(10).forEach { file ->
-                        SharedFileRow(file = file, enabled = true, onClick = { onDownloadTvFile(file) })
-                    }
-                }
-
-                TransferHistorySection(
-                    title = "TV Transfer History",
-                    items = uiState.tvTransferHistory,
-                    onOpenItem = onOpenHistoryFile
-                )
             }
         }
     }
