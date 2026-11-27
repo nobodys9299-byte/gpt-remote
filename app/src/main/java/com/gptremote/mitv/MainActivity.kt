@@ -378,10 +378,7 @@ class MainActivity : ComponentActivity() {
                                 route = AppRoute.Remote(activeBrand)
                             },
                             onOpenActiveSession = { session ->
-                                val brand = ProductCatalog.brandsFor(session.targetProduct)
-                                    .firstOrNull { it.id == session.targetBrandId }
-                                    ?: ProductCatalog.brandsFor(session.targetProduct).first()
-                                viewModel.selectProductBrand(brand)
+                                val brand = viewModel.openActiveSession(session)
                                 route = AppRoute.Remote(brand)
                             },
                             onDisconnectSession = viewModel::disconnectSession,
@@ -561,7 +558,12 @@ class MainActivity : ComponentActivity() {
                             onSelectHapticStrength = viewModel::setHapticStrength,
                             onToggleSound = viewModel::setSoundEnabled,
                             onSelectAccentTheme = viewModel::setAccentTheme,
-                            onClearBanner = viewModel::clearBanner
+                            onClearBanner = viewModel::clearBanner,
+                            onOpenActiveSession = { session ->
+                                val brand = viewModel.openActiveSession(session)
+                                route = AppRoute.Remote(brand)
+                            },
+                            onDisconnectSession = viewModel::disconnectSession
                         )
                     }
                 }
@@ -611,17 +613,24 @@ class MainActivity : ComponentActivity() {
                             Icon(Icons.Rounded.Close, contentDescription = "Exit Fullscreen")
                         }
 
-                        Text(
-                            text = "Tap = Click • Drag = Move Cursor • Back = Exit",
-                            color = Color.White.copy(alpha = 0.78f),
-                            fontSize = 11.sp,
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(bottom = 12.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color.Black.copy(alpha = 0.58f))
-                                .padding(horizontal = 12.dp, vertical = 5.dp)
-                        )
+                        var showFullscreenHint by remember { mutableStateOf(true) }
+                        LaunchedEffect(Unit) {
+                            delay(3000L)
+                            showFullscreenHint = false
+                        }
+                        if (showFullscreenHint) {
+                            Text(
+                                text = "Tap = Click • Drag = Move Cursor • Back = Exit",
+                                color = Color.White.copy(alpha = 0.78f),
+                                fontSize = 11.sp,
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 12.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.Black.copy(alpha = 0.58f))
+                                    .padding(horizontal = 12.dp, vertical = 5.dp)
+                            )
+                        }
                     }
                 } else if (isFullscreenMirrorOpen && fullBmp == null) {
                     isFullscreenMirrorOpen = false

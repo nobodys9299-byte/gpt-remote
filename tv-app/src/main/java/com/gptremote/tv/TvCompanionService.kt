@@ -103,7 +103,7 @@ class TvCompanionService : Service() {
         const val BEACON_PORT = 58769
         const val TCP_PORT = 58765
         const val HTTP_PORT = 58768
-        private const val TRANSFER_BUF = 512 * 1024
+        private const val TRANSFER_BUF = 1024 * 1024
         private const val CHANNEL_ID = "gpt_remote_tv_companion"
         private const val NOTIF_ID = 4102
     }
@@ -112,7 +112,8 @@ class TvCompanionService : Service() {
     private lateinit var storageDir: File
     private lateinit var pairCode: String
     private val historyLock = Any()
-    private val cancelTransferFlag = AtomicBoolean(false)
+    private val cancelledSessions = ConcurrentHashMap.newKeySet<String>()
+    private val activeDownloadCancel = AtomicBoolean(false)
     private val uploadParts = ConcurrentHashMap<String, File>()
 
     @Volatile
@@ -346,7 +347,7 @@ class TvCompanionService : Service() {
     private fun handleHttpClient(socket: Socket) {
         try {
             socket.use { sock ->
-                sock.soTimeout = 300_000
+                sock.soTimeout = 3_600_000
                 sock.tcpNoDelay = true
                 runCatching {
                     sock.receiveBufferSize = 1024 * 1024
@@ -420,19 +421,21 @@ class TvCompanionService : Service() {
                     }
 
                     method == "POST" && path == "/transfer-cancel" -> {
-                        cancelTransferFlag.set(true)
                         val sid = query["session"].orEmpty().trim()
                         if (sid.isNotEmpty()) {
+                            cancelledSessions.add(sid)
                             uploadParts.remove(sid)?.let { runCatching { it.delete() } }
+                        } else {
+                            activeDownloadCancel.set(true)
                         }
                         TvCompanionState.update { it.copy(transferProgress = null, statusText = "Transfer cancelled") }
                         writeJsonResponse(out, 200, "{\"ok\":true}")
                     }
 
                     method == "POST" && path == "/upload" -> {
-                        cancelTransferFlag.set(false)
                         val contentLength = headers["content-length"]?.toLongOrNull() ?: 0L
                         val sid = query["session"].orEmpty().trim()
+                        if (sid.isNotEmpty()) cancelledSessions.remove(sid)
                         val offset = query["offset"]?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
                         val totalParam = query["total"]?.toLongOrNull()?.coerceAtLeast(0L) ?: contentLength
                         val totalExpected = max(totalParam, offset + contentLength)
@@ -460,7 +463,7 @@ class TvCompanionService : Service() {
                             }
                             var remaining = contentLength
                             while (remaining > 0L) {
-                                if (cancelTransferFlag.get()) break
+                                if (sid.isNotEmpty() && cancelledSessions.contains(sid)) break
                                 val toRead = minOf(buf.size.toLong(), remaining).toInt()
                                 val read = bis.read(buf, 0, toRead)
                                 if (read <= 0) break
@@ -493,8 +496,8 @@ class TvCompanionService : Service() {
                         }
 
                         val overallDone = offset + done
-                        if (cancelTransferFlag.get()) {
-                            if (sid.isNotEmpty()) uploadParts.remove(sid)
+                        if (sid.isNotEmpty() && cancelledSessions.remove(sid)) {
+                            uploadParts.remove(sid)
                             runCatching { partFile.delete() }
                             TvCompanionState.update { it.copy(transferProgress = null, statusText = "Cancelled $safeName") }
                             writeJsonResponse(out, 200, JSONObject().put("ok", false).put("cancelled", true).toString())
@@ -542,7 +545,7 @@ class TvCompanionService : Service() {
                     }
 
                     method == "GET" && path == "/download" -> {
-                        cancelTransferFlag.set(false)
+                        activeDownloadCancel.set(false)
                         val rawName = query["name"].orEmpty()
                         val safeName = sanitizeFilename(rawName)
                         val file = File(storageDir, safeName)
@@ -581,7 +584,7 @@ class TvCompanionService : Service() {
                         RandomAccessFile(file, "r").use { raf ->
                             if (startOffset > 0L) raf.seek(startOffset)
                             var remaining = toSend
-                            while (remaining > 0L && !cancelTransferFlag.get()) {
+                            while (remaining > 0L && !activeDownloadCancel.get()) {
                                 val r = raf.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
                                 if (r <= 0) break
                                 out.write(buf, 0, r)

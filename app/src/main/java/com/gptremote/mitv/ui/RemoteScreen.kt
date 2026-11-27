@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.Gamepad
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Kitchen
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.LocalLaundryService
@@ -51,11 +52,15 @@ import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -96,6 +101,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.gptremote.mitv.haptic.HapticStrength
+import com.gptremote.mitv.model.ActiveSessionItem
 import com.gptremote.mitv.model.BrandOption
 import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.DeviceCategory
@@ -226,7 +232,9 @@ fun RemoteScreen(
     onSelectHapticStrength: (HapticStrength) -> Unit,
     onToggleSound: (Boolean) -> Unit,
     onSelectAccentTheme: (AppAccentTheme) -> Unit,
-    onClearBanner: () -> Unit
+    onClearBanner: () -> Unit,
+    onOpenActiveSession: (ActiveSessionItem) -> Unit = {},
+    onDisconnectSession: (ActiveSessionItem) -> Unit = {}
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     var showConnectSheet by remember { mutableStateOf(false) }
@@ -320,6 +328,8 @@ fun RemoteScreen(
                     }
                 },
                 onOpenSettings = { showSettingsSheet = true },
+                onOpenActiveSession = onOpenActiveSession,
+                onDisconnectSession = onDisconnectSession,
                 onPowerClick = {
                     when (brand.productType) {
                         ProductType.AC,
@@ -496,9 +506,14 @@ private fun RemoteTopBar(
     onBack: () -> Unit,
     onOpenConnect: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenActiveSession: (ActiveSessionItem) -> Unit,
+    onDisconnectSession: (ActiveSessionItem) -> Unit,
     onPowerClick: () -> Unit
 ) {
     val accent = MiOrange
+    val sessions = uiState.activeSessions
+    var showSessionMenu by remember { mutableStateOf(false) }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -564,33 +579,126 @@ private fun RemoteTopBar(
         Row(
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = 8.dp)
-                .height(44.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(RemoteSurfaceElevated)
-                .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
-                .clickable(onClick = onOpenConnect)
-                .padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.Center,
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
+            Row(
                 modifier = Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(dotColor)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Icon(icon, contentDescription = null, tint = dotColor, modifier = Modifier.size(15.dp))
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = pillTitle,
-                color = TextPrimary,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+                    .weight(1f)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(RemoteSurfaceElevated)
+                    .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
+                    .clickable(onClick = onOpenConnect)
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(dotColor)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(icon, contentDescription = null, tint = dotColor, modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = pillTitle,
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            if (sessions.size > 1) {
+                Box {
+                    Row(
+                        modifier = Modifier
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(ConnectedGreen.copy(alpha = 0.16f))
+                            .border(1.dp, ConnectedGreen.copy(alpha = 0.65f), RoundedCornerShape(22.dp))
+                            .clickable { showSessionMenu = true }
+                            .padding(horizontal = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "${sessions.size}",
+                            color = ConnectedGreen,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Icon(
+                            imageVector = Icons.Rounded.KeyboardArrowDown,
+                            contentDescription = "Switch connected device",
+                            tint = ConnectedGreen,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showSessionMenu,
+                        onDismissRequest = { showSessionMenu = false },
+                        containerColor = RemoteSurfaceElevated
+                    ) {
+                        sessions.forEach { session ->
+                            DropdownMenuItem(
+                                text = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(7.dp)
+                                                .clip(CircleShape)
+                                                .background(ConnectedGreen)
+                                        )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = session.title,
+                                                color = TextPrimary,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1
+                                            )
+                                            Text(
+                                                text = session.subtitle,
+                                                color = TextSecondary,
+                                                fontSize = 11.sp,
+                                                maxLines = 1
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                showSessionMenu = false
+                                                onDisconnectSession(session)
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Close,
+                                                contentDescription = "Disconnect ${session.title}",
+                                                tint = Color(0xFFF87171),
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    showSessionMenu = false
+                                    onOpenActiveSession(session)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

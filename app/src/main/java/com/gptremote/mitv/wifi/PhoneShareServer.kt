@@ -139,7 +139,8 @@ class PhoneShareServer(context: Context) {
 
     private val cancelRequested = AtomicBoolean(false)
     private val pauseRequested = AtomicBoolean(false)
-    private val serverCancelRequested = AtomicBoolean(false)
+    private val cancelledSessions = ConcurrentHashMap.newKeySet<String>()
+    private val serverDownloadCancel = AtomicBoolean(false)
     private val serverUploadParts = ConcurrentHashMap<String, File>()
     private var activeTransferJob: Job? = null
     @Volatile
@@ -422,6 +423,12 @@ class PhoneShareServer(context: Context) {
     }
 
     fun resumeActiveTransfer(onComplete: (String) -> Unit) {
+        if (activeTransferJob?.isActive == true) {
+            cancelRequested.set(false)
+            pauseRequested.set(false)
+            _transferProgress.value = _transferProgress.value?.copy(isPaused = false)
+            return
+        }
         val up = pausedUploadState
         if (up != null) {
             pausedUploadState = null
@@ -442,16 +449,13 @@ class PhoneShareServer(context: Context) {
     fun cancelActiveTransfer(onComplete: (String) -> Unit) {
         val cur = _transferProgress.value
         val sid = activeSessionId ?: cur?.transferId.orEmpty()
+        val jobWasActive = activeTransferJob?.isActive == true
         cancelRequested.set(true)
         pauseRequested.set(false)
-        serverCancelRequested.set(true)
-        pausedUploadState = null
-        pausedDownloadState?.let { runCatching { it.partFile.delete() } }
-        pausedDownloadState = null
+        if (sid.isNotEmpty()) {
+            cancelledSessions.add(sid)
+        }
         runCatching { activeConn?.disconnect() }
-        activeConn = null
-        activeTransferJob?.cancel()
-        activeTransferJob = null
         val host = peerHost
         if (host != null && sid.isNotEmpty()) {
             scope.launch {
@@ -466,6 +470,13 @@ class PhoneShareServer(context: Context) {
                 }
             }
         }
+        if (jobWasActive) return
+
+        pausedUploadState = null
+        pausedDownloadState?.let { runCatching { it.partFile.delete() } }
+        pausedDownloadState = null
+        activeConn = null
+        cancelRequested.set(false)
         if (cur != null) {
             appendHistory(
                 TransferHistoryItem(
@@ -506,152 +517,198 @@ class PhoneShareServer(context: Context) {
             return
         }
         activeTransferJob?.cancel()
-        activeTransferJob = scope.launch {
-            var successCount = startIndex
+        val job = scope.launch {
+            var successCount = 0
             var lastName = ""
-            var currentFileName = ""
-            var sent = 0L
             try {
                 for (idx in startIndex until uris.size) {
                     val uri = uris[idx]
                     val name = resolveFileName(uri)
-                    currentFileName = name
-                    lastName = name
                     val total = resolveFileSize(uri).coerceAtLeast(1L)
                     val sessionId = if (idx == startIndex) initialSessionId else "ph_${System.currentTimeMillis()}_$idx"
                     activeSessionId = sessionId
 
-                    val remoteOffset = runCatching {
-                        val stConn = (URL("http://$host:$peerPort/upload-status?session=${URLEncoder.encode(sessionId, "UTF-8")}").openConnection() as HttpURLConnection).apply {
-                            connectTimeout = 2500
-                            readTimeout = 2500
-                        }
-                        val txt = stConn.inputStream.bufferedReader().use { it.readText() }
-                        stConn.disconnect()
-                        JSONObject(txt).optLong("bytes", 0L).coerceIn(0L, total)
-                    }.getOrDefault(0L)
-
-                    val remainingBytes = (total - remoteOffset).coerceAtLeast(0L)
-                    val startedMs = System.currentTimeMillis()
-                    sent = remoteOffset
-                    var lastEmit = startedMs
-                    _transferProgress.value = TransferProgress(name, sent, total, isUpload = true, bytesPerSec = 0L, transferId = sessionId)
-
-                    val encodedName = URLEncoder.encode(name, "UTF-8").replace("+", "%20")
-                    val uploadUrl = "http://$host:$peerPort/upload?session=${URLEncoder.encode(sessionId, "UTF-8")}&offset=$remoteOffset&total=$total"
-                    val conn = (URL(uploadUrl).openConnection() as HttpURLConnection).apply {
-                        requestMethod = "POST"
-                        connectTimeout = 5000
-                        readTimeout = 300_000
-                        doOutput = true
-                        setRequestProperty("X-Filename", encodedName)
-                        if (total > 0) setFixedLengthStreamingMode(remainingBytes) else setChunkedStreamingMode(TRANSFER_BUF)
-                    }
-                    activeConn = conn
-
+                    var sent = 0L
+                    var activeMs = 0L
+                    var lastSliceMs = System.currentTimeMillis()
                     var uploadedNow = 0L
-                    var pausedNow = false
-                    val buf = ByteArray(TRANSFER_BUF)
-                    appContext.contentResolver.openInputStream(uri)?.use { inp ->
-                        if (remoteOffset > 0L) skipFully(inp, remoteOffset)
-                        BufferedOutputStream(conn.outputStream, TRANSFER_BUF).use { out ->
-                            while (true) {
-                                if (cancelRequested.get()) throw IllegalStateException("Cancelled by user")
-                                if (pauseRequested.get()) {
-                                    pausedNow = true
-                                    break
-                                }
-                                val n = inp.read(buf)
-                                if (n <= 0) break
-                                out.write(buf, 0, n)
-                                sent += n
-                                uploadedNow += n
-                                val now = System.currentTimeMillis()
-                                if (now - lastEmit >= 160L || sent >= total) {
-                                    lastEmit = now
-                                    val spd = (uploadedNow * 1000L) / max(1L, now - startedMs)
-                                    _transferProgress.value = TransferProgress(
-                                        fileName = name,
-                                        bytesDone = sent,
-                                        totalBytes = maxOf(total, sent),
-                                        isUpload = true,
-                                        bytesPerSec = spd,
-                                        transferId = sessionId
-                                    )
-                                }
+                    var lastEmit = lastSliceMs
+                    var fatalError = false
+
+                    try {
+                        val remoteOffset = runCatching {
+                            val stConn = (URL("http://$host:$peerPort/upload-status?session=${URLEncoder.encode(sessionId, "UTF-8")}").openConnection() as HttpURLConnection).apply {
+                                connectTimeout = 2500
+                                readTimeout = 2500
                             }
-                            if (!pausedNow) out.flush()
-                        }
-                    } ?: throw IllegalStateException("Cannot read selected file $name")
+                            val txt = stConn.inputStream.bufferedReader().use { it.readText() }
+                            stConn.disconnect()
+                            JSONObject(txt).optLong("bytes", 0L).coerceIn(0L, total)
+                        }.getOrDefault(0L)
 
-                    if (pausedNow) {
-                        runCatching { conn.disconnect() }
-                        activeConn = null
-                        pausedUploadState = PausedUploadState(uris, idx, sessionId, name, total, sent)
-                        _transferProgress.value = TransferProgress(name, sent, total, isUpload = true, isPaused = true, bytesPerSec = 0L, transferId = sessionId)
-                        return@launch
-                    }
-
-                    val code = conn.responseCode
-                    conn.disconnect()
-                    activeConn = null
-                    if (code !in 200..299) throw IllegalStateException("HTTP $code")
-
-                    val finalSpd = (uploadedNow * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
-                    _transferProgress.value = TransferProgress(
-                        fileName = name,
-                        bytesDone = maxOf(total, sent),
-                        totalBytes = maxOf(total, sent),
-                        isUpload = true,
-                        isComplete = true,
-                        bytesPerSec = finalSpd,
-                        transferId = sessionId
-                    )
-                    appendHistory(
-                        TransferHistoryItem(
-                            id = "ph_sent_${System.nanoTime()}",
+                        val remainingBytes = (total - remoteOffset).coerceAtLeast(0L)
+                        sent = remoteOffset
+                        lastSliceMs = System.currentTimeMillis()
+                        lastEmit = lastSliceMs
+                        _transferProgress.value = TransferProgress(
                             fileName = name,
-                            sizeBytes = maxOf(total, sent),
-                            isSent = true,
-                            bytesPerSec = finalSpd,
-                            timestampMs = System.currentTimeMillis(),
-                            localUriString = uri.toString(),
-                            statusLabel = "Sent"
+                            bytesDone = sent,
+                            totalBytes = maxOf(total, sent),
+                            isUpload = true,
+                            isPaused = pauseRequested.get(),
+                            bytesPerSec = 0L,
+                            transferId = sessionId
                         )
-                    )
-                    successCount++
-                }
-                delay(1200)
-                _transferProgress.value = null
-                activeSessionId = null
-                refreshPeerFiles()
-                val msg = if (successCount == 1) {
-                    "Sent '$lastName' to ${_peerName.value}"
-                } else {
-                    "Sent $successCount file(s) to ${_peerName.value}"
-                }
-                onComplete(msg)
-            } catch (e: Exception) {
-                activeConn = null
-                if (!pauseRequested.get() && !cancelRequested.get()) {
-                    if (currentFileName.isNotEmpty()) {
+
+                        val encodedName = URLEncoder.encode(name, "UTF-8").replace("+", "%20")
+                        val uploadUrl = "http://$host:$peerPort/upload?session=${URLEncoder.encode(sessionId, "UTF-8")}&offset=$remoteOffset&total=$total"
+                        val conn = (URL(uploadUrl).openConnection() as HttpURLConnection).apply {
+                            requestMethod = "POST"
+                            connectTimeout = 5000
+                            readTimeout = 3_600_000
+                            doOutput = true
+                            setRequestProperty("X-Filename", encodedName)
+                            setRequestProperty("Connection", "close")
+                            if (total > 0) setFixedLengthStreamingMode(remainingBytes) else setChunkedStreamingMode(TRANSFER_BUF)
+                        }
+                        activeConn = conn
+
+                        val buf = ByteArray(TRANSFER_BUF)
+                        appContext.contentResolver.openInputStream(uri)?.use { inp ->
+                            if (remoteOffset > 0L) skipFully(inp, remoteOffset)
+                            BufferedOutputStream(conn.outputStream, TRANSFER_BUF).use { out ->
+                                while (true) {
+                                    if (cancelRequested.get()) throw IllegalStateException("Cancelled by user")
+                                    if (pauseRequested.get()) {
+                                        val nowPause = System.currentTimeMillis()
+                                        activeMs += (nowPause - lastSliceMs).coerceAtLeast(0L)
+                                        while (pauseRequested.get() && !cancelRequested.get()) {
+                                            delay(80L)
+                                        }
+                                        lastSliceMs = System.currentTimeMillis()
+                                        if (cancelRequested.get()) throw IllegalStateException("Cancelled by user")
+                                    }
+                                    val n = inp.read(buf)
+                                    if (n <= 0) break
+                                    out.write(buf, 0, n)
+                                    sent += n
+                                    uploadedNow += n
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastEmit >= 160L || sent >= total) {
+                                        activeMs += (now - lastSliceMs).coerceAtLeast(0L)
+                                        lastSliceMs = now
+                                        lastEmit = now
+                                        val spd = (uploadedNow * 1000L) / max(1L, activeMs)
+                                        _transferProgress.value = TransferProgress(
+                                            fileName = name,
+                                            bytesDone = sent,
+                                            totalBytes = maxOf(total, sent),
+                                            isUpload = true,
+                                            isPaused = pauseRequested.get(),
+                                            bytesPerSec = if (pauseRequested.get()) 0L else spd,
+                                            transferId = sessionId
+                                        )
+                                    }
+                                }
+                                out.flush()
+                            }
+                        } ?: throw IllegalStateException("Cannot read selected file $name")
+
+                        if (cancelRequested.get()) throw IllegalStateException("Cancelled by user")
+
+                        val code = conn.responseCode
+                        val resp = runCatching { conn.inputStream.bufferedReader().use { it.readText() } }.getOrDefault("{}")
+                        conn.disconnect()
+                        activeConn = null
+                        if (code !in 200..299) throw IllegalStateException("HTTP $code")
+                        val respJson = runCatching { JSONObject(resp) }.getOrNull()
+                        if (respJson?.optBoolean("cancelled") == true) {
+                            cancelRequested.set(true)
+                            throw IllegalStateException("Cancelled on receiver")
+                        }
+
+                        lastName = name
+                        val finalActiveMs = activeMs + (System.currentTimeMillis() - lastSliceMs).coerceAtLeast(0L)
+                        val finalSpd = (uploadedNow * 1000L) / max(1L, finalActiveMs)
+                        _transferProgress.value = TransferProgress(
+                            fileName = name,
+                            bytesDone = maxOf(total, sent),
+                            totalBytes = maxOf(total, sent),
+                            isUpload = true,
+                            isComplete = true,
+                            bytesPerSec = finalSpd,
+                            transferId = sessionId
+                        )
                         appendHistory(
                             TransferHistoryItem(
-                                id = "ph_fail_${System.nanoTime()}",
-                                fileName = currentFileName,
-                                sizeBytes = sent,
+                                id = "ph_sent_${System.nanoTime()}",
+                                fileName = name,
+                                sizeBytes = maxOf(total, sent),
                                 isSent = true,
-                                bytesPerSec = 0L,
+                                bytesPerSec = finalSpd,
                                 timestampMs = System.currentTimeMillis(),
-                                statusLabel = "Failed"
+                                localUriString = uri.toString(),
+                                statusLabel = "Sent"
                             )
                         )
+                        successCount++
+                    } catch (e: Exception) {
+                        runCatching { activeConn?.disconnect() }
+                        activeConn = null
+                        if (cancelRequested.compareAndSet(true, false)) {
+                            pauseRequested.set(false)
+                            appendHistory(
+                                TransferHistoryItem(
+                                    id = "ph_cancel_${System.nanoTime()}",
+                                    fileName = name,
+                                    sizeBytes = sent,
+                                    isSent = true,
+                                    bytesPerSec = 0L,
+                                    timestampMs = System.currentTimeMillis(),
+                                    statusLabel = "Cancelled"
+                                )
+                            )
+                            onComplete("Cancelled '$name'.")
+                        } else {
+                            appendHistory(
+                                TransferHistoryItem(
+                                    id = "ph_fail_${System.nanoTime()}",
+                                    fileName = name,
+                                    sizeBytes = sent,
+                                    isSent = true,
+                                    bytesPerSec = 0L,
+                                    timestampMs = System.currentTimeMillis(),
+                                    statusLabel = "Failed"
+                                )
+                            )
+                            _transferProgress.value = null
+                            onComplete("Phone send failed: ${e.message ?: "error"}")
+                            fatalError = true
+                        }
                     }
-                    _transferProgress.value = null
-                    onComplete("Phone send failed: ${e.message ?: "error"}")
+                    if (fatalError) break
                 }
+                if (successCount > 0) {
+                    delay(1200)
+                    refreshPeerFiles()
+                    val msg = if (successCount == 1) {
+                        "Sent '$lastName' to ${_peerName.value}"
+                    } else {
+                        "Sent $successCount file(s) to ${_peerName.value}"
+                    }
+                    onComplete(msg)
+                }
+                _transferProgress.value = null
+            } finally {
+                cancelRequested.set(false)
+                pauseRequested.set(false)
+                pausedUploadState = null
+                activeConn = null
+                activeSessionId = null
+                if (activeTransferJob === coroutineContext[Job]) activeTransferJob = null
             }
         }
+        activeTransferJob = job
     }
 
     fun downloadFileFromPeer(fileName: String, onComplete: (String) -> Unit) {
@@ -674,7 +731,7 @@ class PhoneShareServer(context: Context) {
             return
         }
         activeTransferJob?.cancel()
-        activeTransferJob = scope.launch {
+        val job = scope.launch {
             var doneBytes = if (partFile.exists()) partFile.length() else 0L
             try {
                 val sid = partFile.nameWithoutExtension
@@ -682,19 +739,19 @@ class PhoneShareServer(context: Context) {
                 val encoded = URLEncoder.encode(fileName, "UTF-8")
                 val conn = (URL("http://$host:$peerPort/download?name=$encoded").openConnection() as HttpURLConnection).apply {
                     connectTimeout = 5000
-                    readTimeout = 300_000
+                    readTimeout = 3_600_000
                     if (doneBytes > 0L) setRequestProperty("Range", "bytes=$doneBytes-")
                 }
                 activeConn = conn
                 if (conn.responseCode !in 200..299) throw IllegalStateException("HTTP ${conn.responseCode}")
                 val respLen = conn.contentLengthLong.coerceAtLeast(0L)
                 val total = if (conn.responseCode == 206 && knownTotal > 0L) knownTotal else maxOf(knownTotal, doneBytes + respLen)
-                val startedMs = System.currentTimeMillis()
+                var activeMs = 0L
+                var lastSliceMs = System.currentTimeMillis()
                 var downloadedThisConn = 0L
-                var lastEmit = startedMs
-                _transferProgress.value = TransferProgress(fileName, doneBytes, total, isUpload = false, bytesPerSec = 0L, transferId = sid)
+                var lastEmit = lastSliceMs
+                _transferProgress.value = TransferProgress(fileName, doneBytes, total, isUpload = false, isPaused = pauseRequested.get(), bytesPerSec = 0L, transferId = sid)
 
-                var pausedNow = false
                 val buf = ByteArray(TRANSFER_BUF)
                 BufferedInputStream(conn.inputStream, TRANSFER_BUF).use { inp ->
                     FileOutputStream(partFile, doneBytes > 0L && conn.responseCode == 206).use { fos ->
@@ -702,8 +759,13 @@ class PhoneShareServer(context: Context) {
                         while (true) {
                             if (cancelRequested.get()) throw IllegalStateException("Cancelled by user")
                             if (pauseRequested.get()) {
-                                pausedNow = true
-                                break
+                                val nowPause = System.currentTimeMillis()
+                                activeMs += (nowPause - lastSliceMs).coerceAtLeast(0L)
+                                while (pauseRequested.get() && !cancelRequested.get()) {
+                                    delay(80L)
+                                }
+                                lastSliceMs = System.currentTimeMillis()
+                                if (cancelRequested.get()) throw IllegalStateException("Cancelled by user")
                             }
                             val n = inp.read(buf)
                             if (n <= 0) break
@@ -712,14 +774,17 @@ class PhoneShareServer(context: Context) {
                             downloadedThisConn += n
                             val now = System.currentTimeMillis()
                             if (now - lastEmit >= 160L || (total > 0 && doneBytes >= total)) {
+                                activeMs += (now - lastSliceMs).coerceAtLeast(0L)
+                                lastSliceMs = now
                                 lastEmit = now
-                                val spd = (downloadedThisConn * 1000L) / max(1L, now - startedMs)
+                                val spd = (downloadedThisConn * 1000L) / max(1L, activeMs)
                                 _transferProgress.value = TransferProgress(
                                     fileName = fileName,
                                     bytesDone = doneBytes,
                                     totalBytes = maxOf(total, doneBytes),
                                     isUpload = false,
-                                    bytesPerSec = spd,
+                                    isPaused = pauseRequested.get(),
+                                    bytesPerSec = if (pauseRequested.get()) 0L else spd,
                                     transferId = sid
                                 )
                             }
@@ -729,18 +794,13 @@ class PhoneShareServer(context: Context) {
                 conn.disconnect()
                 activeConn = null
 
-                if (pausedNow) {
-                    pausedDownloadState = PausedDownloadState(fileName, maxOf(total, doneBytes), doneBytes, partFile)
-                    _transferProgress.value = TransferProgress(fileName, doneBytes, maxOf(total, doneBytes), isUpload = false, isPaused = true, bytesPerSec = 0L, transferId = sid)
-                    return@launch
-                }
-
                 val savedUri = partFile.inputStream().use { fis ->
                     saveStreamToDownloads(fileName, fis) { }
                 }
                 runCatching { partFile.delete() }
                 val finalSize = maxOf(total, doneBytes)
-                val finalSpd = (downloadedThisConn * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
+                val finalActiveMs = activeMs + (System.currentTimeMillis() - lastSliceMs).coerceAtLeast(0L)
+                val finalSpd = (downloadedThisConn * 1000L) / max(1L, finalActiveMs)
                 _transferProgress.value = TransferProgress(
                     fileName = fileName,
                     bytesDone = finalSize,
@@ -764,12 +824,26 @@ class PhoneShareServer(context: Context) {
                 )
                 delay(1200)
                 _transferProgress.value = null
-                activeSessionId = null
                 onComplete("Saved '$fileName' to Downloads/GptRemote")
             } catch (e: Exception) {
+                runCatching { activeConn?.disconnect() }
                 activeConn = null
-                if (!pauseRequested.get() && !cancelRequested.get()) {
-                    runCatching { partFile.delete() }
+                runCatching { partFile.delete() }
+                if (cancelRequested.compareAndSet(true, false)) {
+                    appendHistory(
+                        TransferHistoryItem(
+                            id = "ph_dl_cancel_${System.nanoTime()}",
+                            fileName = fileName,
+                            sizeBytes = doneBytes,
+                            isSent = false,
+                            bytesPerSec = 0L,
+                            timestampMs = System.currentTimeMillis(),
+                            statusLabel = "Cancelled"
+                        )
+                    )
+                    _transferProgress.value = null
+                    onComplete("Cancelled '$fileName'.")
+                } else {
                     appendHistory(
                         TransferHistoryItem(
                             id = "ph_dl_fail_${System.nanoTime()}",
@@ -784,14 +858,22 @@ class PhoneShareServer(context: Context) {
                     _transferProgress.value = null
                     onComplete("Download failed: ${e.message ?: "error"}")
                 }
+            } finally {
+                cancelRequested.set(false)
+                pauseRequested.set(false)
+                pausedDownloadState = null
+                activeConn = null
+                activeSessionId = null
+                if (activeTransferJob === coroutineContext[Job]) activeTransferJob = null
             }
         }
+        activeTransferJob = job
     }
 
     private fun handleHttpClient(socket: Socket) {
         try {
             socket.tcpNoDelay = true
-            socket.soTimeout = 300_000
+            socket.soTimeout = 3_600_000
             runCatching {
                 socket.receiveBufferSize = 1024 * 1024
                 socket.sendBufferSize = 1024 * 1024
@@ -908,11 +990,13 @@ class PhoneShareServer(context: Context) {
                 }
 
                 method == "POST" && path == "/transfer-cancel" -> {
-                    serverCancelRequested.set(true)
                     val sid = query.split('&').firstOrNull { it.startsWith("session=") }
                         ?.substringAfter("session=")?.let { URLDecoder.decode(it, "UTF-8") }?.trim().orEmpty()
                     if (sid.isNotEmpty()) {
+                        cancelledSessions.add(sid)
                         serverUploadParts.remove(sid)?.let { runCatching { it.delete() } }
+                    } else {
+                        serverDownloadCancel.set(true)
                     }
                     _transferProgress.value = null
                     out.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".toByteArray())
@@ -920,7 +1004,7 @@ class PhoneShareServer(context: Context) {
                 }
 
                 method == "GET" && path == "/download" -> {
-                    serverCancelRequested.set(false)
+                    serverDownloadCancel.set(false)
                     val reqName = query.split('&')
                         .firstOrNull { it.startsWith("name=") }
                         ?.substringAfter("name=")
@@ -950,7 +1034,7 @@ class PhoneShareServer(context: Context) {
                     appContext.contentResolver.openInputStream(item.uri)?.use { fis ->
                         if (startOffset > 0L) skipFully(fis, startOffset)
                         var remaining = if (toSend > 0) toSend else Long.MAX_VALUE
-                        while (remaining > 0L && !serverCancelRequested.get()) {
+                        while (remaining > 0L && !serverDownloadCancel.get()) {
                             val n = fis.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
                             if (n <= 0) break
                             out.write(buf, 0, n)
@@ -973,7 +1057,7 @@ class PhoneShareServer(context: Context) {
                     }
                     out.flush()
                     val finalSpd = (sentThisConn * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
-                    val completed = !serverCancelRequested.get() && (total <= 0L || sent >= total)
+                    val completed = !serverDownloadCancel.get() && (total <= 0L || sent >= total)
                     if (completed) {
                         appendHistory(
                             TransferHistoryItem(
@@ -987,7 +1071,7 @@ class PhoneShareServer(context: Context) {
                                 statusLabel = "Sent"
                             )
                         )
-                    } else if (serverCancelRequested.get()) {
+                    } else if (serverDownloadCancel.get()) {
                         appendHistory(
                             TransferHistoryItem(
                                 id = "ph_host_cancel_${System.nanoTime()}",
@@ -1004,12 +1088,12 @@ class PhoneShareServer(context: Context) {
                 }
 
                 method == "POST" && path == "/upload" -> {
-                    serverCancelRequested.set(false)
                     val qMap = query.split('&').mapNotNull {
                         val eq = it.indexOf('=')
                         if (eq > 0) it.substring(0, eq) to URLDecoder.decode(it.substring(eq + 1), "UTF-8") else null
                     }.toMap()
                     val sid = qMap["session"]?.trim().orEmpty()
+                    if (sid.isNotEmpty()) cancelledSessions.remove(sid)
                     val offset = qMap["offset"]?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
                     val totalParam = qMap["total"]?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
 
@@ -1035,7 +1119,8 @@ class PhoneShareServer(context: Context) {
                     RandomAccessFile(partFile, "rw").use { raf ->
                         if (offset > 0L && partFile.exists()) raf.seek(offset) else raf.setLength(0L)
                         var remaining = if (contentLength > 0L) contentLength else Long.MAX_VALUE
-                        while (remaining > 0L && !serverCancelRequested.get()) {
+                        while (remaining > 0L) {
+                            if (sid.isNotEmpty() && cancelledSessions.contains(sid)) break
                             val toRead = minOf(buf.size.toLong(), remaining).toInt()
                             val r = inp.read(buf, 0, toRead)
                             if (r <= 0) break
@@ -1060,8 +1145,8 @@ class PhoneShareServer(context: Context) {
                     }
 
                     val overallDone = offset + receivedThisConn
-                    if (serverCancelRequested.get()) {
-                        if (sid.isNotEmpty()) serverUploadParts.remove(sid)
+                    if (sid.isNotEmpty() && cancelledSessions.remove(sid)) {
+                        serverUploadParts.remove(sid)
                         runCatching { partFile.delete() }
                         _transferProgress.value = null
                         appendHistory(
@@ -1448,7 +1533,7 @@ class PhoneShareServer(context: Context) {
 
     companion object {
         const val DEFAULT_PORT = 58770
-        private const val TRANSFER_BUF = 512 * 1024
+        private const val TRANSFER_BUF = 1024 * 1024
 
         fun parseByteRange(rangeHeader: String?, totalLength: Long): Pair<Long, Long>? {
             if (rangeHeader.isNullOrBlank() || totalLength <= 0L) return null

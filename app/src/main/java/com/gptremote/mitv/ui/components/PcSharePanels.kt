@@ -133,8 +133,11 @@ import com.gptremote.mitv.wifi.SharedPcFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+private val AppIconMemoryCache = ConcurrentHashMap<String, ImageBitmap>()
 
 enum class TvSheetMode {
     FILE_SHARE,
@@ -422,15 +425,6 @@ fun PcFileSharePanel(
             WifiPcRequiredBanner(onOpenConnect = onOpenConnect)
         }
 
-        uiState.transferProgress?.let { prog ->
-            TransferProgressCard(
-                prog = prog,
-                onPause = onPauseTransfer,
-                onResume = onResumeTransfer,
-                onCancel = onCancelTransfer
-            )
-        }
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -469,6 +463,15 @@ fun PcFileSharePanel(
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("Apps (.apk)", fontSize = 12.sp, maxLines = 1)
             }
+        }
+
+        uiState.transferProgress?.let { prog ->
+            TransferProgressCard(
+                prog = prog,
+                onPause = onPauseTransfer,
+                onResume = onResumeTransfer,
+                onCancel = onCancelTransfer
+            )
         }
 
         Row(
@@ -567,15 +570,6 @@ fun PhoneSharePanel(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        uiState.phoneTransferProgress?.let { prog ->
-            TransferProgressCard(
-                prog = prog,
-                onPause = onPauseTransfer,
-                onResume = onResumeTransfer,
-                onCancel = onCancelTransfer
-            )
-        }
-
         // Hotspot Helper Card (Auto Local Hotspot / System Hotspot)
         Column(
             modifier = Modifier
@@ -641,7 +635,7 @@ fun PhoneSharePanel(
             }
         }
 
-        // Card 1: Host Files & Show/Hide QR Toggle
+        // Clean Pair & Send Card
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -650,7 +644,7 @@ fun PhoneSharePanel(
                 .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -659,27 +653,92 @@ fun PhoneSharePanel(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "This Phone Share",
-                        color = TextPrimary,
+                        text = uiState.peerPhoneName?.let { "Connected: $it" } ?: "Pair & Share Files",
+                        color = if (uiState.peerPhoneName != null) ConnectedGreen else TextPrimary,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Add files or apps, then show QR to another phone",
+                        text = if (uiState.peerPhoneName != null) {
+                            "Two-way phone transfer ready"
+                        } else {
+                            "Show your QR code or scan the other phone's QR"
+                        },
                         color = TextSecondary,
                         fontSize = 11.sp
                     )
                 }
-                FilledTonalButton(
-                    onClick = {
-                        onStartHost()
-                        showQrCode = !showQrCode
-                    },
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Icon(Icons.Rounded.QrCode2, contentDescription = null, modifier = Modifier.size(17.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (showQrCode) "Hide QR" else "Show QR", fontSize = 12.sp)
+                if (uiState.peerPhoneName != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = onScanPeerQr, shape = RoundedCornerShape(12.dp)) {
+                            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Switch", fontSize = 11.sp)
+                        }
+                        TextButton(onClick = onDisconnectPeer) {
+                            Text("Off", color = Color(0xFFF87171), fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (uiState.peerPhoneName == null) {
+                    FilledTonalButton(
+                        onClick = {
+                            onStartHost()
+                            showQrCode = !showQrCode
+                        },
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.QrCode2, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (showQrCode) "Hide QR" else "Show QR", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Button(
+                        onClick = onScanPeerQr,
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Scan QR", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                } else {
+                    Button(
+                        onClick = onSendFilesToPeer,
+                        modifier = Modifier.weight(1.25f).height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Send Files", fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    }
+                    FilledTonalButton(
+                        onClick = onSendAppsToPeer,
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.Android, contentDescription = null, modifier = Modifier.size(17.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Apps (.apk)", fontSize = 12.sp, maxLines = 1)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            onStartHost()
+                            showQrCode = !showQrCode
+                        },
+                        modifier = Modifier.height(48.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.QrCode2, contentDescription = "Toggle QR", modifier = Modifier.size(18.dp))
+                    }
                 }
             }
 
@@ -709,169 +768,21 @@ fun PhoneSharePanel(
                     )
                 } else {
                     Text(
-                        text = "Turn on Wi-Fi or Hotspot and tap Refresh below",
+                        text = "Turn on Wi-Fi or Hotspot first",
                         color = Color(0xFFFBBF24),
                         fontSize = 12.sp
                     )
                 }
             }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = onAddHostFiles,
-                    modifier = Modifier.weight(1.2f),
-                    colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Add Files", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                }
-                FilledTonalButton(
-                    onClick = onShareHostApps,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(Icons.Rounded.Android, contentDescription = null, modifier = Modifier.size(17.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Apps", fontSize = 12.sp, maxLines = 1)
-                }
-                OutlinedButton(
-                    onClick = onStartHost,
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "Refresh Host", modifier = Modifier.size(18.dp))
-                }
-            }
-
-            if (uiState.phoneHostSharedFiles.isNotEmpty()) {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        text = "Ready to download from this phone (${uiState.phoneHostSharedFiles.size})",
-                        color = ConnectedGreen,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    uiState.phoneHostSharedFiles.forEach { file ->
-                        Text(
-                            text = "• ${file.name} (${formatFileSize(file.sizeBytes)})",
-                            color = TextSecondary,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
         }
 
-        // Card 2: Connect to Another Phone via QR Scan
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(22.dp))
-                .background(RemoteSurfaceElevated)
-                .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = uiState.peerPhoneName?.let { "Connected: $it" } ?: "Connect Other Phone",
-                        color = if (uiState.peerPhoneName != null) ConnectedGreen else TextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = if (uiState.peerPhoneName != null) {
-                            "Two-way phone share ready"
-                        } else {
-                            "Scan the other phone's QR to pair both ways"
-                        },
-                        color = TextSecondary,
-                        fontSize = 11.sp
-                    )
-                }
-                if (uiState.peerPhoneName != null) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(onClick = onScanPeerQr, shape = RoundedCornerShape(12.dp)) {
-                            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(15.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Switch", fontSize = 11.sp)
-                        }
-                        TextButton(onClick = onDisconnectPeer) {
-                            Text("Off", color = Color(0xFFF87171), fontSize = 12.sp)
-                        }
-                    }
-                } else {
-                    Button(
-                        onClick = onScanPeerQr,
-                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Scan QR", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
-
-            if (uiState.peerPhoneName != null) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = onSendFilesToPeer,
-                        modifier = Modifier.weight(1.2f),
-                        colors = ButtonDefaults.buttonColors(containerColor = WifiBlue),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Text("Send Files", color = Color(0xFF062033), fontWeight = FontWeight.SemiBold, maxLines = 1)
-                    }
-                    FilledTonalButton(
-                        onClick = onSendAppsToPeer,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(Icons.Rounded.Android, contentDescription = null, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Apps", fontSize = 12.sp, maxLines = 1)
-                    }
-                    OutlinedButton(onClick = onRefreshPeerFiles, shape = RoundedCornerShape(14.dp)) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh Peer Files", modifier = Modifier.size(18.dp))
-                    }
-                }
-
-                if (uiState.peerPhoneFiles.isEmpty()) {
-                    Text(
-                        text = "Other phone hasn't added any files yet — tap Send Files above or Add Files on the other phone.",
-                        color = TextSecondary,
-                        fontSize = 12.sp
-                    )
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        uiState.peerPhoneFiles.forEach { file ->
-                            SharedFileRow(
-                                file = file,
-                                enabled = true,
-                                onClick = { onDownloadFromPeer(file) }
-                            )
-                        }
-                    }
-                }
-            }
+        uiState.phoneTransferProgress?.let { prog ->
+            TransferProgressCard(
+                prog = prog,
+                onPause = onPauseTransfer,
+                onResume = onResumeTransfer,
+                onCancel = onCancelTransfer
+            )
         }
 
         TransferHistorySection(
@@ -912,9 +823,7 @@ fun TvCompanionSheetDialog(
     onOpenHistoryFile: (TransferHistoryItem) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var modeTab by remember(preferNonAndroidTab, sheetMode) {
-        mutableIntStateOf(if (preferNonAndroidTab && uiState.connectedTvCompanion == null) 1 else 0)
-    }
+    val modeTab = if (preferNonAndroidTab && uiState.connectedTvCompanion == null) 1 else 0
     var showManual by remember { mutableStateOf(false) }
     var manualHost by remember { mutableStateOf("") }
     var manualCode by remember { mutableStateOf("") }
@@ -976,35 +885,6 @@ fun TvCompanionSheetDialog(
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Rounded.Close, contentDescription = "Close", tint = TextPrimary)
                     }
-                }
-
-                // Switcher between Android TV App & Non-Android TV
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilterChip(
-                        selected = modeTab == 0,
-                        onClick = { modeTab = 0 },
-                        modifier = Modifier.weight(1f),
-                        label = { Text("Android TV App", fontSize = 11.sp, maxLines = 1) }
-                    )
-                    FilterChip(
-                        selected = modeTab == 1,
-                        onClick = {
-                            modeTab = 1
-                            if (sheetMode == TvSheetMode.FILE_SHARE) onStartTvBrowserHost()
-                            onScanDlna()
-                        },
-                        modifier = Modifier.weight(1.25f),
-                        label = {
-                            Text(
-                                text = if (sheetMode == TvSheetMode.SCREEN_CAST) "Samsung / LG Cast" else "Samsung/LG Web & DLNA",
-                                fontSize = 11.sp,
-                                maxLines = 1
-                            )
-                        }
-                    )
                 }
 
                 if (modeTab == 0) {
@@ -1161,15 +1041,6 @@ fun TvCompanionSheetDialog(
                             }
                         }
                     } else {
-                        uiState.tvTransferProgress?.let { prog ->
-                            TransferProgressCard(
-                                prog = prog,
-                                onPause = onPauseTvTransfer,
-                                onResume = onResumeTvTransfer,
-                                onCancel = onCancelTvTransfer
-                            )
-                        }
-
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1195,16 +1066,15 @@ fun TvCompanionSheetDialog(
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("Apps (.apk)", fontSize = 12.sp)
                             }
-                            OutlinedButton(onClick = onRefreshTvFiles, enabled = activeTv != null, shape = RoundedCornerShape(14.dp)) {
-                                Icon(Icons.Rounded.Refresh, contentDescription = "Refresh TV Files", modifier = Modifier.size(18.dp))
-                            }
                         }
 
-                        if (uiState.tvCompanionFiles.isNotEmpty()) {
-                            Text("Files stored on TV (${uiState.tvCompanionFiles.size})", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                            uiState.tvCompanionFiles.take(10).forEach { file ->
-                                SharedFileRow(file = file, enabled = true, onClick = { onDownloadTvFile(file) })
-                            }
+                        uiState.tvTransferProgress?.let { prog ->
+                            TransferProgressCard(
+                                prog = prog,
+                                onPause = onPauseTvTransfer,
+                                onResume = onResumeTvTransfer,
+                                onCancel = onCancelTvTransfer
+                            )
                         }
 
                         TransferHistorySection(
@@ -1441,6 +1311,7 @@ fun InstalledAppsPickerDialog(
     onConfirm: (List<RemoteRepository.ShareableAppInfo>) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     var searchQuery by remember { mutableStateOf("") }
     val selectedMap = remember { mutableStateMapOf<String, Boolean>() }
     val filtered = remember(apps, searchQuery) {
@@ -1451,6 +1322,21 @@ fun InstalledAppsPickerDialog(
         }
     }
     val chosenApps = apps.filter { selectedMap[it.packageName] == true }
+
+    // Pre-warm app icon cache on background threads so scrolling feels instant
+    LaunchedEffect(apps) {
+        withContext(Dispatchers.IO) {
+            val pm = context.packageManager
+            apps.forEach { app ->
+                if (!AppIconMemoryCache.containsKey(app.packageName)) {
+                    runCatching {
+                        val bmp = pm.getApplicationIcon(app.packageName).toBitmap(72, 72).asImageBitmap()
+                        AppIconMemoryCache[app.packageName] = bmp
+                    }
+                }
+            }
+        }
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1492,12 +1378,19 @@ fun InstalledAppsPickerDialog(
                 ) {
                     items(filtered, key = { it.packageName }) { app ->
                         val checked = selectedMap[app.packageName] == true
-                        val pm = LocalContext.current.packageManager
-                        val iconBmp by produceState<ImageBitmap?>(null, app.packageName) {
-                            value = withContext(Dispatchers.IO) {
-                                runCatching {
-                                    pm.getApplicationIcon(app.packageName).toBitmap(96, 96).asImageBitmap()
-                                }.getOrNull()
+                        val pm = context.packageManager
+                        val iconBmp by produceState<ImageBitmap?>(
+                            initialValue = AppIconMemoryCache[app.packageName],
+                            key1 = app.packageName
+                        ) {
+                            if (value == null) {
+                                value = withContext(Dispatchers.IO) {
+                                    AppIconMemoryCache[app.packageName] ?: runCatching {
+                                        pm.getApplicationIcon(app.packageName).toBitmap(72, 72).asImageBitmap()
+                                    }.getOrNull()?.also { bmp ->
+                                        AppIconMemoryCache[app.packageName] = bmp
+                                    }
+                                }
                             }
                         }
                         Row(

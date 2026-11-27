@@ -1,5 +1,6 @@
 package com.gptremote.mitv.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,6 +22,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -34,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.gptremote.mitv.haptic.HapticStrength
 import com.gptremote.mitv.ui.theme.AppAccentTheme
+import com.gptremote.mitv.ui.theme.LocalAccentSoft
 import com.gptremote.mitv.ui.theme.MiOrange
 import com.gptremote.mitv.ui.theme.RemoteBorder
 import com.gptremote.mitv.ui.theme.RemoteSurface
@@ -169,8 +172,9 @@ fun SettingsSheet(
                 )
                 Text(
                     text = "Theme: ${accentTheme.label}",
-                    color = TextSecondary,
-                    fontSize = 12.sp
+                    color = LocalAccentSoft.current,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -178,27 +182,43 @@ fun SettingsSheet(
                 ) {
                     AppAccentTheme.entries.forEach { theme ->
                         val selected = theme == accentTheme
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(theme.primary)
-                                .border(
-                                    width = if (selected) 3.dp else 1.dp,
-                                    color = if (selected) Color.White else RemoteBorder,
-                                    shape = CircleShape
-                                )
-                                .clickable { onSelectAccentTheme(theme) },
-                            contentAlignment = Alignment.Center
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
-                            if (selected) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Check,
-                                    contentDescription = theme.label,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(22.dp)
-                                )
+                            Surface(
+                                onClick = { onSelectAccentTheme(theme) },
+                                shape = CircleShape,
+                                color = theme.primary,
+                                border = BorderStroke(
+                                    width = if (selected) 3.dp else 1.dp,
+                                    color = if (selected) Color.White else RemoteBorder
+                                ),
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    if (selected) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Check,
+                                            contentDescription = theme.label,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
+                                }
                             }
+                            Text(
+                                text = when (theme) {
+                                    AppAccentTheme.ORANGE -> "Orange"
+                                    AppAccentTheme.BLUE -> "Blue"
+                                    AppAccentTheme.EMERALD -> "Emerald"
+                                    AppAccentTheme.PURPLE -> "Purple"
+                                    AppAccentTheme.CRIMSON -> "Crimson"
+                                },
+                                color = if (selected) LocalAccentSoft.current else TextSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                            )
                         }
                     }
                 }

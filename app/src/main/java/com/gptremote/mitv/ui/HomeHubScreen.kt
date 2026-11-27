@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +23,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -54,8 +56,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -64,17 +66,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.layout.boundsInRoot
-import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import kotlinx.coroutines.delay
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -117,15 +120,91 @@ fun HomeHubScreen(
     var showSettings by remember { mutableStateOf(false) }
 
     var productOrder by remember { mutableStateOf(loadProductOrder(context)) }
-    val itemBounds = remember { mutableStateMapOf<ProductType, Rect>() }
-    var gridCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    val gridState = rememberLazyGridState()
+    val density = LocalDensity.current
+    var gridHeightPx by remember { mutableFloatStateOf(0f) }
     var draggedProduct by remember { mutableStateOf<ProductType?>(null) }
-    var pointerRoot by remember { mutableStateOf(Offset.Zero) }
+    var pointerLocal by remember { mutableStateOf(Offset.Zero) }
     var touchAnchorInItem by remember { mutableStateOf(Offset.Zero) }
+    var draggedItemHalfSize by remember { mutableStateOf(Offset.Zero) }
     var lastSwapMs by remember { mutableLongStateOf(0L) }
+    var lastSwappedTarget by remember { mutableStateOf<ProductType?>(null) }
     val sessions = uiState.activeSessions
     val accent = MiOrange
     val accentSoft = LocalAccentSoft.current
+
+    fun trySwapAtPointer(pointer: Offset) {
+        val active = draggedProduct ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastSwapMs < 130L) return
+
+        val dragCenter = pointer - touchAnchorInItem + draggedItemHalfSize
+        val hit = gridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+            val other = (info.key as? String)?.let { name ->
+                ProductType.entries.firstOrNull { it.name == name }
+            } ?: return@firstOrNull false
+            if (other == active) return@firstOrNull false
+            val w = info.size.width.toFloat()
+            val h = info.size.height.toFloat()
+            // Inner 62% zone avoids flicker when hovering on borders between cards
+            val marginX = w * 0.19f
+            val marginY = h * 0.19f
+            val left = info.offset.x.toFloat() + marginX
+            val top = info.offset.y.toFloat() + marginY
+            val right = info.offset.x.toFloat() + w - marginX
+            val bottom = info.offset.y.toFloat() + h - marginY
+            dragCenter.x in left..right && dragCenter.y in top..bottom
+        }
+        val target = (hit?.key as? String)?.let { name ->
+            ProductType.entries.firstOrNull { it.name == name }
+        }
+        if (target == null) {
+            lastSwappedTarget = null
+            return
+        }
+        if (target == lastSwappedTarget && now - lastSwapMs < 350L) return
+
+        val fromIdx = productOrder.indexOf(active)
+        val toIdx = productOrder.indexOf(target)
+        if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
+            val mutable = productOrder.toMutableList()
+            mutable.add(toIdx, mutable.removeAt(fromIdx))
+            productOrder = mutable
+            lastSwapMs = now
+            lastSwappedTarget = target
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        }
+    }
+
+    LaunchedEffect(draggedProduct) {
+        if (draggedProduct == null) return@LaunchedEffect
+        val edgeZonePx = with(density) { 88.dp.toPx() }
+        val maxStepPx = with(density) { 18.dp.toPx() }
+        while (draggedProduct != null) {
+            val h = gridHeightPx
+            val py = pointerLocal.y
+            if (h > edgeZonePx * 2f) {
+                val delta = when {
+                    py < edgeZonePx -> {
+                        val factor = ((edgeZonePx - py) / edgeZonePx).coerceIn(0.15f, 1f)
+                        -maxStepPx * factor
+                    }
+                    py > h - edgeZonePx -> {
+                        val factor = ((py - (h - edgeZonePx)) / edgeZonePx).coerceIn(0.15f, 1f)
+                        maxStepPx * factor
+                    }
+                    else -> 0f
+                }
+                if (delta != 0f) {
+                    val scrolled = gridState.scrollBy(delta)
+                    if (scrolled != 0f) {
+                        trySwapAtPointer(pointerLocal)
+                    }
+                }
+            }
+            delay(16L)
+        }
+    }
 
     val statusError = (uiState.status as? ConnectionStatus.Error)?.message
     val bannerMessage = uiState.lastStatusBanner ?: statusError
@@ -224,53 +303,59 @@ fun HomeHubScreen(
             }
 
             LazyVerticalGrid(
+                state = gridState,
                 columns = GridCells.Fixed(2),
                 modifier = Modifier
                     .fillMaxSize()
-                    .onGloballyPositioned { gridCoords = it }
+                    .onSizeChanged { gridHeightPx = it.height.toFloat() }
                     .pointerInput(Unit) {
                         detectDragGesturesAfterLongPress(
                             onDragStart = { localPos ->
-                                val rootPos = gridCoords?.localToRoot(localPos) ?: return@detectDragGesturesAfterLongPress
-                                val hit = itemBounds.entries.firstOrNull { (_, rect) -> rect.contains(rootPos) }
-                                if (hit != null) {
-                                    draggedProduct = hit.key
-                                    pointerRoot = rootPos
-                                    touchAnchorInItem = rootPos - hit.value.topLeft
+                                val hitInfo = gridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                    val product = (info.key as? String)?.let { name ->
+                                        ProductType.entries.firstOrNull { it.name == name }
+                                    } ?: return@firstOrNull false
+                                    val rect = Rect(
+                                        offset = Offset(info.offset.x.toFloat(), info.offset.y.toFloat()),
+                                        size = Size(info.size.width.toFloat(), info.size.height.toFloat())
+                                    )
+                                    rect.contains(localPos)
+                                }
+                                val product = (hitInfo?.key as? String)?.let { name ->
+                                    ProductType.entries.firstOrNull { it.name == name }
+                                }
+                                if (hitInfo != null && product != null) {
+                                    draggedProduct = product
+                                    pointerLocal = localPos
+                                    touchAnchorInItem = localPos - Offset(
+                                        hitInfo.offset.x.toFloat(),
+                                        hitInfo.offset.y.toFloat()
+                                    )
+                                    draggedItemHalfSize = Offset(
+                                        hitInfo.size.width / 2f,
+                                        hitInfo.size.height / 2f
+                                    )
+                                    lastSwappedTarget = null
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 }
                             },
                             onDrag = { change, dragAmount ->
-                                val active = draggedProduct ?: return@detectDragGesturesAfterLongPress
+                                if (draggedProduct == null) return@detectDragGesturesAfterLongPress
                                 change.consume()
-                                pointerRoot += dragAmount
-                                val now = System.currentTimeMillis()
-                                if (now - lastSwapMs >= 95L) {
-                                    val hit = itemBounds.entries.firstOrNull { (other, rect) ->
-                                        other != active && rect.contains(pointerRoot)
-                                    }?.key
-                                    if (hit != null) {
-                                        val fromIdx = productOrder.indexOf(active)
-                                        val toIdx = productOrder.indexOf(hit)
-                                        if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
-                                            val mutable = productOrder.toMutableList()
-                                            mutable.add(toIdx, mutable.removeAt(fromIdx))
-                                            productOrder = mutable
-                                            lastSwapMs = now
-                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                        }
-                                    }
-                                }
+                                pointerLocal += dragAmount
+                                trySwapAtPointer(pointerLocal)
                             },
                             onDragEnd = {
                                 if (draggedProduct != null) {
                                     draggedProduct = null
+                                    lastSwappedTarget = null
                                     saveProductOrder(context, productOrder)
                                 }
                             },
                             onDragCancel = {
                                 if (draggedProduct != null) {
                                     draggedProduct = null
+                                    lastSwappedTarget = null
                                     saveProductOrder(context, productOrder)
                                 }
                             }
@@ -282,7 +367,7 @@ fun HomeHubScreen(
             ) {
                 if (sessions.isNotEmpty()) {
                     val primarySession = sessions.first()
-                    item(span = { GridItemSpan(2) }) {
+                    item(key = "__ACTIVE_SESSION__", span = { GridItemSpan(2) }) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -400,33 +485,31 @@ fun HomeHubScreen(
 
                 items(productOrder, key = { it.name }) { product ->
                     val isDragged = draggedProduct == product
-                    val currentRect = itemBounds[product]
-                    val delta = if (isDragged && currentRect != null) {
-                        pointerRoot - currentRect.topLeft - touchAnchorInItem
-                    } else {
-                        Offset.Zero
-                    }
-                    // Outer container stays un-translated so itemBounds never feedback-loops during drag swaps
-                    Box(
+                    ProductCard(
+                        product = product,
+                        isDragged = isDragged,
                         modifier = Modifier
                             .zIndex(if (isDragged) 20f else 0f)
-                            .onGloballyPositioned { coords ->
-                                itemBounds[product] = coords.boundsInRoot()
-                            }
-                    ) {
-                        ProductCard(
-                            product = product,
-                            isDragged = isDragged,
-                            modifier = Modifier.graphicsLayer {
-                                translationX = delta.x
-                                translationY = delta.y
-                                scaleX = if (isDragged) 1.05f else 1f
-                                scaleY = if (isDragged) 1.05f else 1f
-                                alpha = if (isDragged) 0.94f else 1f
+                            .graphicsLayer {
+                                if (isDragged) {
+                                    val info = gridState.layoutInfo.visibleItemsInfo
+                                        .firstOrNull { it.key == product.name }
+                                    if (info != null) {
+                                        val delta = pointerLocal - Offset(
+                                            info.offset.x.toFloat(),
+                                            info.offset.y.toFloat()
+                                        ) - touchAnchorInItem
+                                        translationX = delta.x
+                                        translationY = delta.y
+                                    }
+                                    scaleX = 1.05f
+                                    scaleY = 1.05f
+                                    shadowElevation = 18f
+                                    alpha = 0.94f
+                                }
                             },
-                            onClick = { onSelectProduct(product) }
-                        )
-                    }
+                        onClick = { onSelectProduct(product) }
+                    )
                 }
             }
         }

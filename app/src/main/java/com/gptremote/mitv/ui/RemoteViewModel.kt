@@ -85,6 +85,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun disconnect() = repository.disconnect()
 
+    fun openActiveSession(session: ActiveSessionItem): BrandOption = repository.openActiveSession(session)
+
     fun disconnectSession(session: ActiveSessionItem) = repository.disconnectSession(session)
 
     fun startPcScreenMirror() = repository.startPcScreenMirror()

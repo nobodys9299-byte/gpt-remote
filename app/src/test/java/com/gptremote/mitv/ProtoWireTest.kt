@@ -233,19 +233,23 @@ class ProtoWireTest {
     }
 
     @Test
-    fun multiSessionRoutingPrioritizesPrimaryRemoteAndListsAllSessions() {
+    fun multiSessionRoutingListsIndependentPcBtPhoneAndBulbSessions() {
         val pcDevice = TvDevice.WifiPc("192.168.1.5:58765", "DESKTOP-JLDTF6M", "192.168.1.5")
+        val btTablet = TvDevice.BluetoothTv("AA:BB:CC:DD:EE:FF", "TB328XU", isBonded = true)
         val bulb = DiscoveredSmartBulb("192.168.1.60", "Wipro Bulb", BulbProtocol.TUYA_LAN, deviceId = "dev123")
         val state = RemoteUiState(
             status = ConnectionStatus.Connected(pcDevice),
-            peerPhoneName = "TB328XU",
+            connectedWifiPcDevice = pcDevice,
+            connectedBtDevice = btTablet,
+            peerPhoneName = "Phone B",
             connectedBulb = bulb
         )
         assertEquals(ProductType.PC_LAPTOP, state.connectedBrandOption?.productType)
         assertEquals("DESKTOP-JLDTF6M", state.connectedDeviceName)
-        assertEquals(3, state.activeSessions.size)
-        assertEquals(ActiveSessionKind.PRIMARY_REMOTE, state.activeSessions[0].kind)
-        assertEquals(ActiveSessionKind.PHONE_PEER, state.activeSessions[1].kind)
-        assertEquals(ActiveSessionKind.SMART_BULB, state.activeSessions[2].kind)
+        assertEquals(4, state.activeSessions.size)
+        assertEquals(ActiveSessionKind.WIFI_PC_REMOTE, state.activeSessions[0].kind)
+        assertEquals(ActiveSessionKind.BLUETOOTH_REMOTE, state.activeSessions[1].kind)
+        assertEquals(ActiveSessionKind.PHONE_PEER, state.activeSessions[2].kind)
+        assertEquals(ActiveSessionKind.SMART_BULB, state.activeSessions[3].kind)
     }
 }

@@ -31,7 +31,9 @@ data class TransferHistoryItem(
 )
 
 enum class ActiveSessionKind {
-    PRIMARY_REMOTE,
+    BLUETOOTH_REMOTE,
+    WIFI_TV_REMOTE,
+    WIFI_PC_REMOTE,
     TV_COMPANION,
     PHONE_PEER,
     SMART_BULB
@@ -104,16 +106,25 @@ data class RemoteUiState(
     val tvTransferProgress: TransferProgress? = null,
     val tvTransferHistory: List<TransferHistoryItem> = emptyList(),
     val isCastingToTv: Boolean = false,
-    val lastStatusBanner: String? = null
+    val lastStatusBanner: String? = null,
+    val connectedBtDevice: TvDevice? = null,
+    val connectedWifiTvDevice: TvDevice? = null,
+    val connectedWifiPcDevice: TvDevice.WifiPc? = null
 ) {
     val isConnected: Boolean
         get() = status is ConnectionStatus.Connected ||
+            connectedBtDevice != null ||
+            connectedWifiTvDevice != null ||
+            connectedWifiPcDevice != null ||
             connectedTvCompanion != null ||
             connectedBulb != null ||
             peerPhoneName != null
 
     val connectedDeviceName: String?
         get() = (status as? ConnectionStatus.Connected)?.device?.name
+            ?: connectedWifiPcDevice?.name
+            ?: connectedBtDevice?.name
+            ?: connectedWifiTvDevice?.name
             ?: connectedTvCompanion?.name
             ?: connectedBulb?.name
             ?: peerPhoneName
@@ -124,6 +135,9 @@ data class RemoteUiState(
     val connectedBrandOption: BrandOption?
         get() {
             val dev = (status as? ConnectionStatus.Connected)?.device
+                ?: connectedBtDevice
+                ?: connectedWifiTvDevice
+                ?: connectedWifiPcDevice
             if (dev != null) {
                 if (dev.category == DeviceCategory.LAPTOP_PC) {
                     return ProductCatalog.brandsFor(ProductType.PC_LAPTOP)
@@ -154,12 +168,24 @@ data class RemoteUiState(
 
     val activeSessions: List<ActiveSessionItem>
         get() = buildList {
-            val dev = (status as? ConnectionStatus.Connected)?.device
-            if (dev != null) {
-                val resolvedBrand = if (dev.category == DeviceCategory.LAPTOP_PC) {
-                    ProductCatalog.brandsFor(ProductType.PC_LAPTOP)
-                        .firstOrNull { it.id == connectedBrandId }
-                        ?: ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
+            connectedWifiPcDevice?.let { pc ->
+                val pcBrand = ProductCatalog.brandsFor(ProductType.PC_LAPTOP)
+                    .firstOrNull { it.id == connectedBrandId }
+                    ?: ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
+                add(
+                    ActiveSessionItem(
+                        id = "pc_${pc.id}",
+                        title = pc.name,
+                        subtitle = "PC Wi-Fi",
+                        kind = ActiveSessionKind.WIFI_PC_REMOTE,
+                        targetProduct = ProductType.PC_LAPTOP,
+                        targetBrandId = pcBrand.id
+                    )
+                )
+            }
+            connectedBtDevice?.let { btDev ->
+                val resolvedBrand = if (btDev.category == DeviceCategory.LAPTOP_PC) {
+                    ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
                 } else {
                     connectedBrandId?.let { id ->
                         ProductType.entries.firstNotNullOfOrNull { pt ->
@@ -171,18 +197,36 @@ data class RemoteUiState(
                 val prod = resolvedBrand.productType
                 add(
                     ActiveSessionItem(
-                        id = "primary_${dev.id}",
-                        title = dev.name,
-                        subtitle = if (dev.category == DeviceCategory.LAPTOP_PC) "PC Remote" else prod.title,
-                        kind = ActiveSessionKind.PRIMARY_REMOTE,
+                        id = "bt_${btDev.id}",
+                        title = btDev.name,
+                        subtitle = if (btDev.category == DeviceCategory.LAPTOP_PC) "PC Bluetooth" else "${prod.title} BT",
+                        kind = ActiveSessionKind.BLUETOOTH_REMOTE,
                         targetProduct = prod,
                         targetBrandId = resolvedBrand.id
                     )
                 )
             }
+            connectedWifiTvDevice?.let { tvDev ->
+                val tvBrand = connectedBrandId?.let { id ->
+                    ProductType.entries.firstNotNullOfOrNull { pt ->
+                        if (pt == ProductType.PHONE_TO_PHONE || pt == ProductType.SMART_BULB || pt == ProductType.PC_LAPTOP) null
+                        else ProductCatalog.brandsFor(pt).firstOrNull { it.id == id }
+                    }
+                } ?: ProductCatalog.brandsFor(ProductType.SMART_TV).first()
+                add(
+                    ActiveSessionItem(
+                        id = "wifitv_${tvDev.id}",
+                        title = tvDev.name,
+                        subtitle = "${tvBrand.productType.title} Wi-Fi",
+                        kind = ActiveSessionKind.WIFI_TV_REMOTE,
+                        targetProduct = tvBrand.productType,
+                        targetBrandId = tvBrand.id
+                    )
+                )
+            }
             connectedTvCompanion?.let { tv ->
-                val sameTvAsPrimary = dev != null && dev.category == DeviceCategory.ANDROID_TV &&
-                    dev.name.equals(tv.name, ignoreCase = true)
+                val sameTvAsPrimary = connectedWifiTvDevice != null &&
+                    connectedWifiTvDevice.name.equals(tv.name, ignoreCase = true)
                 if (!sameTvAsPrimary) {
                     val tvBrand = ProductCatalog.brandsFor(ProductType.SMART_TV)
                         .firstOrNull { it.id == connectedBrandId }
@@ -228,8 +272,17 @@ data class RemoteUiState(
     fun isConnectedForBrand(brand: BrandOption): Boolean {
         if (brand.productType == ProductType.SMART_BULB) return connectedBulb != null
         if (brand.productType == ProductType.PHONE_TO_PHONE) return peerPhoneName != null
+        if (brand.productType == ProductType.PC_LAPTOP) {
+            return connectedWifiPcDevice != null || connectedBtDevice?.category == DeviceCategory.LAPTOP_PC
+        }
         if (brand.productType == ProductType.SMART_TV && connectedTvCompanion != null) {
             return connectedBrandId == null || connectedBrandId == brand.id
+        }
+        if (connectedWifiTvDevice != null || connectedBtDevice != null) {
+            val activeDev = connectedWifiTvDevice ?: connectedBtDevice
+            if (activeDev?.category == DeviceCategory.ANDROID_TV) {
+                return connectedBrandId == null || connectedBrandId == brand.id
+            }
         }
         val dev = (status as? ConnectionStatus.Connected)?.device ?: return false
         return when (brand.productType) {

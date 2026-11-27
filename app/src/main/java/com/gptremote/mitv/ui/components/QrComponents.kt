@@ -227,16 +227,34 @@ fun QrScannerDialog(
 
                             val text = tryDecode(centerSrc)
                                 ?: tryDecode(fullSrc)
-                                ?: tryDecode(centerSrc.rotateCounterClockwise())
+                                ?: runCatching {
+                                    // Manual 90-degree Y-plane rotation avoids ZXing's UnsupportedOperationException
+                                    val rotW = cropH
+                                    val rotH = cropW
+                                    val rotated = ByteArray(rotW * rotH)
+                                    for (row in 0 until cropH) {
+                                        val srcRow = (cropTop + row) * w + cropLeft
+                                        val dstCol = cropH - 1 - row
+                                        for (col in 0 until cropW) {
+                                            rotated[col * rotW + dstCol] = packed[srcRow + col]
+                                        }
+                                    }
+                                    val rotSrc = PlanarYUVLuminanceSource(
+                                        rotated, rotW, rotH, 0, 0, rotW, rotH, false
+                                    )
+                                    tryDecode(rotSrc)
+                                }.getOrNull()
 
                             if (!text.isNullOrBlank() && scannedOnce.compareAndSet(false, true)) {
                                 ContextCompat.getMainExecutor(context).execute {
                                     onScanned(text)
                                 }
                             }
+                        } catch (_: Throwable) {
+                            // Never crash the analyzer thread on malformed/transient YUV frames
                         } finally {
-                            reader.reset()
-                            image.close()
+                            runCatching { reader.reset() }
+                            runCatching { image.close() }
                         }
                     }
 

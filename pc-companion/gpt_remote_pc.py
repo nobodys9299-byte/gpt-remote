@@ -333,8 +333,8 @@ class PynputBackend(InputBackend):
 # ---- Screen Capture Helper ----
 
 def capture_pc_jpeg(
-    max_width: int = 1280,
-    quality: int = 52,
+    max_width: int = 1920,
+    quality: int = 76,
     sct_ctx=None,
 ) -> bytes | None:
     """Captures the primary PC screen as JPEG bytes. Reuses mss context for ~30fps speed."""
@@ -419,6 +419,7 @@ class RemoteServerState:
         self.transfer_info: dict | None = None
         self.transfer_history: list[dict] = []
         self.transfer_cancel_event = threading.Event()
+        self.cancelled_sessions: set[str] = set()
         self.active_transfer_session: str | None = None
         self.upload_parts: dict[str, tuple[str, str]] = {}
         self.on_change = None
@@ -427,11 +428,14 @@ class RemoteServerState:
         self.on_transfer = None
 
     def request_cancel_transfer(self, session_id: str = "") -> None:
-        self.transfer_cancel_event.set()
         target_sid = session_id or self.active_transfer_session or ""
         info_name = "transfer"
         info_done = 0
         with self._lock:
+            if target_sid:
+                self.cancelled_sessions.add(target_sid)
+            else:
+                self.transfer_cancel_event.set()
             if self.transfer_info:
                 info_name = self.transfer_info.get("filename", "transfer")
                 info_done = int(self.transfer_info.get("done", 0))
@@ -609,7 +613,10 @@ def handle_client(
                 line, buf = buf.split("\n", 1)
                 if not line.strip():
                     continue
-                msg = json.loads(line)
+                try:
+                    msg = json.loads(line)
+                except Exception:
+                    continue
                 t = msg.get("t")
                 if t == "move":
                     backend.move(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
@@ -676,7 +683,7 @@ def handle_screen_viewer(
 ) -> None:
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     try:
-        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 512 * 1024)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
     except OSError:
         pass
     sct_ctx = None
@@ -691,12 +698,12 @@ def handle_screen_viewer(
                 time.sleep(0.2)
                 continue
             t0 = time.monotonic()
-            jpeg = capture_pc_jpeg(max_width=1280, quality=52, sct_ctx=sct_ctx)
+            jpeg = capture_pc_jpeg(max_width=1920, quality=76, sct_ctx=sct_ctx)
             if jpeg:
                 header = struct.pack(">I", len(jpeg))
                 conn.sendall(header + jpeg)
             elapsed = time.monotonic() - t0
-            sleep_for = max(0.002, (1.0 / 28.0) - elapsed)
+            sleep_for = max(0.002, (1.0 / 26.0) - elapsed)
             time.sleep(sleep_for)
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
         pass
@@ -758,7 +765,7 @@ def unique_target_path(folder: str, filename: str) -> str:
     return candidate
 
 
-TRANSFER_CHUNK_SIZE = 512 * 1024
+TRANSFER_CHUNK_SIZE = 1024 * 1024
 
 
 class ThreadingHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -770,17 +777,18 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event) -> None:
     class Handler(http.server.BaseHTTPRequestHandler):
         rbufsize = TRANSFER_CHUNK_SIZE
-        wbufsize = TRANSFER_CHUNK_SIZE
+        wbufsize = 0
         protocol_version = "HTTP/1.1"
 
         def setup(self):
+            # Initialize self.connection / rfile / wfile BEFORE touching socket options
+            super().setup()
             try:
                 self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
                 self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
             except OSError:
                 pass
-            super().setup()
 
         def log_message(self, format, *args):
             return
@@ -900,20 +908,21 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
 
         def do_POST(self):
             parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
             length = int(self.headers.get("Content-Length", "0"))
             if parsed.path == "/transfer-cancel":
-                body_bytes = self.rfile.read(length) if 0 < length < 65536 else b""
-                sid = ""
-                try:
-                    sid = str(json.loads(body_bytes.decode("utf-8")).get("session", ""))
-                except Exception:
-                    pass
+                sid = params.get("session", [""])[0].strip()
+                if not sid and 0 < length < 65536:
+                    body_bytes = self.rfile.read(length)
+                    try:
+                        sid = str(json.loads(body_bytes.decode("utf-8")).get("session", "")).strip()
+                    except Exception:
+                        pass
                 state.request_cancel_transfer(sid)
-                self._send_json(200, {"ok": True})
+                self._send_json(200, {"ok": True, "cancelled": True})
                 return
 
             if parsed.path == "/upload":
-                params = urllib.parse.parse_qs(parsed.query)
                 sid = params.get("session", [""])[0].strip()
                 offset = max(0, int(params.get("offset", ["0"])[0] or "0"))
                 total_param = max(0, int(params.get("total", [str(length)])[0] or str(length)))
@@ -923,14 +932,15 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 safe_name = sanitize_filename(raw_name)
                 os.makedirs(state.shared_dir, exist_ok=True)
                 if sid:
+                    state.cancelled_sessions.discard(sid)
                     part_entry = state.upload_parts.get(sid)
                     part_path = part_entry[0] if part_entry else os.path.join(state.shared_dir, f".upload_{sanitize_filename(sid)}.gptpart")
                     state.upload_parts[sid] = (part_path, safe_name)
                     state.active_transfer_session = sid
                 else:
+                    state.transfer_cancel_event.clear()
                     part_path = unique_target_path(state.shared_dir, safe_name)
 
-                state.transfer_cancel_event.clear()
                 remaining = length
                 received = 0
                 last_notify = 0
@@ -945,7 +955,8 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                         if offset > 0 and mode == "r+b":
                             out.seek(offset)
                         while remaining > 0:
-                            if state.transfer_cancel_event.is_set():
+                            is_cancelled = (sid in state.cancelled_sessions) if sid else state.transfer_cancel_event.is_set()
+                            if is_cancelled:
                                 cancelled = True
                                 break
                             chunk = self.rfile.read(min(TRANSFER_CHUNK_SIZE, remaining))
@@ -960,7 +971,9 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                                 spd = received / max(0.001, time.monotonic() - start_ts)
                                 state.update_transfer("Receiving from Phone", safe_name, overall_done, total_expected, True, spd)
                     overall_done = offset + received
-                    if cancelled:
+                    if cancelled or (sid and sid in state.cancelled_sessions):
+                        if sid:
+                            state.cancelled_sessions.discard(sid)
                         try:
                             if sid:
                                 state.upload_parts.pop(sid, None)
@@ -970,7 +983,7 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                             pass
                         state.update_transfer("Cancelled", safe_name, overall_done, total_expected, False, 0.0)
                         state.record_history("cancelled", safe_name, overall_done, "", 0.0)
-                        self._send_json(499, {"ok": False, "cancelled": True})
+                        self._send_json(200, {"ok": False, "cancelled": True})
                         return
 
                     final_spd = received / max(0.001, time.monotonic() - start_ts)
@@ -994,7 +1007,10 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                         self._send_json(200, {"ok": True, "paused": True, "received": overall_done})
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
                     overall_done = offset + received
-                    if state.transfer_cancel_event.is_set() and os.path.exists(part_path):
+                    was_cancelled = (sid in state.cancelled_sessions) if sid else state.transfer_cancel_event.is_set()
+                    if was_cancelled and os.path.exists(part_path):
+                        if sid:
+                            state.cancelled_sessions.discard(sid)
                         try:
                             os.remove(part_path)
                         except OSError:
@@ -1012,8 +1028,10 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 state.update_phone_frame(data)
                 self.send_response(200)
                 self.send_header("Content-Length", "2")
+                self.send_header("Connection", "close")
                 self.end_headers()
                 self.wfile.write(b"OK")
+                self.wfile.flush()
             else:
                 self.send_error(404)
 
@@ -1448,7 +1466,7 @@ def run_windows_desktop_app(
 
     tk.Checkbutton(
         scr_card,
-        text="Allow phone app to view & touch PC screen",
+        text="Share PC Screen with Phone",
         variable=allow_screen_var,
         command=on_toggle_screen,
         bg=CARD,
@@ -1795,42 +1813,14 @@ def run_windows_desktop_app(
         activeforeground="#FFFFFF",
         relief="flat",
         font=("Segoe UI", 9, "bold"),
-        padx=10,
-        pady=5,
-        cursor="hand2",
-    ).pack(side="left", padx=(0, 6))
-    tk.Button(
-        btn_row,
-        text="Open File",
-        command=open_selected_file,
-        bg=ELEV,
-        fg=BLUE,
-        activebackground=BORDER,
-        activeforeground=BLUE,
-        relief="flat",
-        font=("Segoe UI", 9, "bold"),
-        padx=10,
-        pady=5,
-        cursor="hand2",
-    ).pack(side="left", padx=(0, 6))
-    tk.Button(
-        btn_row,
-        text="Open Folder",
-        command=open_shared_folder,
-        bg=ELEV,
-        fg=TXT,
-        activebackground=BORDER,
-        activeforeground=TXT,
-        relief="flat",
-        font=("Segoe UI", 9),
-        padx=10,
+        padx=12,
         pady=5,
         cursor="hand2",
     ).pack(side="left")
 
     tk.Label(
         file_card,
-        text=f"Path: {state.shared_dir}   •   Double-click any file to open",
+        text="Downloads/GptRemote   •   Double-click any file to open",
         bg=CARD,
         fg=SUB,
         font=("Segoe UI", 8),
