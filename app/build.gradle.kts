@@ -13,7 +13,7 @@ android {
         minSdk = 28
         targetSdk = 34
         val ciRun = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
-        versionCode = ciRun + 10
+        versionCode = (System.currentTimeMillis() / 1000L - 1_700_000_000L).toInt()
         versionName = "2.0.$ciRun"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

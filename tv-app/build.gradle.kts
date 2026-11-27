@@ -12,11 +12,24 @@ android {
         applicationId = "com.gptremote.tv"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        val ciRun = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionCode = (System.currentTimeMillis() / 1000L - 1_700_000_000L).toInt()
+        versionName = "2.0.$ciRun"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("../app/debug-signing.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(

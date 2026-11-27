@@ -74,7 +74,7 @@ jobs:
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { $iscc = (Get-Command iscc.exe).Source }
-          & $iscc "pc-companion\GptRemotePC.iss"
+          & $iscc "/DAppVersion=2.0.${{ github.run_number }}" "pc-companion\GptRemotePC.iss"
 
       - name: Upload Windows Installer & Portable EXE artifacts
         uses: actions/upload-artifact@v4
