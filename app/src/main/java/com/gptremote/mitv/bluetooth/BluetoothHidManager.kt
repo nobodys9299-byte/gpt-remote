@@ -602,7 +602,7 @@ class BluetoothHidManager(private val context: Context) {
                         HidDescriptor.REPORT_ID_KEYBOARD,
                         HidDescriptor.keyboardReport(action.keyCode, action.modifier)
                     )
-                    delay(35)
+                    delay(18)
                     hid.sendReport(
                         host,
                         HidDescriptor.REPORT_ID_KEYBOARD,
@@ -616,7 +616,7 @@ class BluetoothHidManager(private val context: Context) {
                         HidDescriptor.REPORT_ID_CONSUMER,
                         HidDescriptor.consumerReport(action.usage)
                     )
-                    delay(35)
+                    delay(18)
                     hid.sendReport(
                         host,
                         HidDescriptor.REPORT_ID_CONSUMER,
@@ -640,13 +640,13 @@ class BluetoothHidManager(private val context: Context) {
                     HidDescriptor.REPORT_ID_KEYBOARD,
                     HidDescriptor.keyboardReport(keyCode, modifier)
                 )
-                delay(20)
+                delay(12)
                 hid.sendReport(
                     host,
                     HidDescriptor.REPORT_ID_KEYBOARD,
                     HidDescriptor.KEYBOARD_RELEASE
                 )
-                delay(16)
+                delay(10)
             }
         }
     }
@@ -659,20 +659,20 @@ class BluetoothHidManager(private val context: Context) {
             val hid = hidDevice ?: return@trySend
             // Open TV Search overlay via Consumer AC Search (0x0221)
             hid.sendReport(host, HidDescriptor.REPORT_ID_CONSUMER, HidDescriptor.consumerReport(0x0221))
-            delay(40)
+            delay(22)
             hid.sendReport(host, HidDescriptor.REPORT_ID_CONSUMER, HidDescriptor.CONSUMER_RELEASE)
-            delay(500)
+            delay(280)
 
             for (ch in appName) {
                 val (keyCode, modifier) = HidDescriptor.charToHidKey(ch) ?: continue
                 hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.keyboardReport(keyCode, modifier))
-                delay(20)
+                delay(12)
                 hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.KEYBOARD_RELEASE)
-                delay(16)
+                delay(10)
             }
-            delay(200)
+            delay(140)
             hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.keyboardReport(0x28)) // Enter
-            delay(40)
+            delay(22)
             hid.sendReport(host, HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.KEYBOARD_RELEASE)
         }
     }

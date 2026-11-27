@@ -3,7 +3,13 @@ package com.gptremote.mitv.ui.components
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.ThumbnailUtils
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import android.util.Size
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,15 +40,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Android
+import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.CastConnected
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.DesktopWindows
+import androidx.compose.material.icons.rounded.FolderZip
 import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PictureAsPdf
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.QrCodeScanner
@@ -76,6 +87,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -84,6 +96,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -91,8 +104,12 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.graphics.drawable.toBitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.gptremote.mitv.data.RemoteRepository
@@ -119,6 +136,11 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+enum class TvSheetMode {
+    FILE_SHARE,
+    SCREEN_CAST
+}
+
 @Composable
 fun PcScreenSharePanel(
     uiState: RemoteUiState,
@@ -126,80 +148,16 @@ fun PcScreenSharePanel(
     onStopPcMirror: () -> Unit,
     onTapMirroredScreen: (nx: Float, ny: Float) -> Unit,
     onMoveMirroredScreen: (nx: Float, ny: Float) -> Unit,
+    onOpenFullscreenMirror: () -> Unit = {},
     onStartPhoneCast: () -> Unit,
     onStopPhoneCast: () -> Unit,
     onOpenConnect: () -> Unit
 ) {
     val isWifiPc = (uiState.status as? ConnectionStatus.Connected)?.device?.transport == TransportMode.WIFI_PC
-    var isFullscreenLandscape by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         onDispose {
             onStopPcMirror()
-        }
-    }
-
-    val context = LocalContext.current
-    if (isFullscreenLandscape && uiState.pcScreenBitmap != null) {
-        DisposableEffect(Unit) {
-            val activity = context.findActivity()
-            val prevOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            onDispose {
-                activity?.requestedOrientation = prevOrientation
-            }
-        }
-
-        val bmp = uiState.pcScreenBitmap
-        Dialog(
-            onDismissRequest = { isFullscreenLandscape = false },
-            properties = DialogProperties(
-                usePlatformDefaultWidth = false,
-                dismissOnBackPress = true,
-                dismissOnClickOutside = false
-            )
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black),
-                contentAlignment = Alignment.Center
-            ) {
-                val aspect = (bmp.width.toFloat() / bmp.height.coerceAtLeast(1)).coerceIn(0.6f, 2.5f)
-                InteractiveMirrorSurface(
-                    bitmap = bmp,
-                    aspect = aspect,
-                    onTap = onTapMirroredScreen,
-                    onMove = onMoveMirroredScreen,
-                    modifier = Modifier.fillMaxSize()
-                )
-
-                FilledTonalIconButton(
-                    onClick = { isFullscreenLandscape = false },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(14.dp),
-                    shape = CircleShape,
-                    colors = IconButtonDefaults.filledTonalIconButtonColors(
-                        containerColor = Color.Black.copy(alpha = 0.7f),
-                        contentColor = Color.White
-                    )
-                ) {
-                    Icon(Icons.Rounded.Close, contentDescription = "Exit Fullscreen")
-                }
-
-                Text(
-                    text = "Tap = Click • Drag = Move Cursor",
-                    color = Color.White.copy(alpha = 0.75f),
-                    fontSize = 11.sp,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 10.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                )
-            }
         }
     }
 
@@ -276,7 +234,7 @@ fun PcScreenSharePanel(
                 }
 
                 FilledTonalButton(
-                    onClick = { isFullscreenLandscape = true },
+                    onClick = onOpenFullscreenMirror,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp)
                 ) {
@@ -360,7 +318,7 @@ fun PcScreenSharePanel(
 }
 
 @Composable
-private fun InteractiveMirrorSurface(
+fun InteractiveMirrorSurface(
     bitmap: android.graphics.Bitmap,
     aspect: Float,
     onTap: (nx: Float, ny: Float) -> Unit,
@@ -442,9 +400,13 @@ fun PcFileSharePanel(
     onShareAppsToPc: () -> Unit,
     onDownloadFile: (SharedPcFile) -> Unit,
     onOpenHistoryFile: (TransferHistoryItem) -> Unit,
+    onPauseTransfer: () -> Unit = {},
+    onResumeTransfer: () -> Unit = {},
+    onCancelTransfer: () -> Unit = {},
     onOpenConnect: () -> Unit
 ) {
     val isWifiPc = (uiState.status as? ConnectionStatus.Connected)?.device?.transport == TransportMode.WIFI_PC
+    var showAllShared by remember { mutableStateOf(false) }
 
     LaunchedEffect(isWifiPc) {
         if (isWifiPc) {
@@ -461,7 +423,12 @@ fun PcFileSharePanel(
         }
 
         uiState.transferProgress?.let { prog ->
-            TransferProgressCard(prog)
+            TransferProgressCard(
+                prog = prog,
+                onPause = onPauseTransfer,
+                onResume = onResumeTransfer,
+                onCancel = onCancelTransfer
+            )
         }
 
         Row(
@@ -510,7 +477,7 @@ fun PcFileSharePanel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column {
-                Text("PC Shared Files", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("PC Shared Files (${uiState.sharedPcFiles.size})", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 Text("Tap a file to download from PC", color = TextSecondary, fontSize = 11.sp)
             }
             IconButton(onClick = onRefreshFiles, enabled = isWifiPc) {
@@ -538,13 +505,26 @@ fun PcFileSharePanel(
                 )
             }
         } else {
+            val visibleFiles = if (showAllShared) uiState.sharedPcFiles else uiState.sharedPcFiles.take(5)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                uiState.sharedPcFiles.forEach { file ->
+                visibleFiles.forEach { file ->
                     SharedFileRow(
                         file = file,
                         enabled = !uiState.isTransferringFile,
                         onClick = { onDownloadFile(file) }
                     )
+                }
+                if (uiState.sharedPcFiles.size > 5) {
+                    TextButton(
+                        onClick = { showAllShared = !showAllShared },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text(
+                            text = if (showAllShared) "Show Less" else "View All (${uiState.sharedPcFiles.size})",
+                            color = WifiBlue,
+                            fontSize = 12.sp
+                        )
+                    }
                 }
             }
         }
@@ -567,11 +547,15 @@ fun PhoneSharePanel(
     onAddHostFiles: () -> Unit,
     onShareHostApps: () -> Unit,
     onScanPeerQr: () -> Unit,
+    onDisconnectPeer: () -> Unit = {},
     onRefreshPeerFiles: () -> Unit,
     onSendFilesToPeer: () -> Unit,
     onSendAppsToPeer: () -> Unit,
     onDownloadFromPeer: (SharedPcFile) -> Unit,
-    onOpenHistoryFile: (TransferHistoryItem) -> Unit
+    onOpenHistoryFile: (TransferHistoryItem) -> Unit,
+    onPauseTransfer: () -> Unit = {},
+    onResumeTransfer: () -> Unit = {},
+    onCancelTransfer: () -> Unit = {}
 ) {
     LaunchedEffect(Unit) {
         onStartHost()
@@ -584,7 +568,12 @@ fun PhoneSharePanel(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         uiState.phoneTransferProgress?.let { prog ->
-            TransferProgressCard(prog)
+            TransferProgressCard(
+                prog = prog,
+                onPause = onPauseTransfer,
+                onResume = onResumeTransfer,
+                onCancel = onCancelTransfer
+            )
         }
 
         // Hotspot Helper Card (Auto Local Hotspot / System Hotspot)
@@ -805,18 +794,36 @@ fun PhoneSharePanel(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Scan the other phone's QR to exchange files",
+                        text = if (uiState.peerPhoneName != null) {
+                            "Two-way phone share ready"
+                        } else {
+                            "Scan the other phone's QR to pair both ways"
+                        },
                         color = TextSecondary,
                         fontSize = 11.sp
                     )
                 }
-                FilledTonalButton(
-                    onClick = onScanPeerQr,
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Scan QR", fontSize = 12.sp)
+                if (uiState.peerPhoneName != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = onScanPeerQr, shape = RoundedCornerShape(12.dp)) {
+                            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Switch", fontSize = 11.sp)
+                        }
+                        TextButton(onClick = onDisconnectPeer) {
+                            Text("Off", color = Color(0xFFF87171), fontSize = 12.sp)
+                        }
+                    }
+                } else {
+                    Button(
+                        onClick = onScanPeerQr,
+                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Scan QR", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
 
@@ -878,6 +885,7 @@ fun PhoneSharePanel(
 @Composable
 fun TvCompanionSheetDialog(
     uiState: RemoteUiState,
+    sheetMode: TvSheetMode = TvSheetMode.FILE_SHARE,
     preferNonAndroidTab: Boolean = false,
     onScanTvCompanion: () -> Unit,
     onScanTvQr: () -> Unit,
@@ -888,6 +896,9 @@ fun TvCompanionSheetDialog(
     onSendFilesToTv: () -> Unit,
     onSendAppsToTv: () -> Unit,
     onDownloadTvFile: (SharedPcFile) -> Unit,
+    onPauseTvTransfer: () -> Unit = {},
+    onResumeTvTransfer: () -> Unit = {},
+    onCancelTvTransfer: () -> Unit = {},
     onStartPhoneCastToTv: () -> Unit,
     onStopPhoneCast: () -> Unit,
     onOpenSystemCastSettings: () -> Unit,
@@ -901,7 +912,7 @@ fun TvCompanionSheetDialog(
     onOpenHistoryFile: (TransferHistoryItem) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var modeTab by remember(preferNonAndroidTab) {
+    var modeTab by remember(preferNonAndroidTab, sheetMode) {
         mutableIntStateOf(if (preferNonAndroidTab && uiState.connectedTvCompanion == null) 1 else 0)
     }
     var showManual by remember { mutableStateOf(false) }
@@ -909,10 +920,10 @@ fun TvCompanionSheetDialog(
     var manualCode by remember { mutableStateOf("") }
     var showBrowserQr by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(sheetMode) {
         onScanTvCompanion()
-        onStartTvBrowserHost()
-        if (preferNonAndroidTab) onScanDlna()
+        if (sheetMode == TvSheetMode.FILE_SHARE) onStartTvBrowserHost()
+        if (preferNonAndroidTab || sheetMode == TvSheetMode.SCREEN_CAST) onScanDlna()
     }
 
     Dialog(
@@ -943,11 +954,20 @@ fun TvCompanionSheetDialog(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.Rounded.Tv, contentDescription = null, tint = MiOrange)
+                        Icon(
+                            imageVector = if (sheetMode == TvSheetMode.SCREEN_CAST) Icons.Rounded.Cast else Icons.Rounded.Tv,
+                            contentDescription = null,
+                            tint = MiOrange
+                        )
                         Column {
-                            Text("Smart TV File Share & Cast", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                             Text(
-                                text = if (modeTab == 0) "Android TV / Google TV App Mode" else "Samsung / LG / Any TV (No TV App Needed)",
+                                text = if (sheetMode == TvSheetMode.SCREEN_CAST) "Screen Cast to TV" else "Share Files to TV",
+                                color = TextPrimary,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (modeTab == 0) "Android TV / Google TV App" else "Samsung / LG / Any TV (No TV App Needed)",
                                 color = TextSecondary,
                                 fontSize = 11.sp
                             )
@@ -958,7 +978,7 @@ fun TvCompanionSheetDialog(
                     }
                 }
 
-                // Switcher between Android TV App & Non-Android TV (Browser + DLNA)
+                // Switcher between Android TV App & Non-Android TV
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -973,16 +993,21 @@ fun TvCompanionSheetDialog(
                         selected = modeTab == 1,
                         onClick = {
                             modeTab = 1
-                            onStartTvBrowserHost()
+                            if (sheetMode == TvSheetMode.FILE_SHARE) onStartTvBrowserHost()
                             onScanDlna()
                         },
                         modifier = Modifier.weight(1.25f),
-                        label = { Text("Samsung/LG (DLNA & Web)", fontSize = 11.sp, maxLines = 1) }
+                        label = {
+                            Text(
+                                text = if (sheetMode == TvSheetMode.SCREEN_CAST) "Samsung / LG Cast" else "Samsung/LG Web & DLNA",
+                                fontSize = 11.sp,
+                                maxLines = 1
+                            )
+                        }
                     )
                 }
 
                 if (modeTab == 0) {
-                    // Connected TV Companion status or scanner
                     val activeTv = uiState.connectedTvCompanion
                     if (activeTv != null) {
                         Row(
@@ -997,7 +1022,11 @@ fun TvCompanionSheetDialog(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("TV Connected: ${activeTv.name}", color = ConnectedGreen, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text("${activeTv.host} • Ready for Files, APKs & Live Cast", color = TextSecondary, fontSize = 11.sp)
+                                Text(
+                                    text = if (sheetMode == TvSheetMode.SCREEN_CAST) "${activeTv.host} • Ready for Live Cast" else "${activeTv.host} • Ready for Files & APKs",
+                                    color = TextSecondary,
+                                    fontSize = 11.sp
+                                )
                             }
                             TextButton(onClick = onDisconnectTv) {
                                 Text("Off", color = Color(0xFFF87171))
@@ -1085,110 +1114,136 @@ fun TvCompanionSheetDialog(
                         }
                     }
 
-                    // Live Cast section
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(RemoteSurfaceElevated)
-                            .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text("Screen Cast to TV", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    if (sheetMode == TvSheetMode.SCREEN_CAST) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(RemoteSurfaceElevated)
+                                .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("Mirror Phone Display to TV", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                            Text(
+                                text = "Cast directly to GPT Remote TV app or open system Wireless Display / Smart View.",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (uiState.isCastingToTv) {
+                                    OutlinedButton(
+                                        onClick = onStopPhoneCast,
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) { Text("Stop TV Cast", color = Color(0xFFF87171), fontSize = 12.sp) }
+                                } else {
+                                    Button(
+                                        onClick = onStartPhoneCastToTv,
+                                        enabled = activeTv != null,
+                                        modifier = Modifier.weight(1f),
+                                        colors = ButtonDefaults.buttonColors(containerColor = WifiBlue),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.Cast, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF062033))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Cast via App", color = Color(0xFF062033), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                                OutlinedButton(
+                                    onClick = onOpenSystemCastSettings,
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) { Text("Wireless Cast", fontSize = 12.sp, maxLines = 1) }
+                            }
+                        }
+                    } else {
+                        uiState.tvTransferProgress?.let { prog ->
+                            TransferProgressCard(
+                                prog = prog,
+                                onPause = onPauseTvTransfer,
+                                onResume = onResumeTvTransfer,
+                                onCancel = onCancelTvTransfer
+                            )
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (uiState.isCastingToTv) {
-                                OutlinedButton(
-                                    onClick = onStopPhoneCast,
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(12.dp)
-                                ) { Text("Stop TV Cast", color = Color(0xFFF87171), fontSize = 12.sp) }
-                            } else {
-                                Button(
-                                    onClick = onStartPhoneCastToTv,
-                                    enabled = activeTv != null,
-                                    modifier = Modifier.weight(1f),
-                                    colors = ButtonDefaults.buttonColors(containerColor = WifiBlue),
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Icon(Icons.Rounded.Cast, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF062033))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Cast via App", color = Color(0xFF062033), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                }
+                            Button(
+                                onClick = onSendFilesToTv,
+                                enabled = activeTv != null,
+                                modifier = Modifier.weight(1.2f),
+                                colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                                shape = RoundedCornerShape(14.dp)
+                            ) {
+                                Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Send Files", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                             }
-                            OutlinedButton(
-                                onClick = onOpenSystemCastSettings,
+                            FilledTonalButton(
+                                onClick = onSendAppsToTv,
+                                enabled = activeTv != null,
                                 modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(12.dp)
-                            ) { Text("Wireless Cast", fontSize = 12.sp, maxLines = 1) }
+                                shape = RoundedCornerShape(14.dp)
+                            ) {
+                                Icon(Icons.Rounded.Android, contentDescription = null, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Apps (.apk)", fontSize = 12.sp)
+                            }
+                            OutlinedButton(onClick = onRefreshTvFiles, enabled = activeTv != null, shape = RoundedCornerShape(14.dp)) {
+                                Icon(Icons.Rounded.Refresh, contentDescription = "Refresh TV Files", modifier = Modifier.size(18.dp))
+                            }
                         }
-                    }
 
-                    // TV File Transfer Progress
-                    uiState.tvTransferProgress?.let { prog ->
-                        TransferProgressCard(prog)
-                    }
+                        if (uiState.tvCompanionFiles.isNotEmpty()) {
+                            Text("Files stored on TV (${uiState.tvCompanionFiles.size})", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            uiState.tvCompanionFiles.take(10).forEach { file ->
+                                SharedFileRow(file = file, enabled = true, onClick = { onDownloadTvFile(file) })
+                            }
+                        }
 
-                    // Send Files & APKs to TV
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                        TransferHistorySection(
+                            title = "TV Transfer History",
+                            items = uiState.tvTransferHistory,
+                            onOpenItem = onOpenHistoryFile
+                        )
+                    }
+                } else {
+                    if (sheetMode == TvSheetMode.SCREEN_CAST) {
                         Button(
-                            onClick = onSendFilesToTv,
-                            enabled = activeTv != null,
-                            modifier = Modifier.weight(1.2f),
+                            onClick = onOpenSystemCastSettings,
+                            modifier = Modifier.fillMaxWidth().height(52.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
                             shape = RoundedCornerShape(14.dp)
                         ) {
-                            Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(17.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Send Files", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Icon(Icons.Rounded.Cast, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Open Wireless Screen Mirroring (Smart View / Miracast)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
-                        FilledTonalButton(
-                            onClick = onSendAppsToTv,
-                            enabled = activeTv != null,
-                            modifier = Modifier.weight(1f),
+                        Text(
+                            text = "Or use DLNA TV Cast below to stream videos & photos directly to Samsung/LG TV.",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    } else {
+                        Button(
+                            onClick = onAddBrowserDlnaFiles,
+                            modifier = Modifier.fillMaxWidth().height(50.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
                             shape = RoundedCornerShape(14.dp)
                         ) {
-                            Icon(Icons.Rounded.Android, contentDescription = null, modifier = Modifier.size(17.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Apps (.apk)", fontSize = 12.sp)
-                        }
-                        OutlinedButton(onClick = onRefreshTvFiles, enabled = activeTv != null, shape = RoundedCornerShape(14.dp)) {
-                            Icon(Icons.Rounded.Refresh, contentDescription = "Refresh TV Files", modifier = Modifier.size(18.dp))
+                            Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Pick Photos / Videos / Files to Share", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                         }
                     }
 
-                    if (uiState.tvCompanionFiles.isNotEmpty()) {
-                        Text("Files stored on TV (${uiState.tvCompanionFiles.size})", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        uiState.tvCompanionFiles.take(10).forEach { file ->
-                            SharedFileRow(file = file, enabled = true, onClick = { onDownloadTvFile(file) })
-                        }
-                    }
-
-                    TransferHistorySection(
-                        title = "TV Transfer History",
-                        items = uiState.tvTransferHistory,
-                        onOpenItem = onOpenHistoryFile
-                    )
-                } else {
-                    // NON-ANDROID TV MODE (Samsung Tizen, LG webOS, Hisense VIDAA, Sony, etc.)
-                    Button(
-                        onClick = onAddBrowserDlnaFiles,
-                        modifier = Modifier.fillMaxWidth().height(50.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Pick Photos / Videos / Files to Share", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                    }
-
-                    // Card A: DLNA Media Push
+                    // DLNA Media Push
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1204,8 +1259,8 @@ fun TvCompanionSheetDialog(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text("DLNA TV Cast (Samsung / LG / Sony)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                Text("Pushes photos, videos & music straight to TV player", color = TextSecondary, fontSize = 11.sp)
+                                Text("DLNA TV Player (Samsung / LG / Sony)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Pushes photos, videos & music straight to TV", color = TextSecondary, fontSize = 11.sp)
                             }
                             FilledTonalButton(onClick = onScanDlna, shape = RoundedCornerShape(12.dp)) {
                                 if (uiState.isScanningDlna) {
@@ -1280,7 +1335,6 @@ fun TvCompanionSheetDialog(
                         }
                     }
 
-                    // Shared Files ready to Cast via DLNA or open in TV Browser
                     if (uiState.phoneHostedMediaItems.isNotEmpty()) {
                         Text("Ready to View / Cast on TV (${uiState.phoneHostedMediaItems.size})", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         uiState.phoneHostedMediaItems.take(12).forEach { media ->
@@ -1291,14 +1345,14 @@ fun TvCompanionSheetDialog(
                                     .background(RemoteSurfaceElevated)
                                     .border(1.dp, RemoteBorder, RoundedCornerShape(12.dp))
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                FileThumbnailBadge(fileName = media.name, uriString = null, size = 34.dp)
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(media.name, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text("${formatFileSize(media.sizeBytes)} • ${media.mimeType}", color = TextSecondary, fontSize = 10.sp, maxLines = 1)
                                 }
-                                Spacer(Modifier.width(8.dp))
                                 FilledTonalButton(
                                     onClick = { onCastMediaDlna(media) },
                                     shape = RoundedCornerShape(10.dp)
@@ -1311,78 +1365,69 @@ fun TvCompanionSheetDialog(
                         }
                     }
 
-                    // Card B: TV Web Browser Portal (works for documents, videos, photos on any TV Browser)
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(RemoteSurfaceElevated)
-                            .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Icon(Icons.Rounded.Language, contentDescription = null, tint = WifiBlue)
-                            Column {
-                                Text("TV Web Browser Link (All Smart TVs)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    text = uiState.tvBrowserShareUrl ?: "Turn on Wi-Fi or Hotspot for TV link",
-                                    color = WifiBlue,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                        Text(
-                            text = "Open that address in your Samsung/LG/Hisense TV Internet Browser to view photos, play videos, or download files.",
-                            color = TextSecondary,
-                            fontSize = 11.sp
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    if (sheetMode == TvSheetMode.FILE_SHARE) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(RemoteSurfaceElevated)
+                                .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Button(
-                                onClick = onOpenInTvBrowser,
-                                modifier = Modifier.weight(1.2f),
-                                colors = ButtonDefaults.buttonColors(containerColor = WifiBlue),
-                                shape = RoundedCornerShape(12.dp)
-                            ) { Text("Open on TV", color = Color(0xFF062033), fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
-                            OutlinedButton(
-                                onClick = { showBrowserQr = !showBrowserQr },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Icon(Icons.Rounded.QrCode2, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(if (showBrowserQr) "Hide QR" else "Browser QR", fontSize = 11.sp)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Icon(Icons.Rounded.Language, contentDescription = null, tint = WifiBlue)
+                                Column {
+                                    Text("TV Web Browser Link (All Smart TVs)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = uiState.tvBrowserShareUrl ?: "Turn on Wi-Fi or Hotspot for TV link",
+                                        color = WifiBlue,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
-                        }
-                        if (showBrowserQr && uiState.tvBrowserShareUrl != null) {
-                            val qrBmp = remember(uiState.tvBrowserShareUrl) { generateQrBitmap(uiState.tvBrowserShareUrl, 360) }
-                            if (qrBmp != null) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(150.dp)
-                                        .align(Alignment.CenterHorizontally)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(Color.White)
-                                        .padding(6.dp)
+                            Text(
+                                text = "Open that address in your Samsung/LG/Hisense TV Browser to view photos, play videos, or download files.",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = onOpenInTvBrowser,
+                                    modifier = Modifier.weight(1.2f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = WifiBlue),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) { Text("Open on TV", color = Color(0xFF062033), fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+                                OutlinedButton(
+                                    onClick = { showBrowserQr = !showBrowserQr },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(12.dp)
                                 ) {
-                                    Image(bitmap = qrBmp.asImageBitmap(), contentDescription = "TV Browser URL QR", modifier = Modifier.fillMaxSize())
+                                    Icon(Icons.Rounded.QrCode2, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(if (showBrowserQr) "Hide QR" else "Browser QR", fontSize = 11.sp)
+                                }
+                            }
+                            if (showBrowserQr && uiState.tvBrowserShareUrl != null) {
+                                val qrBmp = remember(uiState.tvBrowserShareUrl) { generateQrBitmap(uiState.tvBrowserShareUrl, 360) }
+                                if (qrBmp != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(150.dp)
+                                            .align(Alignment.CenterHorizontally)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(Color.White)
+                                            .padding(6.dp)
+                                    ) {
+                                        Image(bitmap = qrBmp.asImageBitmap(), contentDescription = "TV Browser URL QR", modifier = Modifier.fillMaxSize())
+                                    }
                                 }
                             }
                         }
-                    }
-
-                    OutlinedButton(
-                        onClick = onOpenSystemCastSettings,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Rounded.Cast, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Open Wireless Screen Mirroring (Smart View / Miracast)", fontSize = 12.sp)
                     }
                 }
             }
@@ -1447,6 +1492,14 @@ fun InstalledAppsPickerDialog(
                 ) {
                     items(filtered, key = { it.packageName }) { app ->
                         val checked = selectedMap[app.packageName] == true
+                        val pm = LocalContext.current.packageManager
+                        val iconBmp by produceState<ImageBitmap?>(null, app.packageName) {
+                            value = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    pm.getApplicationIcon(app.packageName).toBitmap(96, 96).asImageBitmap()
+                                }.getOrNull()
+                            }
+                        }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1454,12 +1507,32 @@ fun InstalledAppsPickerDialog(
                                 .background(RemoteSurfaceElevated)
                                 .clickable { selectedMap[app.packageName] = !checked }
                                 .padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Checkbox(
                                 checked = checked,
                                 onCheckedChange = { selectedMap[app.packageName] = it }
                             )
+                            if (iconBmp != null) {
+                                Image(
+                                    bitmap = iconBmp!!,
+                                    contentDescription = app.label,
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(RoundedCornerShape(9.dp))
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(RemoteSurface),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Rounded.Android, contentDescription = null, tint = ConnectedGreen, modifier = Modifier.size(20.dp))
+                                }
+                            }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = app.label,
@@ -1496,11 +1569,21 @@ fun InstalledAppsPickerDialog(
 }
 
 @Composable
-fun TransferProgressCard(prog: TransferProgress) {
+fun TransferProgressCard(
+    prog: TransferProgress,
+    onPause: () -> Unit = {},
+    onResume: () -> Unit = {},
+    onCancel: () -> Unit = {},
+    showControls: Boolean = true
+) {
     val total = prog.totalBytes.coerceAtLeast(1L)
     val frac = (prog.bytesDone.toFloat() / total).coerceIn(0f, 1f)
     val pct = (frac * 100f).roundToInt()
-    val accent = if (prog.isComplete) ConnectedGreen else MiOrange
+    val accent = when {
+        prog.isComplete -> ConnectedGreen
+        prog.isPaused -> Color(0xFFFBBF24)
+        else -> MiOrange
+    }
 
     Column(
         modifier = Modifier
@@ -1517,7 +1600,11 @@ fun TransferProgressCard(prog: TransferProgress) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = if (prog.isUpload) "Sending: ${prog.fileName}" else "Receiving: ${prog.fileName}",
+                text = when {
+                    prog.isPaused -> "Paused: ${prog.fileName}"
+                    prog.isUpload -> "Sending: ${prog.fileName}"
+                    else -> "Receiving: ${prog.fileName}"
+                },
                 color = TextPrimary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -1527,9 +1614,13 @@ fun TransferProgressCard(prog: TransferProgress) {
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = if (prog.isComplete) "Done" else "$pct%",
+                text = when {
+                    prog.isComplete -> "Done"
+                    prog.isPaused -> "Paused • $pct%"
+                    else -> "$pct%"
+                },
                 color = accent,
-                fontSize = 13.sp,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
             )
         }
@@ -1544,20 +1635,47 @@ fun TransferProgressCard(prog: TransferProgress) {
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "${formatFileSize(prog.bytesDone)} / ${formatFileSize(prog.totalBytes)}",
-                color = TextSecondary,
-                fontSize = 11.sp
-            )
-            if (prog.bytesPerSec > 0L) {
+            Column {
                 Text(
-                    text = formatTransferSpeed(prog.bytesPerSec),
-                    color = WifiBlue,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
+                    text = "${formatFileSize(prog.bytesDone)} / ${formatFileSize(prog.totalBytes)}",
+                    color = TextSecondary,
+                    fontSize = 11.sp
                 )
+                if (prog.bytesPerSec > 0L && !prog.isPaused) {
+                    Text(
+                        text = formatTransferSpeed(prog.bytesPerSec),
+                        color = WifiBlue,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+            if (showControls && !prog.isComplete) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilledTonalButton(
+                        onClick = if (prog.isPaused) onResume else onPause,
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (prog.isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+                            contentDescription = if (prog.isPaused) "Resume" else "Pause",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (prog.isPaused) "Resume" else "Pause", fontSize = 11.sp)
+                    }
+                    OutlinedButton(
+                        onClick = onCancel,
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text("Cancel", color = Color(0xFFF87171), fontSize = 11.sp)
+                    }
+                }
             }
         }
     }
@@ -1571,10 +1689,10 @@ fun TransferHistorySection(
 ) {
     if (items.isEmpty()) return
 
-    // 0 = All, 1 = Sent, 2 = Received
     var filterMode by remember { mutableIntStateOf(0) }
-    val sentItems = remember(items) { items.filter { it.isSent } }
-    val recvItems = remember(items) { items.filter { !it.isSent } }
+    var showAllHistory by remember { mutableStateOf(false) }
+    val sentItems = remember(items) { items.filter { it.isSent && it.statusLabel == "Sent" } }
+    val recvItems = remember(items) { items.filter { !it.isSent && it.statusLabel == "Received" } }
     val shown = when (filterMode) {
         1 -> sentItems
         2 -> recvItems
@@ -1585,7 +1703,18 @@ fun TransferHistorySection(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text(title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            if (shown.size > 4) {
+                TextButton(onClick = { showAllHistory = !showAllHistory }) {
+                    Text(if (showAllHistory) "Show Less" else "View All (${shown.size})", color = WifiBlue, fontSize = 11.sp)
+                }
+            }
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1615,11 +1744,17 @@ fun TransferHistorySection(
                 fontSize = 12.sp
             )
         } else {
-            shown.forEach { entry ->
+            val visibleItems = if (showAllHistory) shown else shown.take(4)
+            visibleItems.forEach { entry ->
                 val timeStr = remember(entry.timestampMs) {
                     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(entry.timestampMs))
                 }
-                val tag = if (entry.isSent) "Sent" else "Received"
+                val tagColor = when (entry.statusLabel) {
+                    "Failed" -> Color(0xFFF87171)
+                    "Cancelled" -> Color(0xFFFBBF24)
+                    "Received" -> ConnectedGreen
+                    else -> MiOrange
+                }
                 val spdTxt = if (entry.bytesPerSec > 0L) " • ${formatTransferSpeed(entry.bytesPerSec)}" else ""
 
                 Row(
@@ -1638,15 +1773,7 @@ fun TransferHistorySection(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(
-                            imageVector = if (entry.fileName.lowercase(Locale.US).endsWith(".apk")) {
-                                Icons.Rounded.Android
-                            } else {
-                                Icons.AutoMirrored.Rounded.InsertDriveFile
-                            },
-                            contentDescription = null,
-                            tint = if (entry.isSent) MiOrange else ConnectedGreen
-                        )
+                        FileThumbnailBadge(fileName = entry.fileName, uriString = entry.localUriString, size = 38.dp)
                         Column {
                             Text(
                                 text = entry.fileName,
@@ -1657,8 +1784,8 @@ fun TransferHistorySection(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "$tag at $timeStr • ${formatFileSize(entry.sizeBytes)}$spdTxt",
-                                color = TextSecondary,
+                                text = "${entry.statusLabel} at $timeStr • ${formatFileSize(entry.sizeBytes)}$spdTxt",
+                                color = if (entry.statusLabel == "Failed" || entry.statusLabel == "Cancelled") tagColor else TextSecondary,
                                 fontSize = 11.sp
                             )
                         }
@@ -1688,7 +1815,7 @@ private fun SharedFileRow(
             .background(RemoteSurfaceElevated)
             .border(1.dp, RemoteBorder, RoundedCornerShape(14.dp))
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1697,7 +1824,7 @@ private fun SharedFileRow(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.weight(1f)
         ) {
-            Icon(Icons.AutoMirrored.Rounded.InsertDriveFile, contentDescription = null, tint = WifiBlue)
+            FileThumbnailBadge(fileName = file.name, uriString = null, size = 36.dp)
             Column {
                 Text(
                     text = file.name,
@@ -1719,6 +1846,78 @@ private fun SharedFileRow(
             contentDescription = "Download ${file.name}",
             tint = ConnectedGreen
         )
+    }
+}
+
+@Composable
+private fun FileThumbnailBadge(
+    fileName: String,
+    uriString: String?,
+    size: Dp = 36.dp
+) {
+    val ext = remember(fileName) { fileName.substringAfterLast('.', "").lowercase(Locale.US) }
+    val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic")
+    val isVideo = ext in listOf("mp4", "mkv", "mov", "webm", "avi", "m4v")
+    val context = LocalContext.current
+
+    val thumb by produceState<ImageBitmap?>(null, uriString, ext) {
+        if (uriString.isNullOrBlank() || (!isImage && !isVideo)) {
+            value = null
+            return@produceState
+        }
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                val uri = Uri.parse(uriString)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    context.contentResolver.loadThumbnail(uri, Size(128, 128), null).asImageBitmap()
+                } else if (isImage) {
+                    context.contentResolver.openInputStream(uri)?.use { inp ->
+                        BitmapFactory.decodeStream(inp)?.let { bmp ->
+                            Bitmap.createScaledBitmap(bmp, 96, 96, true).asImageBitmap()
+                        }
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val path = uri.path
+                    if (path != null) {
+                        @Suppress("DEPRECATION")
+                        ThumbnailUtils.createVideoThumbnail(path, MediaStore.Images.Thumbnails.MINI_KIND)?.asImageBitmap()
+                    } else null
+                }
+            }.getOrNull()
+        }
+    }
+
+    if (thumb != null) {
+        Image(
+            bitmap = thumb!!,
+            contentDescription = fileName,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(size)
+                .clip(RoundedCornerShape(10.dp))
+                .border(1.dp, RemoteBorder, RoundedCornerShape(10.dp))
+        )
+    } else {
+        val (vec, tint) = when {
+            ext == "apk" -> Icons.Rounded.Android to ConnectedGreen
+            isVideo -> Icons.Rounded.Movie to WifiBlue
+            isImage -> Icons.Rounded.Image to Color(0xFFF472B6)
+            ext == "pdf" -> Icons.Rounded.PictureAsPdf to Color(0xFFF87171)
+            ext in listOf("zip", "rar", "7z", "tar", "gz") -> Icons.Rounded.FolderZip to Color(0xFFFBBF24)
+            ext in listOf("mp3", "wav", "m4a", "aac", "flac", "ogg") -> Icons.Rounded.AudioFile to Color(0xFF2DD4BF)
+            else -> Icons.AutoMirrored.Rounded.InsertDriveFile to WifiBlue
+        }
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(RoundedCornerShape(10.dp))
+                .background(tint.copy(alpha = 0.15f))
+                .border(1.dp, tint.copy(alpha = 0.35f), RoundedCornerShape(10.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(vec, contentDescription = null, tint = tint, modifier = Modifier.size(size * 0.56f))
+        }
     }
 }
 

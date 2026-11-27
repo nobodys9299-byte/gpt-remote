@@ -12,6 +12,7 @@ DefaultDirName={autopf}\GPT Remote PC
 DefaultGroupName=GPT Remote PC
 OutputDir=..\dist
 OutputBaseFilename=GptRemotePC-Setup
+SetupIconFile=gpt_remote.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

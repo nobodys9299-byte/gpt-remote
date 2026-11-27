@@ -26,12 +26,16 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.io.RandomAccessFile
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
@@ -99,6 +103,7 @@ class TvCompanionService : Service() {
         const val BEACON_PORT = 58769
         const val TCP_PORT = 58765
         const val HTTP_PORT = 58768
+        private const val TRANSFER_BUF = 512 * 1024
         private const val CHANNEL_ID = "gpt_remote_tv_companion"
         private const val NOTIF_ID = 4102
     }
@@ -107,6 +112,8 @@ class TvCompanionService : Service() {
     private lateinit var storageDir: File
     private lateinit var pairCode: String
     private val historyLock = Any()
+    private val cancelTransferFlag = AtomicBoolean(false)
+    private val uploadParts = ConcurrentHashMap<String, File>()
 
     @Volatile
     private var tcpServer: ServerSocket? = null
@@ -180,7 +187,7 @@ class TvCompanionService : Service() {
         val deviceName = Build.MODEL.ifBlank { "Android TV" }
         val encodedName = java.net.URLEncoder.encode(deviceName, "UTF-8")
         val qr = "gptremote://tv?host=$primaryIp&port=$TCP_PORT&http=$HTTP_PORT&token=$pairCode&name=$encodedName"
-        val diskFiles = (storageDir.listFiles()?.filter { it.isFile } ?: emptyList())
+        val diskFiles = (storageDir.listFiles()?.filter { it.isFile && !it.name.endsWith(".gptpart") } ?: emptyList())
             .sortedByDescending { it.lastModified() }
             .map { f ->
                 TvReceivedFile(
@@ -281,7 +288,9 @@ class TvCompanionService : Service() {
     private fun handleTcpClient(socket: Socket) {
         try {
             socket.use { sock ->
-                sock.soTimeout = 30000
+                sock.soTimeout = 0
+                sock.keepAlive = true
+                sock.tcpNoDelay = true
                 val reader = BufferedReader(InputStreamReader(sock.getInputStream(), Charsets.UTF_8))
                 val writer = OutputStreamWriter(sock.getOutputStream(), Charsets.UTF_8)
                 var authenticated = false
@@ -337,9 +346,14 @@ class TvCompanionService : Service() {
     private fun handleHttpClient(socket: Socket) {
         try {
             socket.use { sock ->
-                sock.soTimeout = 60000
-                val bis = BufferedInputStream(sock.getInputStream(), 65536)
-                val out = sock.getOutputStream()
+                sock.soTimeout = 300_000
+                sock.tcpNoDelay = true
+                runCatching {
+                    sock.receiveBufferSize = 1024 * 1024
+                    sock.sendBufferSize = 1024 * 1024
+                }
+                val bis = BufferedInputStream(sock.getInputStream(), TRANSFER_BUF)
+                val out = BufferedOutputStream(sock.getOutputStream(), TRANSFER_BUF)
 
                 val headerBytes = readUntilHeaderEnd(bis) ?: return
                 val headerText = String(headerBytes, Charsets.ISO_8859_1)
@@ -384,7 +398,7 @@ class TvCompanionService : Service() {
                     }
 
                     method == "GET" && path == "/files" -> {
-                        val files = (storageDir.listFiles()?.filter { it.isFile } ?: emptyList())
+                        val files = (storageDir.listFiles()?.filter { it.isFile && !it.name.endsWith(".gptpart") } ?: emptyList())
                             .sortedByDescending { it.lastModified() }
                         val arr = JSONArray()
                         files.forEach { f ->
@@ -399,27 +413,63 @@ class TvCompanionService : Service() {
                         writeJsonResponse(out, 200, JSONObject().put("files", arr).toString())
                     }
 
+                    method == "GET" && path == "/upload-status" -> {
+                        val sid = query["session"].orEmpty().trim()
+                        val existing = if (sid.isNotEmpty()) uploadParts[sid]?.takeIf { it.exists() }?.length() ?: 0L else 0L
+                        writeJsonResponse(out, 200, JSONObject().put("bytes", existing).toString())
+                    }
+
+                    method == "POST" && path == "/transfer-cancel" -> {
+                        cancelTransferFlag.set(true)
+                        val sid = query["session"].orEmpty().trim()
+                        if (sid.isNotEmpty()) {
+                            uploadParts.remove(sid)?.let { runCatching { it.delete() } }
+                        }
+                        TvCompanionState.update { it.copy(transferProgress = null, statusText = "Transfer cancelled") }
+                        writeJsonResponse(out, 200, "{\"ok\":true}")
+                    }
+
                     method == "POST" && path == "/upload" -> {
+                        cancelTransferFlag.set(false)
                         val contentLength = headers["content-length"]?.toLongOrNull() ?: 0L
-                        val rawName = query["name"] ?: headers["x-file-name"] ?: "file_${System.currentTimeMillis()}.bin"
+                        val sid = query["session"].orEmpty().trim()
+                        val offset = query["offset"]?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+                        val totalParam = query["total"]?.toLongOrNull()?.coerceAtLeast(0L) ?: contentLength
+                        val totalExpected = max(totalParam, offset + contentLength)
+
+                        val rawName = query["name"] ?: headers["x-file-name"] ?: headers["x-filename"] ?: "file_${System.currentTimeMillis()}.bin"
                         val safeName = sanitizeFilename(rawName)
-                        val dest = uniqueFile(storageDir, safeName)
+                        val partFile = if (sid.isNotEmpty()) {
+                            uploadParts.getOrPut(sid) {
+                                File(storageDir, ".${sanitizeFilename(sid)}.gptpart")
+                            }
+                        } else {
+                            uniqueFile(storageDir, safeName)
+                        }
 
                         var done = 0L
                         val startedAt = System.currentTimeMillis()
                         var lastUiAt = startedAt
-                        val buf = ByteArray(65536)
-                        FileOutputStream(dest).use { fos ->
+                        val buf = ByteArray(TRANSFER_BUF)
+                        val raf = RandomAccessFile(partFile, "rw")
+                        try {
+                            if (offset > 0L && partFile.exists()) {
+                                raf.seek(offset)
+                            } else {
+                                raf.setLength(0L)
+                            }
                             var remaining = contentLength
                             while (remaining > 0L) {
+                                if (cancelTransferFlag.get()) break
                                 val toRead = minOf(buf.size.toLong(), remaining).toInt()
                                 val read = bis.read(buf, 0, toRead)
                                 if (read <= 0) break
-                                fos.write(buf, 0, read)
+                                raf.write(buf, 0, read)
                                 done += read
                                 remaining -= read
+                                val overallDone = offset + done
                                 val now = System.currentTimeMillis()
-                                if (now - lastUiAt >= 180L || remaining == 0L) {
+                                if (now - lastUiAt >= 160L || remaining == 0L) {
                                     lastUiAt = now
                                     val elapsedMs = max(1L, now - startedAt)
                                     val bps = (done * 1000L) / elapsedMs
@@ -427,17 +477,39 @@ class TvCompanionService : Service() {
                                         it.copy(
                                             connectedPhone = sock.inetAddress.hostAddress ?: it.connectedPhone,
                                             transferProgress = TvTransferProgress(
-                                                fileName = dest.name,
-                                                bytesDone = done,
-                                                totalBytes = max(contentLength, done),
+                                                fileName = safeName,
+                                                bytesDone = overallDone,
+                                                totalBytes = max(totalExpected, overallDone),
                                                 bytesPerSec = bps,
                                                 isUpload = false,
-                                                isComplete = remaining == 0L,
+                                                isComplete = false,
                                             ),
                                         )
                                     }
                                 }
                             }
+                        } finally {
+                            runCatching { raf.close() }
+                        }
+
+                        val overallDone = offset + done
+                        if (cancelTransferFlag.get()) {
+                            if (sid.isNotEmpty()) uploadParts.remove(sid)
+                            runCatching { partFile.delete() }
+                            TvCompanionState.update { it.copy(transferProgress = null, statusText = "Cancelled $safeName") }
+                            writeJsonResponse(out, 200, JSONObject().put("ok", false).put("cancelled", true).toString())
+                            return
+                        }
+
+                        val isComplete = totalExpected <= 0L || overallDone >= totalExpected
+                        val finalFile = if (sid.isNotEmpty() && isComplete) {
+                            uploadParts.remove(sid)
+                            val target = uniqueFile(storageDir, safeName)
+                            if (!partFile.renameTo(target)) partFile else target
+                        } else if (sid.isNotEmpty()) {
+                            partFile
+                        } else {
+                            partFile
                         }
 
                         refreshFileListAndIps()
@@ -445,26 +517,32 @@ class TvCompanionService : Service() {
                         val avgBps = (done * 1000L) / elapsedMs
                         TvCompanionState.update {
                             it.copy(
-                                transferProgress = TvTransferProgress(
-                                    fileName = dest.name,
-                                    bytesDone = done,
-                                    totalBytes = max(contentLength, done),
+                                transferProgress = if (isComplete) TvTransferProgress(
+                                    fileName = finalFile.name,
+                                    bytesDone = overallDone,
+                                    totalBytes = max(totalExpected, overallDone),
                                     bytesPerSec = avgBps,
                                     isUpload = false,
                                     isComplete = true,
-                                ),
-                                statusText = "Received ${dest.name} (${TvCompanionState.formatBytes(done)})",
+                                ) else null,
+                                statusText = if (isComplete) {
+                                    "Received ${finalFile.name} (${TvCompanionState.formatBytes(overallDone)})"
+                                } else {
+                                    "Paused $safeName (${TvCompanionState.formatBytes(overallDone)})"
+                                },
                             )
                         }
                         val resp = JSONObject().apply {
                             put("ok", true)
-                            put("name", dest.name)
-                            put("size", dest.length())
+                            put("name", finalFile.name)
+                            put("size", overallDone)
+                            put("paused", !isComplete)
                         }.toString()
                         writeJsonResponse(out, 200, resp)
                     }
 
                     method == "GET" && path == "/download" -> {
+                        cancelTransferFlag.set(false)
                         val rawName = query["name"].orEmpty()
                         val safeName = sanitizeFilename(rawName)
                         val file = File(storageDir, safeName)
@@ -473,19 +551,41 @@ class TvCompanionService : Service() {
                             return
                         }
                         val total = file.length()
+                        val rangeHdr = headers["range"].orEmpty()
+                        var startOffset = 0L
+                        var endOffset = max(0L, total - 1L)
+                        var isPartial = false
+                        if (rangeHdr.startsWith("bytes=")) {
+                            val spec = rangeHdr.removePrefix("bytes=").substringBefore(",").trim()
+                            val pStart = spec.substringBefore("-").toLongOrNull()
+                            val pEnd = spec.substringAfter("-", "").toLongOrNull()
+                            if (pStart != null) {
+                                startOffset = pStart.coerceIn(0L, total)
+                                if (pEnd != null) endOffset = pEnd.coerceIn(startOffset, max(0L, total - 1L))
+                                isPartial = true
+                            }
+                        }
+                        val toSend = if (total > 0L) (endOffset - startOffset + 1L).coerceAtLeast(0L) else 0L
+                        val statusLine = if (isPartial) "206 Partial Content" else "200 OK"
+                        val rangeLine = if (isPartial && total > 0L) "Content-Range: bytes $startOffset-$endOffset/$total\r\n" else ""
                         val header = (
-                            "HTTP/1.1 200 OK\r\n" +
+                            "HTTP/1.1 $statusLine\r\n" +
                                 "Content-Type: application/octet-stream\r\n" +
-                                "Content-Length: $total\r\n" +
+                                "Accept-Ranges: bytes\r\n" +
+                                rangeLine +
+                                "Content-Length: $toSend\r\n" +
                                 "Connection: close\r\n\r\n"
                             ).toByteArray(Charsets.ISO_8859_1)
                         out.write(header)
-                        val buf = ByteArray(65536)
-                        file.inputStream().use { fis ->
-                            while (true) {
-                                val r = fis.read(buf)
+                        val buf = ByteArray(TRANSFER_BUF)
+                        RandomAccessFile(file, "r").use { raf ->
+                            if (startOffset > 0L) raf.seek(startOffset)
+                            var remaining = toSend
+                            while (remaining > 0L && !cancelTransferFlag.get()) {
+                                val r = raf.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
                                 if (r <= 0) break
                                 out.write(buf, 0, r)
+                                remaining -= r
                             }
                         }
                         out.flush()

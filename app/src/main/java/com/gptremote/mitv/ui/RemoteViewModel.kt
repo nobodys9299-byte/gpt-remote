@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import com.gptremote.mitv.data.RemoteRepository
 import com.gptremote.mitv.haptic.HapticStrength
+import com.gptremote.mitv.model.ActiveSessionItem
 import com.gptremote.mitv.model.BrandOption
 import com.gptremote.mitv.model.DeviceCategory
 import com.gptremote.mitv.model.LaunchableApp
@@ -84,6 +85,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun disconnect() = repository.disconnect()
 
+    fun disconnectSession(session: ActiveSessionItem) = repository.disconnectSession(session)
+
     fun startPcScreenMirror() = repository.startPcScreenMirror()
 
     fun stopPcScreenMirror() = repository.stopPcScreenMirror()
@@ -106,11 +109,19 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun refreshPeerPhoneFiles() = repository.refreshPeerPhoneFiles()
 
+    fun disconnectPhonePeer() = repository.disconnectPhonePeer()
+
     fun sendFileToPeerPhone(uri: Uri) = repository.sendFileToPeerPhone(uri)
 
     fun sendFilesToPeerPhone(uris: List<Uri>) = repository.sendFilesToPeerPhone(uris)
 
     fun downloadFileFromPeerPhone(fileName: String) = repository.downloadFileFromPeerPhone(fileName)
+
+    fun pausePhoneTransfer() = repository.pausePhoneTransfer()
+
+    fun resumePhoneTransfer() = repository.resumePhoneTransfer()
+
+    fun cancelPhoneTransfer() = repository.cancelPhoneTransfer()
 
     fun getConnectedPcHost(): String? = repository.getConnectedPcHost()
 
@@ -126,6 +137,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun downloadFileFromPc(fileName: String) = repository.downloadFileFromPc(fileName)
 
+    fun pausePcTransfer() = repository.pausePcTransfer()
+
+    fun resumePcTransfer() = repository.resumePcTransfer()
+
+    fun cancelPcTransfer() = repository.cancelPcTransfer()
+
     fun startTvCompanionScan() = repository.startTvCompanionScan()
 
     fun connectTvCompanion(host: String, name: String, token: String) =
@@ -138,6 +155,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     fun uploadFilesToTv(uris: List<Uri>) = repository.uploadFilesToTv(uris)
 
     fun downloadFileFromTv(fileName: String) = repository.downloadFileFromTv(fileName)
+
+    fun pauseTvTransfer() = repository.pauseTvTransfer()
+
+    fun resumeTvTransfer() = repository.resumeTvTransfer()
+
+    fun cancelTvTransfer() = repository.cancelTvTransfer()
 
     fun getConnectedTvCompanionHost(): String? = repository.getConnectedTvCompanionHost()
 

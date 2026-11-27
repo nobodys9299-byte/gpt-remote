@@ -65,7 +65,7 @@ jobs:
         run: python -m pip install --upgrade pip pyinstaller mss pillow qrcode
 
       - name: Build standalone GptRemotePC.exe
-        run: pyinstaller --onefile --noconsole --name GptRemotePC pc-companion/gpt_remote_pc.py
+        run: pyinstaller --onefile --noconsole --name GptRemotePC --icon pc-companion/gpt_remote.ico --add-data "pc-companion/gpt_remote.ico;." pc-companion/gpt_remote_pc.py
 
       - name: Install Inno Setup
         run: choco install innosetup -y

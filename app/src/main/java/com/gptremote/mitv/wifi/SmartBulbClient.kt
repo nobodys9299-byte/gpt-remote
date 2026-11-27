@@ -12,13 +12,18 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONObject
+import java.io.File
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
@@ -27,6 +32,12 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.nio.ByteBuffer
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.CRC32
+import javax.crypto.Cipher
+import javax.crypto.spec.SecretKeySpec
 
 enum class BulbProtocol {
     PHILIPS_WIZ,
@@ -39,7 +50,8 @@ data class DiscoveredSmartBulb(
     val host: String,
     val name: String,
     val protocol: BulbProtocol,
-    val isBle: Boolean = false
+    val isBle: Boolean = false,
+    val deviceId: String = ""
 )
 
 /**
@@ -53,6 +65,8 @@ class SmartBulbClient(context: Context) {
 
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val prefs = appContext.getSharedPreferences("gpt_smart_bulbs", Context.MODE_PRIVATE)
+    private val seqCounter = AtomicInteger(1)
 
     private val _bulbs = MutableStateFlow<List<DiscoveredSmartBulb>>(emptyList())
     val bulbs: StateFlow<List<DiscoveredSmartBulb>> = _bulbs.asStateFlow()
@@ -172,12 +186,15 @@ class SmartBulbClient(context: Context) {
                                                 (p.data[2].toInt() == 0x55 || p.data[2].toInt() == 0x66))
                                             val looksTuyaJson = rawText.contains("gwId") || rawText.contains("productKey")
                                             if (hasTuyaMagic || looksTuyaJson) {
+                                                val gwId = Regex("\"gwId\"\\s*:\\s*\"([^\"]+)\"")
+                                                    .find(rawText)?.groupValues?.getOrNull(1).orEmpty()
                                                 putBulb(
                                                     host,
                                                     DiscoveredSmartBulb(
                                                         host = host,
-                                                        name = "Wipro / Syska / Tuya Wi-Fi Bulb ($host)",
-                                                        protocol = BulbProtocol.TUYA_LAN
+                                                        name = if (gwId.isNotBlank()) "Wipro / Tuya ($gwId)" else "Wipro / Syska / Tuya Bulb ($host)",
+                                                        protocol = BulbProtocol.TUYA_LAN,
+                                                        deviceId = gwId
                                                     )
                                                 )
                                             }
@@ -190,6 +207,40 @@ class SmartBulbClient(context: Context) {
                                 runCatching { sock?.close() }
                             }
                         }
+                    }
+
+                    // 3b. Active TCP 6668 (Tuya/Wipro LAN) & 55443 (Yeelight) subnet / ARP probe (works over Phone Hotspot!)
+                    launch {
+                        val candidates = collectLanCandidateHosts()
+                        val sem = Semaphore(48)
+                        val jobs = candidates.map { ip ->
+                            async {
+                                sem.withPermit {
+                                    if (probeTcpPort(ip, 6668, 220)) {
+                                        val savedId = prefs.getString("id_$ip", "").orEmpty()
+                                        putBulb(
+                                            ip,
+                                            DiscoveredSmartBulb(
+                                                host = ip,
+                                                name = "Wipro / Tuya Wi-Fi Bulb ($ip)",
+                                                protocol = BulbProtocol.TUYA_LAN,
+                                                deviceId = savedId
+                                            )
+                                        )
+                                    } else if (probeTcpPort(ip, 55443, 180)) {
+                                        putBulb(
+                                            ip,
+                                            DiscoveredSmartBulb(
+                                                host = ip,
+                                                name = "Yeelight / Mi Bulb ($ip)",
+                                                protocol = BulbProtocol.YEELIGHT
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        jobs.awaitAll()
                     }
 
                     // 4. Bluetooth LE Smart Bulb scanner (Wipro, Syska, WiZ, Yeelight, Tapo, LED lamps)
@@ -241,19 +292,28 @@ class SmartBulbClient(context: Context) {
         }
     }
 
-    fun selectManualBulb(host: String, brandId: String) {
-        val clean = host.trim()
+    fun selectManualBulb(spec: String, brandId: String) {
+        val parts = spec.split('|')
+        val clean = parts.getOrNull(0)?.trim().orEmpty()
         if (clean.isEmpty()) return
+        val devId = parts.getOrNull(1)?.trim().orEmpty()
+        val localKey = parts.getOrNull(2)?.trim().orEmpty()
+        if (devId.isNotEmpty()) prefs.edit().putString("id_$clean", devId).apply()
+        if (localKey.length == 16) prefs.edit().putString("key_$clean", localKey).apply()
+
         val proto = when (brandId) {
             "bulb_yeelight" -> BulbProtocol.YEELIGHT
             "bulb_wipro", "bulb_syska", "bulb_tuya" -> BulbProtocol.TUYA_LAN
-            else -> BulbProtocol.PHILIPS_WIZ
+            else -> if (localKey.length == 16 || devId.isNotEmpty()) BulbProtocol.TUYA_LAN else BulbProtocol.PHILIPS_WIZ
         }
-        _connectedBulb.value = DiscoveredSmartBulb(clean, "Smart Bulb ($clean)", proto)
+        val storedId = devId.ifEmpty { prefs.getString("id_$clean", "").orEmpty() }
+        _connectedBulb.value = DiscoveredSmartBulb(clean, "Smart Bulb ($clean)", proto, deviceId = storedId)
     }
 
     fun selectBulb(bulb: DiscoveredSmartBulb) {
-        _connectedBulb.value = bulb
+        val savedId = bulb.deviceId.ifBlank { prefs.getString("id_${bulb.host}", "").orEmpty() }
+        if (savedId.isNotBlank()) prefs.edit().putString("id_${bulb.host}", savedId).apply()
+        _connectedBulb.value = bulb.copy(deviceId = savedId)
     }
 
     fun disconnect() {
@@ -316,7 +376,45 @@ class SmartBulbClient(context: Context) {
                     }
 
                     BulbProtocol.TUYA_LAN -> {
-                        onError("Tuya/Wipro LAN bulb detected at ${target.host}. Encrypted v3.3+ local control requires your Smart Life/Wipro localKey; use WiZ, Yeelight (LAN Control ON), or IR LED strip.")
+                        val storedId = target.deviceId.ifBlank { prefs.getString("id_${target.host}", "").orEmpty() }
+                        val storedKey = prefs.getString("key_${target.host}", "").orEmpty()
+                        if (storedId.isBlank() || storedKey.length != 16) {
+                            val idNote = if (storedId.isNotBlank()) " (ID: $storedId)" else ""
+                            onError(
+                                "Tuya/Wipro bulb detected at ${target.host}$idNote. Local LAN control requires your 16-char Tuya LocalKey — tap Connect -> Wi-Fi Bulb -> Advanced to enter it, or use WiZ / Yeelight / IR LED."
+                            )
+                            return@launch
+                        }
+                        val dps = JSONObject().apply {
+                            power?.let { put("20", it) }
+                            brightness?.let { put("22", (it.coerceIn(1, 100) * 10).coerceIn(10, 1000)) }
+                            tempKelvin?.let {
+                                put("21", "white")
+                                put("23", ((it.coerceIn(2700, 6500) - 2700) * 1000 / 3800).coerceIn(0, 1000))
+                            }
+                            rgb?.let { (r, g, b) ->
+                                put("21", "colour")
+                                put("24", rgbToTuyaHsvHex(r, g, b))
+                            }
+                        }
+                        if (dps.length() > 0) {
+                            val tSeconds = System.currentTimeMillis() / 1000L
+                            val payload = JSONObject()
+                                .put("devId", storedId)
+                                .put("uid", storedId)
+                                .put("t", tSeconds.toString())
+                                .put("dps", dps)
+                                .toString()
+                            val packet = buildTuya33Packet(seqCounter.getAndIncrement(), payload, storedKey)
+                            Socket().use { sock ->
+                                sock.connect(InetSocketAddress(target.host, 6668), 2500)
+                                sock.soTimeout = 2500
+                                sock.getOutputStream().use { out ->
+                                    out.write(packet)
+                                    out.flush()
+                                }
+                            }
+                        }
                     }
 
                     BulbProtocol.BLE_LIGHT -> {
@@ -345,6 +443,56 @@ class SmartBulbClient(context: Context) {
                 android.Manifest.permission.ACCESS_FINE_LOCATION
             ) == PackageManager.PERMISSION_GRANTED
         }
+    }
+
+    private fun probeTcpPort(host: String, port: Int, timeoutMs: Int): Boolean {
+        return runCatching {
+            Socket().use { s ->
+                s.connect(InetSocketAddress(host, port), timeoutMs)
+                true
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun collectLanCandidateHosts(): List<String> {
+        val hosts = linkedSetOf<String>()
+        val localIps = linkedSetOf<String>()
+        // 1. Read ARP / neighbor table first (finds devices connected to Phone Hotspot immediately)
+        runCatching {
+            File("/proc/net/arp").takeIf { it.canRead() }?.useLines { lines ->
+                lines.drop(1).forEach { line ->
+                    val cols = line.trim().split(Regex("\\s+"))
+                    val ip = cols.firstOrNull().orEmpty()
+                    val flags = cols.getOrNull(2).orEmpty()
+                    if (ip.matches(Regex("\\d{1,3}(\\.\\d{1,3}){3}")) && flags != "0x0" && !ip.startsWith("127.")) {
+                        hosts += ip
+                    }
+                }
+            }
+        }
+        // 2. Active Wi-Fi / Hotspot /24 subnet sweep
+        runCatching {
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching
+            for (iface in ifaces) {
+                if (!iface.isUp || iface.isLoopback) continue
+                for (addr in iface.interfaceAddresses) {
+                    val inet = addr.address as? Inet4Address ?: continue
+                    val ip = inet.hostAddress ?: continue
+                    if (ip.startsWith("127.")) continue
+                    localIps += ip
+                    val parts = ip.split('.')
+                    if (parts.size == 4) {
+                        val prefix = "${parts[0]}.${parts[1]}.${parts[2]}"
+                        for (oct in 1..254) {
+                            val cand = "$prefix.$oct"
+                            if (cand != ip) hosts += cand
+                        }
+                    }
+                }
+            }
+        }
+        hosts.removeAll(localIps)
+        return hosts.toList()
     }
 
     private fun collectBroadcastAddresses(): List<InetAddress> {
@@ -376,5 +524,43 @@ class SmartBulbClient(context: Context) {
             "wipro", "syska", "wiz", "yeelight", "tapo", "philips",
             "halonix", "bajaj", "havells", "tuya", "bulb", "lamp", "light", "mesh"
         )
+
+        internal fun rgbToTuyaHsvHex(r: Int, g: Int, b: Int): String {
+            val hsv = FloatArray(3)
+            android.graphics.Color.RGBToHSV(r.coerceIn(0, 255), g.coerceIn(0, 255), b.coerceIn(0, 255), hsv)
+            val h = hsv[0].toInt().coerceIn(0, 360)
+            val s = (hsv[1] * 1000f).toInt().coerceIn(0, 1000)
+            val v = (hsv[2] * 1000f).toInt().coerceIn(10, 1000)
+            return String.format(Locale.US, "%04x%04x%04x", h, s, v)
+        }
+
+        internal fun buildTuya33Packet(seq: Int, payloadJson: String, localKey: String): ByteArray {
+            val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
+            val keySpec = SecretKeySpec(localKey.toByteArray(Charsets.UTF_8), "AES")
+            cipher.init(Cipher.ENCRYPT_MODE, keySpec)
+            val encrypted = cipher.doFinal(payloadJson.toByteArray(Charsets.UTF_8))
+
+            val header33 = ByteArray(15)
+            header33[0] = '3'.code.toByte()
+            header33[1] = '.'.code.toByte()
+            header33[2] = '3'.code.toByte()
+            val body = header33 + encrypted
+            val lenField = body.size + 8
+
+            val header = ByteBuffer.allocate(16).apply {
+                putInt(0x000055AA)
+                putInt(seq)
+                putInt(0x00000007) // CONTROL v3.3
+                putInt(lenField)
+            }.array()
+
+            val frameWithoutCrc = header + body
+            val crc = CRC32().apply { update(frameWithoutCrc) }.value.toInt()
+            return ByteBuffer.allocate(frameWithoutCrc.size + 8).apply {
+                put(frameWithoutCrc)
+                putInt(crc)
+                putInt(0x0000AA55)
+            }.array()
+        }
     }
 }

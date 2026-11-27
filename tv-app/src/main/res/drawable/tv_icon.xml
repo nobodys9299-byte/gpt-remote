@@ -1,22 +1,54 @@
-<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Dark Rounded Tile -->
+    <path android:pathData="M18,12h72a16,16 0,0 1,16 16v52a16,16 0,0 1,-16 16h-72a16,16 0,0 1,-16 -16v-52a16,16 0,0 1,16 -16z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="106"
+                android:endY="96"
+                android:startX="2"
+                android:startY="12"
+                android:type="linear">
+                <item android:color="#0C1429" android:offset="0.0" />
+                <item android:color="#132245" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- TV Screen Bezel -->
     <path
-        android:fillColor="#0E172A"
-        android:pathData="M24,10h60a14,14 0,0 1,14 14v60a14,14 0,0 1,-14 14h-60a14,14 0,0 1,-14 -14v-60a14,14 0,0 1,14 -14z" />
+        android:fillColor="#09101E"
+        android:pathData="M21,28h66a6,6 0,0 1,6 6v40a6,6 0,0 1,-6 6h-66a6,6 0,0 1,-6 -6v-40a6,6 0,0 1,6 -6z"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="3.5" />
+
+    <!-- Wireless Waves Inside TV -->
     <path
-        android:fillColor="#22D3EE"
-        android:pathData="M26,30h56a6,6 0,0 1,6 6v34a6,6 0,0 1,-6 6h-56a6,6 0,0 1,-6 -6v-34a6,6 0,0 1,6 -6z" />
+        android:fillColor="#00000000"
+        android:pathData="M39,46 A18,18 0 0,1 69,46"
+        android:strokeColor="#22D3EE"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.2" />
     <path
-        android:fillColor="#0A1020"
-        android:pathData="M30,35h48v36h-48z" />
+        android:fillColor="#00000000"
+        android:pathData="M45.5,52 A10,10 0 0,1 62.5,52"
+        android:strokeColor="#FF8C3A"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.8" />
+
+    <!-- Center Sync Core & Stand -->
+    <path
+        android:fillColor="#FF6900"
+        android:pathData="M54,54 A6.5,6.5 0 1,0 54,67 A6.5,6.5 0 1,0 54,54 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,58 A2.5,2.5 0 1,0 54,63 A2.5,2.5 0 1,0 54,58 Z" />
     <path
         android:fillColor="#38BDF8"
-        android:pathData="M42,82h24v5h-24z" />
-    <path
-        android:fillColor="#22D3EE"
-        android:pathData="M46,53c0,-4.4 3.6,-8 8,-8s8,3.6 8,8 -3.6,8 -8,8 -8,-3.6 -8,-8z" />
+        android:pathData="M38,85.5h32a2.5,2.5 0,0 1,0 5h-32a2.5,2.5 0,0 1,0 -5z" />
 </vector>

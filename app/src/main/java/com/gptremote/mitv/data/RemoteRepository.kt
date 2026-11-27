@@ -14,11 +14,14 @@ import com.gptremote.mitv.bluetooth.BluetoothHidManager
 import com.gptremote.mitv.haptic.HapticManager
 import com.gptremote.mitv.haptic.HapticStrength
 import com.gptremote.mitv.ir.IrBlasterManager
+import com.gptremote.mitv.model.ActiveSessionItem
+import com.gptremote.mitv.model.ActiveSessionKind
 import com.gptremote.mitv.model.BrandOption
 import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.DeviceCategory
 import com.gptremote.mitv.model.LaunchableApp
 import com.gptremote.mitv.model.MouseButton
+import com.gptremote.mitv.model.ProductCatalog
 import com.gptremote.mitv.model.ProductType
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
@@ -472,6 +475,12 @@ class RemoteRepository(context: Context) {
         phoneShareServer.refreshPeerFiles { err -> statusBanner.value = err }
     }
 
+    fun disconnectPhonePeer() {
+        haptics.click()
+        phoneShareServer.disconnectPeer()
+        statusBanner.value = "Disconnected peer phone."
+    }
+
     fun sendFileToPeerPhone(uri: Uri) = sendFilesToPeerPhone(listOf(uri))
 
     fun sendFilesToPeerPhone(uris: List<Uri>) {
@@ -498,6 +507,8 @@ class RemoteRepository(context: Context) {
             if (ip.isNotBlank()) {
                 return when (hostType) {
                     "phone" -> {
+                        val brand = ProductCatalog.brandsFor(ProductType.PHONE_TO_PHONE).first()
+                        selectedBrand.value = brand
                         phoneShareServer.connectPeer(ip, port ?: PhoneShareServer.DEFAULT_PORT, name) { err ->
                             statusBanner.value = err
                         }
@@ -505,14 +516,26 @@ class RemoteRepository(context: Context) {
                         "phone"
                     }
                     "tv" -> {
-                        connectedBrandId.value = selectedBrand.value?.id ?: "tv_xiaomi"
+                        val brand = ProductCatalog.brandsFor(ProductType.SMART_TV)
+                            .firstOrNull { it.id == selectedBrand.value?.id }
+                            ?: ProductCatalog.brandsFor(ProductType.SMART_TV).first()
+                        selectedBrand.value = brand
+                        connectedBrandId.value = brand.id
                         wifiPcClient.connectTvCompanion(ip, name, token) { msg ->
                             statusBanner.value = msg
                         }
                         "tv"
                     }
+                    "bulb" -> {
+                        val brand = ProductCatalog.brandsFor(ProductType.SMART_BULB).first()
+                        selectedBrand.value = brand
+                        connectManualBulb(ip)
+                        "bulb"
+                    }
                     else -> {
-                        connectedBrandId.value = selectedBrand.value?.id ?: "pc_windows"
+                        val brand = ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
+                        selectedBrand.value = brand
+                        connectedBrandId.value = brand.id
                         connectWifiPc(
                             TvDevice.WifiPc(
                                 id = "$ip:${port ?: WifiPcRemoteClient.DEFAULT_PORT}",
@@ -531,7 +554,9 @@ class RemoteRepository(context: Context) {
             val ip = text.substringBefore(':')
             val port = text.substringAfter(':', "${WifiPcRemoteClient.DEFAULT_PORT}").toIntOrNull()
                 ?: WifiPcRemoteClient.DEFAULT_PORT
-            connectedBrandId.value = selectedBrand.value?.id ?: "pc_windows"
+            val brand = ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
+            selectedBrand.value = brand
+            connectedBrandId.value = brand.id
             connectWifiPc(TvDevice.WifiPc("$ip:$port", "PC ($ip)", ip, port))
             return "pc"
         }
@@ -748,9 +773,36 @@ class RemoteRepository(context: Context) {
         smartTvWsClient.disconnect()
         wifiPcClient.disconnect()
         wifiPcClient.disconnectTvCompanion()
+        phoneShareServer.disconnectPeer()
         smartBulbClient.disconnect()
         connectedBrandId.value = null
         irActive.value = false
+        statusBanner.value = "Disconnected from all devices."
+    }
+
+    fun disconnectSession(session: ActiveSessionItem) {
+        haptics.click()
+        when (session.kind) {
+            ActiveSessionKind.PRIMARY_REMOTE -> {
+                ScreenCastService.stop(appContext)
+                bluetoothHid.disconnect()
+                wifiTvClient.disconnect()
+                smartTvWsClient.disconnect()
+                wifiPcClient.disconnect()
+                irActive.value = false
+            }
+            ActiveSessionKind.TV_COMPANION -> {
+                ScreenCastService.stop(appContext)
+                wifiPcClient.disconnectTvCompanion()
+            }
+            ActiveSessionKind.PHONE_PEER -> {
+                phoneShareServer.disconnectPeer()
+            }
+            ActiveSessionKind.SMART_BULB -> {
+                smartBulbClient.disconnect()
+            }
+        }
+        statusBanner.value = "Disconnected ${session.title}."
     }
 
     fun startTvCompanionScan() {
@@ -781,6 +833,21 @@ class RemoteRepository(context: Context) {
     fun downloadFileFromTv(fileName: String) {
         haptics.click()
         wifiPcClient.downloadFileFromTv(appContext, fileName) { msg -> statusBanner.value = msg }
+    }
+
+    fun pauseTvTransfer() {
+        haptics.click()
+        wifiPcClient.pauseTvTransfer()
+    }
+
+    fun resumeTvTransfer() {
+        haptics.click()
+        wifiPcClient.resumeTvTransfer(appContext) { msg -> statusBanner.value = msg }
+    }
+
+    fun cancelTvTransfer() {
+        haptics.click()
+        wifiPcClient.cancelTvTransfer { msg -> statusBanner.value = msg }
     }
 
     fun getConnectedTvCompanionHost(): String? = wifiPcClient.getConnectedTvCompanionHostAndToken()?.first
@@ -889,6 +956,36 @@ class RemoteRepository(context: Context) {
     fun downloadFileFromPc(fileName: String) {
         haptics.click()
         wifiPcClient.downloadFile(appContext, fileName) { msg -> statusBanner.value = msg }
+    }
+
+    fun pausePcTransfer() {
+        haptics.click()
+        wifiPcClient.pausePcTransfer()
+    }
+
+    fun resumePcTransfer() {
+        haptics.click()
+        wifiPcClient.resumePcTransfer(appContext) { msg -> statusBanner.value = msg }
+    }
+
+    fun cancelPcTransfer() {
+        haptics.click()
+        wifiPcClient.cancelPcTransfer { msg -> statusBanner.value = msg }
+    }
+
+    fun pausePhoneTransfer() {
+        haptics.click()
+        phoneShareServer.pauseActiveTransfer()
+    }
+
+    fun resumePhoneTransfer() {
+        haptics.click()
+        phoneShareServer.resumeActiveTransfer { msg -> statusBanner.value = msg }
+    }
+
+    fun cancelPhoneTransfer() {
+        haptics.click()
+        phoneShareServer.cancelActiveTransfer { msg -> statusBanner.value = msg }
     }
 
     fun queryInstalledAppsForShare(): List<ShareableAppInfo> {

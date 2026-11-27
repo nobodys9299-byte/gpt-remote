@@ -332,8 +332,12 @@ class PynputBackend(InputBackend):
 
 # ---- Screen Capture Helper ----
 
-def capture_pc_jpeg(max_width: int = 1080, quality: int = 58) -> bytes | None:
-    """Captures the primary PC screen as JPEG bytes. Uses mss + Pillow if available, or Pillow ImageGrab."""
+def capture_pc_jpeg(
+    max_width: int = 1280,
+    quality: int = 52,
+    sct_ctx=None,
+) -> bytes | None:
+    """Captures the primary PC screen as JPEG bytes. Reuses mss context for ~30fps speed."""
     try:
         from PIL import Image
     except ImportError:
@@ -341,11 +345,16 @@ def capture_pc_jpeg(max_width: int = 1080, quality: int = 58) -> bytes | None:
 
     img = None
     try:
-        import mss  # type: ignore
-        with mss.mss() as sct:
-            mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-            raw = sct.grab(mon)
+        if sct_ctx is not None:
+            mon = sct_ctx.monitors[1] if len(sct_ctx.monitors) > 1 else sct_ctx.monitors[0]
+            raw = sct_ctx.grab(mon)
             img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+        else:
+            import mss  # type: ignore
+            with mss.mss() as sct:
+                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                raw = sct.grab(mon)
+                img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
     except Exception:
         try:
             from PIL import ImageGrab
@@ -409,10 +418,32 @@ class RemoteServerState:
         self.bind_errors: list[str] = []
         self.transfer_info: dict | None = None
         self.transfer_history: list[dict] = []
+        self.transfer_cancel_event = threading.Event()
+        self.active_transfer_session: str | None = None
+        self.upload_parts: dict[str, tuple[str, str]] = {}
         self.on_change = None
         self.on_files_change = None
         self.on_phone_frame = None
         self.on_transfer = None
+
+    def request_cancel_transfer(self, session_id: str = "") -> None:
+        self.transfer_cancel_event.set()
+        target_sid = session_id or self.active_transfer_session or ""
+        info_name = "transfer"
+        info_done = 0
+        with self._lock:
+            if self.transfer_info:
+                info_name = self.transfer_info.get("filename", "transfer")
+                info_done = int(self.transfer_info.get("done", 0))
+            part_entry = self.upload_parts.pop(target_sid, None) if target_sid else None
+        if part_entry and os.path.isfile(part_entry[0]):
+            try:
+                os.remove(part_entry[0])
+            except OSError:
+                pass
+        if info_name:
+            self.update_transfer("Cancelled", info_name, info_done, max(1, info_done), False, 0.0)
+            self.record_history("cancelled", info_name, info_done, "", 0.0)
 
     def report_bind_error(self, msg: str) -> None:
         with self._lock:
@@ -551,6 +582,10 @@ def handle_client(
     state.add_client(tag)
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     try:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        pass
+    try:
         hello = json.dumps({
             "type": "announce",
             "name": socket.gethostname(),
@@ -592,6 +627,8 @@ def handle_client(
                     backend.text(msg.get("s", ""))
                 elif t == "launch":
                     backend.launch(msg.get("app", ""))
+                elif t == "ping":
+                    conn.sendall(b'{"type":"pong"}\n')
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
         pass
     finally:
@@ -639,21 +676,36 @@ def handle_screen_viewer(
 ) -> None:
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     try:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 512 * 1024)
+    except OSError:
+        pass
+    sct_ctx = None
+    try:
+        import mss  # type: ignore
+        sct_ctx = mss.mss()
+    except Exception:
+        sct_ctx = None
+    try:
         while not stop_event.is_set():
             if not state.allow_pc_screen_share:
-                time.sleep(0.25)
+                time.sleep(0.2)
                 continue
-            t0 = time.time()
-            jpeg = capture_pc_jpeg(max_width=1080, quality=58)
+            t0 = time.monotonic()
+            jpeg = capture_pc_jpeg(max_width=1280, quality=52, sct_ctx=sct_ctx)
             if jpeg:
                 header = struct.pack(">I", len(jpeg))
                 conn.sendall(header + jpeg)
-            elapsed = time.time() - t0
-            sleep_for = max(0.02, (1.0 / 14.0) - elapsed)
+            elapsed = time.monotonic() - t0
+            sleep_for = max(0.002, (1.0 / 28.0) - elapsed)
             time.sleep(sleep_for)
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
         pass
     finally:
+        if sct_ctx is not None:
+            try:
+                sct_ctx.close()
+            except Exception:
+                pass
         conn.close()
 
 
@@ -706,14 +758,42 @@ def unique_target_path(folder: str, filename: str) -> str:
     return candidate
 
 
+TRANSFER_CHUNK_SIZE = 512 * 1024
+
+
 class ThreadingHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    request_queue_size = 32
+    allow_reuse_address = True
 
 
 def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event) -> None:
     class Handler(http.server.BaseHTTPRequestHandler):
+        rbufsize = TRANSFER_CHUNK_SIZE
+        wbufsize = TRANSFER_CHUNK_SIZE
+        protocol_version = "HTTP/1.1"
+
+        def setup(self):
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+            except OSError:
+                pass
+            super().setup()
+
         def log_message(self, format, *args):
             return
+
+        def _send_json(self, code: int, payload: dict) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
 
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
@@ -722,6 +802,8 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 os.makedirs(folder, exist_ok=True)
                 items = []
                 for entry in sorted(os.listdir(folder)):
+                    if entry.endswith(".gptpart"):
+                        continue
                     full = os.path.join(folder, entry)
                     if os.path.isfile(full):
                         st = os.stat(full)
@@ -730,12 +812,16 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                             "size": st.st_size,
                             "modifiedMs": int(st.st_mtime * 1000),
                         })
-                body = json.dumps({"folder": folder, "files": items}).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_json(200, {"folder": folder, "files": items})
+            elif parsed.path == "/upload-status":
+                params = urllib.parse.parse_qs(parsed.query)
+                sid = params.get("session", [""])[0].strip()
+                existing = 0
+                if sid:
+                    part_entry = state.upload_parts.get(sid)
+                    if part_entry and os.path.isfile(part_entry[0]):
+                        existing = os.path.getsize(part_entry[0])
+                self._send_json(200, {"bytes": existing})
             elif parsed.path == "/download":
                 params = urllib.parse.parse_qs(parsed.query)
                 raw_name = params.get("name", [""])[0]
@@ -745,73 +831,179 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                     self.send_error(404, "File not found")
                     return
                 size = os.path.getsize(full)
-                self.send_response(200)
+                range_hdr = self.headers.get("Range", "")
+                start_offset = 0
+                end_offset = max(0, size - 1)
+                is_partial = False
+                if range_hdr.startswith("bytes="):
+                    spec = range_hdr[6:].split(",")[0].strip()
+                    p_start, _, p_end = spec.partition("-")
+                    if p_start.isdigit():
+                        start_offset = min(int(p_start), size)
+                        if p_end.isdigit():
+                            end_offset = min(int(p_end), max(0, size - 1))
+                        is_partial = True
+
+                to_send = max(0, end_offset - start_offset + 1) if size > 0 else 0
+                state.transfer_cancel_event.clear()
+                self.send_response(206 if is_partial else 200)
                 self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Accept-Ranges", "bytes")
+                if is_partial and size > 0:
+                    self.send_header("Content-Range", f"bytes {start_offset}-{end_offset}/{size}")
                 self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
-                self.send_header("Content-Length", str(size))
+                self.send_header("Content-Length", str(to_send))
+                self.send_header("Connection", "close")
                 self.end_headers()
-                sent = 0
+
+                sent_this_conn = 0
                 last_notify = 0
                 start_ts = time.monotonic()
-                state.update_transfer("Sending to Phone", safe_name, 0, size, True, 0.0)
+                state.update_transfer("Sending to Phone", safe_name, start_offset, size, True, 0.0)
+                cancelled = False
                 try:
                     with open(full, "rb") as fh:
-                        while True:
-                            chunk = fh.read(65536)
+                        if start_offset > 0:
+                            fh.seek(start_offset)
+                        remaining = to_send
+                        while remaining > 0:
+                            if state.transfer_cancel_event.is_set():
+                                cancelled = True
+                                break
+                            chunk = fh.read(min(TRANSFER_CHUNK_SIZE, remaining))
                             if not chunk:
                                 break
                             self.wfile.write(chunk)
-                            sent += len(chunk)
-                            if sent - last_notify >= 131072 or sent == size:
-                                last_notify = sent
-                                spd = sent / max(0.001, time.monotonic() - start_ts)
-                                state.update_transfer("Sending to Phone", safe_name, sent, size, True, spd)
+                            sent_this_conn += len(chunk)
+                            remaining -= len(chunk)
+                            total_done = start_offset + sent_this_conn
+                            if sent_this_conn - last_notify >= TRANSFER_CHUNK_SIZE or remaining == 0:
+                                last_notify = sent_this_conn
+                                spd = sent_this_conn / max(0.001, time.monotonic() - start_ts)
+                                state.update_transfer("Sending to Phone", safe_name, total_done, size, True, spd)
+                    self.wfile.flush()
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+                    cancelled = state.transfer_cancel_event.is_set()
                 finally:
-                    final_spd = sent / max(0.001, time.monotonic() - start_ts)
-                    state.update_transfer("Sent to Phone", safe_name, sent, size, False, final_spd)
-                    if sent > 0:
-                        state.record_history("sent", safe_name, sent, full, final_spd)
+                    total_done = start_offset + sent_this_conn
+                    final_spd = sent_this_conn / max(0.001, time.monotonic() - start_ts)
+                    if cancelled:
+                        state.update_transfer("Cancelled", safe_name, total_done, size, False, 0.0)
+                        state.record_history("cancelled", safe_name, total_done, full, 0.0)
+                    elif total_done >= size:
+                        state.update_transfer("Sent to Phone", safe_name, total_done, size, False, final_spd)
+                        state.record_history("sent", safe_name, total_done, full, final_spd)
+                    else:
+                        state.update_transfer("Paused / Incomplete", safe_name, total_done, size, False, 0.0)
             else:
                 self.send_error(404)
 
         def do_POST(self):
             parsed = urllib.parse.urlparse(self.path)
             length = int(self.headers.get("Content-Length", "0"))
+            if parsed.path == "/transfer-cancel":
+                body_bytes = self.rfile.read(length) if 0 < length < 65536 else b""
+                sid = ""
+                try:
+                    sid = str(json.loads(body_bytes.decode("utf-8")).get("session", ""))
+                except Exception:
+                    pass
+                state.request_cancel_transfer(sid)
+                self._send_json(200, {"ok": True})
+                return
+
             if parsed.path == "/upload":
+                params = urllib.parse.parse_qs(parsed.query)
+                sid = params.get("session", [""])[0].strip()
+                offset = max(0, int(params.get("offset", ["0"])[0] or "0"))
+                total_param = max(0, int(params.get("total", [str(length)])[0] or str(length)))
+                total_expected = max(total_param, offset + length)
+
                 raw_name = urllib.parse.unquote(self.headers.get("X-Filename", "shared_file.bin"))
                 safe_name = sanitize_filename(raw_name)
-                dest = unique_target_path(state.shared_dir, safe_name)
+                os.makedirs(state.shared_dir, exist_ok=True)
+                if sid:
+                    part_entry = state.upload_parts.get(sid)
+                    part_path = part_entry[0] if part_entry else os.path.join(state.shared_dir, f".upload_{sanitize_filename(sid)}.gptpart")
+                    state.upload_parts[sid] = (part_path, safe_name)
+                    state.active_transfer_session = sid
+                else:
+                    part_path = unique_target_path(state.shared_dir, safe_name)
+
+                state.transfer_cancel_event.clear()
                 remaining = length
                 received = 0
                 last_notify = 0
                 start_ts = time.monotonic()
-                state.update_transfer("Receiving from Phone", safe_name, 0, length, True, 0.0)
+                state.update_transfer("Receiving from Phone", safe_name, offset, total_expected, True, 0.0)
+                cancelled = False
+                completed = False
+                saved_path = part_path
                 try:
-                    with open(dest, "wb") as out:
+                    mode = "r+b" if (offset > 0 and os.path.exists(part_path)) else "wb"
+                    with open(part_path, mode) as out:
+                        if offset > 0 and mode == "r+b":
+                            out.seek(offset)
                         while remaining > 0:
-                            chunk = self.rfile.read(min(65536, remaining))
+                            if state.transfer_cancel_event.is_set():
+                                cancelled = True
+                                break
+                            chunk = self.rfile.read(min(TRANSFER_CHUNK_SIZE, remaining))
                             if not chunk:
                                 break
                             out.write(chunk)
                             remaining -= len(chunk)
                             received += len(chunk)
-                            if received - last_notify >= 131072 or remaining == 0:
+                            overall_done = offset + received
+                            if received - last_notify >= TRANSFER_CHUNK_SIZE or remaining == 0:
                                 last_notify = received
                                 spd = received / max(0.001, time.monotonic() - start_ts)
-                                state.update_transfer("Receiving from Phone", safe_name, received, length, True, spd)
-                finally:
+                                state.update_transfer("Receiving from Phone", safe_name, overall_done, total_expected, True, spd)
+                    overall_done = offset + received
+                    if cancelled:
+                        try:
+                            if sid:
+                                state.upload_parts.pop(sid, None)
+                            if os.path.exists(part_path):
+                                os.remove(part_path)
+                        except OSError:
+                            pass
+                        state.update_transfer("Cancelled", safe_name, overall_done, total_expected, False, 0.0)
+                        state.record_history("cancelled", safe_name, overall_done, "", 0.0)
+                        self._send_json(499, {"ok": False, "cancelled": True})
+                        return
+
                     final_spd = received / max(0.001, time.monotonic() - start_ts)
-                    saved_name = os.path.basename(dest)
-                    state.update_transfer("Received from Phone", saved_name, received, length, False, final_spd)
-                    if received > 0:
-                        state.record_history("received", saved_name, received, dest, final_spd)
-                state.notify_files_changed()
-                resp = json.dumps({"ok": True, "savedAs": os.path.basename(dest)}).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(resp)))
-                self.end_headers()
-                self.wfile.write(resp)
+                    if sid and (total_expected <= 0 or overall_done >= total_expected):
+                        final_dest = unique_target_path(state.shared_dir, safe_name)
+                        os.replace(part_path, final_dest)
+                        state.upload_parts.pop(sid, None)
+                        saved_path = final_dest
+                        completed = True
+                    elif not sid and remaining == 0:
+                        completed = True
+
+                    saved_name = os.path.basename(saved_path if completed else safe_name)
+                    if completed:
+                        state.update_transfer("Received from Phone", saved_name, overall_done, total_expected, False, final_spd)
+                        state.record_history("received", saved_name, overall_done, saved_path, final_spd)
+                        state.notify_files_changed()
+                        self._send_json(200, {"ok": True, "savedAs": saved_name, "received": overall_done})
+                    else:
+                        state.update_transfer("Paused", safe_name, overall_done, total_expected, False, 0.0)
+                        self._send_json(200, {"ok": True, "paused": True, "received": overall_done})
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+                    overall_done = offset + received
+                    if state.transfer_cancel_event.is_set() and os.path.exists(part_path):
+                        try:
+                            os.remove(part_path)
+                        except OSError:
+                            pass
+                        state.update_transfer("Cancelled", safe_name, overall_done, total_expected, False, 0.0)
+                    elif sid:
+                        state.update_transfer("Paused", safe_name, overall_done, total_expected, False, 0.0)
+                    else:
+                        state.update_transfer("Failed", safe_name, overall_done, total_expected, False, 0.0)
             elif parsed.path == "/phone-frame":
                 if length <= 0 or length > 5 * 1024 * 1024:
                     self.send_error(400)
@@ -955,6 +1147,23 @@ def run_windows_desktop_app(
     root.geometry("940x560")
     root.minsize(880, 520)
     root.configure(bg="#0B0E14")
+
+    def resolve_ico_path() -> str | None:
+        base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        for cand in [
+            os.path.join(base_dir, "gpt_remote.ico"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpt_remote.ico"),
+        ]:
+            if os.path.isfile(cand):
+                return cand
+        return None
+
+    ico_file = resolve_ico_path()
+    if ico_file:
+        try:
+            root.iconbitmap(ico_file)
+        except Exception:
+            pass
 
     BG = "#0B0E14"
     CARD = "#151A24"
@@ -1343,6 +1552,22 @@ def run_windows_desktop_app(
     tk.Label(prog_hdr, textvariable=transfer_title_var, bg=CARD, fg=TXT, font=("Segoe UI", 10, "bold")).pack(
         side="left"
     )
+
+    transfer_cancel_btn = tk.Button(
+        prog_hdr,
+        text="Cancel",
+        command=lambda: state.request_cancel_transfer(),
+        bg="#3B1A1E",
+        fg="#F87171",
+        activebackground="#5A2229",
+        activeforeground="#FFFFFF",
+        relief="flat",
+        font=("Segoe UI", 8, "bold"),
+        padx=8,
+        pady=2,
+        cursor="hand2",
+    )
+
     transfer_pct_lbl = tk.Label(
         prog_hdr, textvariable=transfer_pct_var, bg=CARD, fg=ORANGE, font=("Segoe UI", 10, "bold")
     )
@@ -1370,11 +1595,16 @@ def run_windows_desktop_app(
     def refresh_transfer():
         info = state.transfer_info
         if not info:
+            transfer_cancel_btn.pack_forget()
             transfer_title_var.set("File Transfer Ready")
             transfer_pct_var.set("")
             transfer_detail_var.set("Progress appears here when sending or receiving files")
             draw_progress_bar(0.0, False)
             return
+        if info.get("active"):
+            transfer_cancel_btn.pack(side="right", padx=(0, 8))
+        else:
+            transfer_cancel_btn.pack_forget()
         total = max(1, info["total"])
         done = info["done"]
         frac = min(1.0, done / total) if info["total"] > 0 else (1.0 if not info["active"] else 0.5)
@@ -1384,7 +1614,9 @@ def run_windows_desktop_app(
         speed_txt = format_speed(info.get("speed_bps", 0.0))
         transfer_title_var.set(f"{info['direction']}: {info['filename']}")
         transfer_pct_var.set(f"{pct}%")
-        transfer_pct_lbl.configure(fg=ORANGE if info["active"] else GREEN)
+        d_lower = str(info.get("direction", "")).lower()
+        pct_color = "#FBBF24" if ("pause" in d_lower or "cancel" in d_lower) else (ORANGE if info["active"] else GREEN)
+        transfer_pct_lbl.configure(fg=pct_color)
         transfer_detail_var.set(f"{done_mb:.2f} MB / {tot_mb:.2f} MB   •   {speed_txt}")
         draw_progress_bar(frac, info["active"])
 
@@ -1431,6 +1663,24 @@ def run_windows_desktop_app(
             return f"{sz / (1024.0 * 1024.0):.1f} MB"
         return f"{max(1, sz // 1024)} KB"
 
+    def file_badge_and_color(filename: str) -> tuple[str, str]:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in (".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"):
+            return "[VID]", "#38BDF8"
+        if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"):
+            return "[IMG]", "#F472B6"
+        if ext == ".apk":
+            return "[APK]", "#34D399"
+        if ext == ".pdf":
+            return "[PDF]", "#F87171"
+        if ext in (".zip", ".rar", ".7z", ".tar", ".gz"):
+            return "[ZIP]", "#FBBF24"
+        if ext in (".mp3", ".wav", ".m4a", ".aac", ".flac"):
+            return "[AUD]", "#2DD4BF"
+        if ext in (".exe", ".msi"):
+            return "[APP]", "#A78BFA"
+        return "[FILE]", TXT
+
     def refresh_files():
         files_listbox.delete(0, tk.END)
         visible_paths.clear()
@@ -1456,29 +1706,40 @@ def run_windows_desktop_app(
 
         if mode == "all":
             entries = sorted(
-                e for e in os.listdir(state.shared_dir) if os.path.isfile(os.path.join(state.shared_dir, e))
+                e for e in os.listdir(state.shared_dir)
+                if not e.endswith(".gptpart") and os.path.isfile(os.path.join(state.shared_dir, e))
             )
             if not entries:
                 files_listbox.insert(tk.END, "  (Folder empty — click + Share File or send from phone)")
             else:
-                for e in entries:
+                for row_idx, e in enumerate(entries):
                     full = os.path.join(state.shared_dir, e)
                     sz = os.path.getsize(full)
+                    badge, color = file_badge_and_color(e)
                     visible_paths.append(full)
-                    files_listbox.insert(tk.END, f"  {e}    ({format_size_short(sz)})")
+                    files_listbox.insert(tk.END, f"  {badge}  {e}    ({format_size_short(sz)})")
+                    try:
+                        files_listbox.itemconfig(row_idx, fg=color)
+                    except Exception:
+                        pass
         else:
             items = [h for h in state.transfer_history if h["kind"] == mode]
             if not items:
                 label = "sent to phone" if mode == "sent" else "received from phone"
                 files_listbox.insert(tk.END, f"  (No files {label} in this session yet)")
             else:
-                for h in items:
+                for row_idx, h in enumerate(items):
                     spd = format_speed(h.get("speed_bps", 0.0))
+                    badge, color = file_badge_and_color(h["filename"])
                     visible_paths.append(h["path"])
                     files_listbox.insert(
                         tk.END,
-                        f"  [{h['ts']}]  {h['filename']}    ({format_size_short(h['size'])} • {spd})",
+                        f"  [{h['ts']}]  {badge}  {h['filename']}    ({format_size_short(h['size'])} • {spd})",
                     )
+                    try:
+                        files_listbox.itemconfig(row_idx, fg=color)
+                    except Exception:
+                        pass
 
     def set_history_mode(mode: str):
         history_mode.set(mode)
@@ -1689,7 +1950,20 @@ def run_windows_tray_bridge(
     user32.DefWindowProcW.restype = LRESULT
 
     hinstance = kernel32.GetModuleHandleW(None)
-    hicon = shell32.ExtractIconW(hinstance, "shell32.dll", 15)
+    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    ico_candidates = [
+        os.path.join(base_dir, "gpt_remote.ico"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpt_remote.ico"),
+    ]
+    hicon = None
+    for ico_path in ico_candidates:
+        if os.path.isfile(ico_path):
+            loaded = user32.LoadImageW(None, ico_path, 1, 0, 0, 0x0010 | 0x0040)
+            if loaded:
+                hicon = loaded
+                break
+    if not hicon:
+        hicon = shell32.ExtractIconW(hinstance, "shell32.dll", 15)
     if not hicon or hicon == 1:
         hicon = user32.LoadIconW(None, ctypes.cast(32512, wintypes.LPCWSTR))
 

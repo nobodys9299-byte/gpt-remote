@@ -1,25 +1,70 @@
-<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="320dp"
     android:height="180dp"
     android:viewportWidth="320"
     android:viewportHeight="180">
+
+    <!-- Deep Gradient Background -->
+    <path android:pathData="M0,0h320v180h-320z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="320"
+                android:endY="180"
+                android:startX="0"
+                android:startY="0"
+                android:type="linear">
+                <item android:color="#0A1124" android:offset="0.0" />
+                <item android:color="#162344" android:offset="0.55" />
+                <item android:color="#081A2E" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
     <path
-        android:fillColor="#0B1324"
-        android:pathData="M0,0h320v180h-320z" />
+        android:fillAlpha="0.35"
+        android:fillColor="#132245"
+        android:pathData="M0,128L320,68v112h-320z" />
+
+    <!-- Emblem Card Left -->
     <path
-        android:fillColor="#13223F"
-        android:pathData="M0,120L320,70v110h-320z" />
+        android:fillColor="#0D162B"
+        android:pathData="M34,42h84a10,10 0,0 1,10 10v56a10,10 0,0 1,-10 10h-84a10,10 0,0 1,-10 -10v-56a10,10 0,0 1,10 -10z"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="3.5" />
     <path
-        android:fillColor="#22D3EE"
-        android:pathData="M42,54h56a6,6 0,0 1,6 6v38a6,6 0,0 1,-6 6h-56a6,6 0,0 1,-6 -6v-38a6,6 0,0 1,6 -6z" />
+        android:fillColor="#00000000"
+        android:pathData="M56,74 A23,23 0 0,1 96,74"
+        android:strokeColor="#22D3EE"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.6" />
     <path
-        android:fillColor="#0A1020"
-        android:pathData="M46,59h48v34h-48z" />
+        android:fillColor="#00000000"
+        android:pathData="M64,81 A13,13 0 0,1 88,81"
+        android:strokeColor="#FF8C3A"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.2" />
+    <path
+        android:fillColor="#FF6900"
+        android:pathData="M76,83 A8.5,8.5 0 1,0 76,100 A8.5,8.5 0 1,0 76,83 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M76,88 A3.5,3.5 0 1,0 76,95 A3.5,3.5 0 1,0 76,88 Z" />
     <path
         android:fillColor="#38BDF8"
-        android:pathData="M58,110h24v5h-24z" />
+        android:pathData="M56,125h40a2.5,2.5 0,0 1,0 5h-40a2.5,2.5 0,0 1,0 -5z" />
+
+    <!-- Crisp Graphic Companion Accent Bars & Badge Right -->
     <path
-        android:fillColor="#22D3EE"
-        android:pathData="M62,76c0,-4.4 3.6,-8 8,-8s8,3.6 8,8 -3.6,8 -8,8 -8,-3.6 -8,-8z" />
+        android:fillColor="#FFFFFF"
+        android:pathData="M150,62h42a4,4 0,0 1,0 8h-42a4,4 0,0 1,0 -8z" />
+    <path
+        android:fillColor="#FF6900"
+        android:pathData="M200,62h24a4,4 0,0 1,0 8h-24a4,4 0,0 1,0 -8z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M150,82h112a5,5 0,0 1,0 10h-112a5,5 0,0 1,0 -10z" />
+    <path
+        android:fillAlpha="0.65"
+        android:fillColor="#94A3B8"
+        android:pathData="M150,104h86a4,4 0,0 1,0 8h-86a4,4 0,0 1,0 -8z" />
 </vector>

@@ -18,9 +18,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -32,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.gptremote.mitv.haptic.HapticStrength
 import com.gptremote.mitv.ui.theme.AppAccentTheme
+import com.gptremote.mitv.ui.theme.MiOrange
 import com.gptremote.mitv.ui.theme.RemoteBorder
 import com.gptremote.mitv.ui.theme.RemoteSurface
 import com.gptremote.mitv.ui.theme.RemoteSurfaceElevated
@@ -93,10 +96,21 @@ fun SettingsSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     HapticStrength.entries.forEach { level ->
+                        val chipSelected = hapticStrength == level
                         FilterChip(
-                            selected = hapticStrength == level,
+                            selected = chipSelected,
                             onClick = { onSelectHapticStrength(level) },
                             label = { Text(level.label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MiOrange.copy(alpha = 0.25f),
+                                selectedLabelColor = TextPrimary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                enabled = true,
+                                selected = chipSelected,
+                                borderColor = RemoteBorder,
+                                selectedBorderColor = MiOrange
+                            ),
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -129,7 +143,11 @@ fun SettingsSheet(
                 }
                 Switch(
                     checked = soundEnabled,
-                    onCheckedChange = onToggleSound
+                    onCheckedChange = onToggleSound,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = MiOrange
+                    )
                 )
             }
 

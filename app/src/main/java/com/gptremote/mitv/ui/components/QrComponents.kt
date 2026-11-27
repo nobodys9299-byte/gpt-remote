@@ -4,9 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color as AndroidColor
+import android.util.Size
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -29,6 +31,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.FlashOff
+import androidx.compose.material.icons.rounded.FlashOn
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -60,7 +64,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
+import com.google.zxing.LuminanceSource
 import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.common.GlobalHistogramBinarizer
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import com.google.zxing.qrcode.QRCodeWriter
@@ -121,6 +127,8 @@ fun QrScannerDialog(
 
     val scannedOnce = remember { AtomicBoolean(false) }
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
+    var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    var torchEnabled by remember { mutableStateOf(false) }
     val previewView = remember {
         PreviewView(context).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -129,6 +137,10 @@ fun QrScannerDialog(
             )
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
+    }
+
+    LaunchedEffect(torchEnabled, boundCamera) {
+        runCatching { boundCamera?.cameraControl?.enableTorch(torchEnabled) }
     }
 
     DisposableEffect(hasCameraPermission) {
@@ -143,9 +155,15 @@ fun QrScannerDialog(
                         setSurfaceProvider(previewView.surfaceProvider)
                     }
                     val reader = QRCodeReader()
-                    val hints = mapOf(DecodeHintType.TRY_HARDER to true)
+                    val hints = mapOf(
+                        DecodeHintType.TRY_HARDER to true,
+                        DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+                        DecodeHintType.ALSO_INVERTED to true
+                    )
 
+                    @Suppress("DEPRECATION")
                     val analysis = ImageAnalysis.Builder()
+                        .setTargetResolution(Size(1280, 720))
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
 
@@ -153,30 +171,64 @@ fun QrScannerDialog(
                         try {
                             if (scannedOnce.get()) return@setAnalyzer
                             val plane = image.planes[0]
+                            val w = image.width
+                            val h = image.height
+                            val rowStride = plane.rowStride
+                            val pixelStride = plane.pixelStride
                             val buf = plane.buffer
-                            val bytes = ByteArray(buf.remaining())
-                            buf.get(bytes)
-
-                            val src = PlanarYUVLuminanceSource(
-                                bytes,
-                                plane.rowStride,
-                                image.height,
-                                0,
-                                0,
-                                image.width,
-                                image.height,
-                                false
-                            )
-                            val result = runCatching {
-                                reader.decode(BinaryBitmap(HybridBinarizer(src)), hints)
-                            }.getOrElse {
-                                runCatching {
-                                    val rotated = src.rotateCounterClockwise()
-                                    reader.decode(BinaryBitmap(HybridBinarizer(rotated)), hints)
-                                }.getOrNull()
+                            val packed = ByteArray(w * h)
+                            if (pixelStride == 1 && rowStride == w && buf.remaining() >= w * h) {
+                                buf.get(packed, 0, w * h)
+                            } else {
+                                val rowBuf = ByteArray(rowStride)
+                                for (row in 0 until h) {
+                                    val copyLen = minOf(rowStride, buf.remaining())
+                                    if (copyLen <= 0) break
+                                    buf.get(rowBuf, 0, copyLen)
+                                    val outOff = row * w
+                                    if (pixelStride == 1) {
+                                        System.arraycopy(rowBuf, 0, packed, outOff, minOf(w, copyLen))
+                                    } else {
+                                        var col = 0
+                                        var idx = 0
+                                        while (col < w && idx < copyLen) {
+                                            packed[outOff + col] = rowBuf[idx]
+                                            col++
+                                            idx += pixelStride
+                                        }
+                                    }
+                                }
                             }
 
-                            val text = result?.text
+                            val fullSrc = PlanarYUVLuminanceSource(packed, w, h, 0, 0, w, h, false)
+                            val cropW = (w * 0.72f).toInt().coerceAtLeast(160).coerceAtMost(w)
+                            val cropH = (h * 0.72f).toInt().coerceAtLeast(160).coerceAtMost(h)
+                            val cropLeft = (w - cropW) / 2
+                            val cropTop = (h - cropH) / 2
+                            val centerSrc = PlanarYUVLuminanceSource(
+                                packed, w, h, cropLeft, cropTop, cropW, cropH, false
+                            )
+
+                            fun tryDecode(source: LuminanceSource): String? {
+                                val direct = runCatching {
+                                    reader.decode(BinaryBitmap(HybridBinarizer(source)), hints)
+                                }.getOrNull()?.text
+                                if (!direct.isNullOrBlank()) return direct
+                                reader.reset()
+                                val global = runCatching {
+                                    reader.decode(BinaryBitmap(GlobalHistogramBinarizer(source)), hints)
+                                }.getOrNull()?.text
+                                if (!global.isNullOrBlank()) return global
+                                reader.reset()
+                                return runCatching {
+                                    reader.decode(BinaryBitmap(HybridBinarizer(source.invert())), hints)
+                                }.getOrNull()?.text
+                            }
+
+                            val text = tryDecode(centerSrc)
+                                ?: tryDecode(fullSrc)
+                                ?: tryDecode(centerSrc.rotateCounterClockwise())
+
                             if (!text.isNullOrBlank() && scannedOnce.compareAndSet(false, true)) {
                                 ContextCompat.getMainExecutor(context).execute {
                                     onScanned(text)
@@ -189,7 +241,7 @@ fun QrScannerDialog(
                     }
 
                     camProvider.unbindAll()
-                    camProvider.bindToLifecycle(
+                    boundCamera = camProvider.bindToLifecycle(
                         lifecycleOwner,
                         CameraSelector.DEFAULT_BACK_CAMERA,
                         preview,
@@ -199,6 +251,7 @@ fun QrScannerDialog(
             }, ContextCompat.getMainExecutor(context))
         }
         onDispose {
+            boundCamera = null
             runCatching { provider?.unbindAll() }
             analyzerExecutor.shutdownNow()
         }
@@ -268,14 +321,30 @@ fun QrScannerDialog(
                     Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Text(subtitle, color = Color.White.copy(alpha = 0.78f), fontSize = 12.sp)
                 }
-                FilledTonalIconButton(
-                    onClick = onDismiss,
-                    colors = IconButtonDefaults.filledTonalIconButtonColors(
-                        containerColor = RemoteSurfaceElevated,
-                        contentColor = TextPrimary
-                    )
-                ) {
-                    Icon(Icons.Rounded.Close, contentDescription = "Close Scanner")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (hasCameraPermission) {
+                        FilledTonalIconButton(
+                            onClick = { torchEnabled = !torchEnabled },
+                            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                containerColor = if (torchEnabled) MiOrange else RemoteSurfaceElevated,
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Icon(
+                                imageVector = if (torchEnabled) Icons.Rounded.FlashOn else Icons.Rounded.FlashOff,
+                                contentDescription = "Toggle Flashlight"
+                            )
+                        }
+                    }
+                    FilledTonalIconButton(
+                        onClick = onDismiss,
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = RemoteSurfaceElevated,
+                            contentColor = TextPrimary
+                        )
+                    ) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Close Scanner")
+                    }
                 }
             }
 
@@ -297,7 +366,7 @@ fun QrScannerDialog(
                         .padding(horizontal = 18.dp, vertical = 10.dp)
                 ) {
                     Text(
-                        text = "Align QR code inside the orange frame",
+                        text = "Align QR code inside the frame",
                         color = Color.White,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium

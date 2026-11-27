@@ -46,6 +46,13 @@ sealed interface TvDevice {
                         lower.contains("pc") || lower.contains("laptop") || lower.contains("desktop") ||
                         lower.contains("mac") || lower.contains("win") || lower.contains("linux")
                 }
+                ProductType.SMART_BULB -> {
+                    lower.contains("bulb") || lower.contains("light") || lower.contains("lamp") ||
+                        lower.contains("led") || lower.contains("wipro") || lower.contains("tuya") ||
+                        lower.contains("smartlife") || lower.contains("yeelight") || lower.contains("syska") ||
+                        lower.contains("philips") || lower.contains("hue") || lower.contains("halonix") ||
+                        lower.contains("esp_") || lower.contains("ble_light")
+                }
                 else -> true
             }
         }

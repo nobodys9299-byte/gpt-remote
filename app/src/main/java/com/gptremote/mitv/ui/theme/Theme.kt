@@ -16,6 +16,7 @@ enum class AppAccentTheme(val label: String, val primary: Color, val soft: Color
 }
 
 val LocalAccentColor = compositionLocalOf { Color(0xFFFF6900) }
+val LocalAccentSoft = compositionLocalOf { Color(0xFFFF8C3A) }
 
 val MiOrange: Color
     @Composable get() = LocalAccentColor.current
@@ -37,8 +38,14 @@ fun MiTvRemoteTheme(
     val colors = darkColorScheme(
         primary = accentTheme.primary,
         onPrimary = Color.White,
-        secondary = WifiBlue,
+        primaryContainer = accentTheme.primary.copy(alpha = 0.24f),
+        onPrimaryContainer = TextPrimary,
+        secondary = accentTheme.soft,
         onSecondary = Color(0xFF062033),
+        secondaryContainer = accentTheme.primary.copy(alpha = 0.20f),
+        onSecondaryContainer = accentTheme.soft,
+        tertiary = WifiBlue,
+        inversePrimary = accentTheme.soft,
         background = RemoteBg,
         onBackground = TextPrimary,
         surface = RemoteSurface,
@@ -49,7 +56,10 @@ fun MiTvRemoteTheme(
         error = Color(0xFFF87171),
         onError = Color.Black
     )
-    CompositionLocalProvider(LocalAccentColor provides accentTheme.primary) {
+    CompositionLocalProvider(
+        LocalAccentColor provides accentTheme.primary,
+        LocalAccentSoft provides accentTheme.soft
+    ) {
         MaterialTheme(
             colorScheme = colors,
             content = content

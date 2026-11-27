@@ -1,6 +1,7 @@
 package com.gptremote.mitv.wifi
 
 import com.gptremote.mitv.ir.IrBlasterManager
+import com.gptremote.mitv.model.ActiveSessionKind
 import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.DeviceCategory
 import com.gptremote.mitv.model.ProductCatalog
@@ -196,5 +197,55 @@ class ProtoWireTest {
         assertTrue(envelope.contains("u:SetAVTransportURI"))
         assertTrue(envelope.contains("Holiday &amp;amp; Fun &amp;lt;4K&amp;gt;"))
         assertTrue(envelope.contains("object.item.videoItem"))
+    }
+
+    @Test
+    fun smartBulbFilteringAndTuya33PacketFraming() {
+        val tv = TvDevice.BluetoothTv("11:22:33:44:55:66", "MiTV-AXS02", isBonded = true)
+        val car = TvDevice.BluetoothTv("22:33:44:55:66:77", "My Car", isBonded = true)
+        val buds = TvDevice.BluetoothTv("33:44:55:66:77:88", "realme Buds Wireless 3", isBonded = true)
+        val bulb = TvDevice.BluetoothTv("44:55:66:77:88:99", "Wipro Smart Bulb", isBonded = true)
+        assertFalse(tv.matchesProduct(ProductType.SMART_BULB))
+        assertFalse(car.matchesProduct(ProductType.SMART_BULB))
+        assertFalse(buds.matchesProduct(ProductType.SMART_BULB))
+        assertTrue(bulb.matchesProduct(ProductType.SMART_BULB))
+
+        val pkt = SmartBulbClient.buildTuya33Packet(
+            seq = 7,
+            payloadJson = """{"devId":"bf1234","dps":{"20":true}}""",
+            localKey = "0123456789abcdef"
+        )
+        assertTrue(pkt.size > 32)
+        // Prefix 00 00 55 AA
+        assertEquals(0x00.toByte(), pkt[0])
+        assertEquals(0x00.toByte(), pkt[1])
+        assertEquals(0x55.toByte(), pkt[2])
+        assertEquals(0xAA.toByte(), pkt[3])
+        // Tuya 3.3 tag at offset 16..18
+        assertEquals('3'.code.toByte(), pkt[16])
+        assertEquals('.'.code.toByte(), pkt[17])
+        assertEquals('3'.code.toByte(), pkt[18])
+        // Suffix 00 00 AA 55
+        assertEquals(0x00.toByte(), pkt[pkt.size - 4])
+        assertEquals(0x00.toByte(), pkt[pkt.size - 3])
+        assertEquals(0xAA.toByte(), pkt[pkt.size - 2])
+        assertEquals(0x55.toByte(), pkt[pkt.size - 1])
+    }
+
+    @Test
+    fun multiSessionRoutingPrioritizesPrimaryRemoteAndListsAllSessions() {
+        val pcDevice = TvDevice.WifiPc("192.168.1.5:58765", "DESKTOP-JLDTF6M", "192.168.1.5")
+        val bulb = DiscoveredSmartBulb("192.168.1.60", "Wipro Bulb", BulbProtocol.TUYA_LAN, deviceId = "dev123")
+        val state = RemoteUiState(
+            status = ConnectionStatus.Connected(pcDevice),
+            peerPhoneName = "TB328XU",
+            connectedBulb = bulb
+        )
+        assertEquals(ProductType.PC_LAPTOP, state.connectedBrandOption?.productType)
+        assertEquals("DESKTOP-JLDTF6M", state.connectedDeviceName)
+        assertEquals(3, state.activeSessions.size)
+        assertEquals(ActiveSessionKind.PRIMARY_REMOTE, state.activeSessions[0].kind)
+        assertEquals(ActiveSessionKind.PHONE_PEER, state.activeSessions[1].kind)
+        assertEquals(ActiveSessionKind.SMART_BULB, state.activeSessions[2].kind)
     }
 }

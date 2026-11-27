@@ -539,6 +539,8 @@ fun ConnectProductSheet(
 
                 ConnectTab.WIFI_SMART_BULB -> {
                     var showAdvancedIp by remember { mutableStateOf(false) }
+                    var tuyaDeviceId by remember { mutableStateOf(uiState.connectedBulb?.deviceId.orEmpty()) }
+                    var tuyaLocalKey by remember { mutableStateOf("") }
                     Text(
                         text = "Auto-discovers Wi-Fi (Philips WiZ, Mi/Yeelight, Tuya/Wipro/Syska LAN) and Bluetooth LE smart bulbs nearby.",
                         color = TextSecondary,
@@ -563,34 +565,62 @@ fun ConnectProductSheet(
                         modifier = Modifier.align(Alignment.Start)
                     ) {
                         Text(
-                            text = if (showAdvancedIp) "Hide Manual IP" else "Advanced: Enter Bulb IP Manually",
+                            text = if (showAdvancedIp) "Hide Manual IP / Wipro Key" else "Advanced: Bulb IP & Wipro/Tuya LocalKey",
                             color = WifiBlue,
                             fontSize = 12.sp
                         )
                     }
 
                     if (showAdvancedIp) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            OutlinedTextField(
-                                value = manualIp,
-                                onValueChange = { manualIp = it },
-                                label = { Text("Bulb IP Address") },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Button(
-                                onClick = {
-                                    onConnectManualBulb(manualIp)
-                                    onDismiss()
-                                },
-                                enabled = manualIp.isNotBlank(),
-                                colors = ButtonDefaults.buttonColors(containerColor = MiOrange)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Go")
+                                OutlinedTextField(
+                                    value = manualIp,
+                                    onValueChange = { manualIp = it },
+                                    label = { Text("Bulb IP Address") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Button(
+                                    onClick = {
+                                        val spec = buildString {
+                                            append(manualIp.trim())
+                                            if (tuyaDeviceId.isNotBlank() || tuyaLocalKey.isNotBlank()) {
+                                                append('|').append(tuyaDeviceId.trim())
+                                                append('|').append(tuyaLocalKey.trim())
+                                            }
+                                        }
+                                        onConnectManualBulb(spec)
+                                        onDismiss()
+                                    },
+                                    enabled = manualIp.isNotBlank(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MiOrange)
+                                ) {
+                                    Text("Go")
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = tuyaDeviceId,
+                                    onValueChange = { tuyaDeviceId = it },
+                                    label = { Text("Tuya Device ID (opt.)") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = tuyaLocalKey,
+                                    onValueChange = { tuyaLocalKey = it },
+                                    label = { Text("16-char LocalKey (opt.)") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
                             }
                         }
                     }
@@ -610,6 +640,8 @@ fun ConnectProductSheet(
                                 accent = MiOrange,
                                 isPc = false,
                                 onClick = {
+                                    manualIp = bulb.host
+                                    if (bulb.deviceId.isNotBlank()) tuyaDeviceId = bulb.deviceId
                                     onSelectBulb(bulb)
                                     onDismiss()
                                 }

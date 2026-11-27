@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,17 +22,20 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.AcUnit
 import androidx.compose.material.icons.rounded.Air
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Kitchen
 import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.LocalLaundryService
 import androidx.compose.material.icons.rounded.PhonelinkSetup
+import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Speaker
@@ -66,6 +70,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
@@ -76,12 +81,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.gptremote.mitv.haptic.HapticStrength
+import com.gptremote.mitv.model.ActiveSessionItem
 import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.ProductType
 import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.ui.components.SettingsSheet
 import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.ui.theme.ConnectedGreen
+import com.gptremote.mitv.ui.theme.LocalAccentSoft
 import com.gptremote.mitv.ui.theme.MiOrange
 import com.gptremote.mitv.ui.theme.RemoteBg
 import com.gptremote.mitv.ui.theme.RemoteBorder
@@ -99,7 +106,10 @@ fun HomeHubScreen(
     onSelectHapticStrength: (HapticStrength) -> Unit,
     onToggleSound: (Boolean) -> Unit,
     onSelectAccentTheme: (AppAccentTheme) -> Unit,
-    onClearBanner: () -> Unit
+    onClearBanner: () -> Unit,
+    onOpenActiveSession: (ActiveSessionItem) -> Unit = { onOpenActiveRemote() },
+    onDisconnectSession: (ActiveSessionItem) -> Unit = { onDisconnect() },
+    onScanQrCode: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
@@ -108,10 +118,14 @@ fun HomeHubScreen(
 
     var productOrder by remember { mutableStateOf(loadProductOrder(context)) }
     val itemBounds = remember { mutableStateMapOf<ProductType, Rect>() }
+    var gridCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var draggedProduct by remember { mutableStateOf<ProductType?>(null) }
     var pointerRoot by remember { mutableStateOf(Offset.Zero) }
     var touchAnchorInItem by remember { mutableStateOf(Offset.Zero) }
     var lastSwapMs by remember { mutableLongStateOf(0L) }
+    val sessions = uiState.activeSessions
+    val accent = MiOrange
+    val accentSoft = LocalAccentSoft.current
 
     val statusError = (uiState.status as? ConnectionStatus.Error)?.message
     val bannerMessage = uiState.lastStatusBanner ?: statusError
@@ -151,45 +165,125 @@ fun HomeHubScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(
-                        text = "GPT Remote",
-                        color = TextPrimary,
-                        fontSize = 26.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "GPT Remote",
+                            color = TextPrimary,
+                            fontSize = 26.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(accent.copy(alpha = 0.18f))
+                                .border(1.dp, accent.copy(alpha = 0.55f), CircleShape)
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "HUB",
+                                color = accentSoft,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
                     Text(
                         text = if (draggedProduct != null) {
                             "Drag to place card anywhere"
                         } else {
                             "Tap a device • Hold & drag to reorder"
                         },
-                        color = if (draggedProduct != null) MiOrange else TextSecondary,
+                        color = if (draggedProduct != null) accent else TextSecondary,
                         fontSize = 13.sp
                     )
                 }
-                FilledTonalIconButton(
-                    onClick = { showSettings = true },
-                    colors = IconButtonDefaults.filledTonalIconButtonColors(
-                        containerColor = RemoteSurfaceElevated,
-                        contentColor = TextPrimary
-                    )
-                ) {
-                    Icon(Icons.Rounded.Settings, contentDescription = "Settings")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilledTonalIconButton(
+                        onClick = onScanQrCode,
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = accent.copy(alpha = 0.16f),
+                            contentColor = accent
+                        )
+                    ) {
+                        Icon(Icons.Rounded.QrCodeScanner, contentDescription = "Scan QR Code")
+                    }
+                    FilledTonalIconButton(
+                        onClick = { showSettings = true },
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = RemoteSurfaceElevated,
+                            contentColor = accent
+                        )
+                    ) {
+                        Icon(Icons.Rounded.Settings, contentDescription = "Settings")
+                    }
                 }
             }
 
             LazyVerticalGrid(
                 columns = GridCells.Fixed(2),
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onGloballyPositioned { gridCoords = it }
+                    .pointerInput(Unit) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { localPos ->
+                                val rootPos = gridCoords?.localToRoot(localPos) ?: return@detectDragGesturesAfterLongPress
+                                val hit = itemBounds.entries.firstOrNull { (_, rect) -> rect.contains(rootPos) }
+                                if (hit != null) {
+                                    draggedProduct = hit.key
+                                    pointerRoot = rootPos
+                                    touchAnchorInItem = rootPos - hit.value.topLeft
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+                            },
+                            onDrag = { change, dragAmount ->
+                                val active = draggedProduct ?: return@detectDragGesturesAfterLongPress
+                                change.consume()
+                                pointerRoot += dragAmount
+                                val now = System.currentTimeMillis()
+                                if (now - lastSwapMs >= 95L) {
+                                    val hit = itemBounds.entries.firstOrNull { (other, rect) ->
+                                        other != active && rect.contains(pointerRoot)
+                                    }?.key
+                                    if (hit != null) {
+                                        val fromIdx = productOrder.indexOf(active)
+                                        val toIdx = productOrder.indexOf(hit)
+                                        if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
+                                            val mutable = productOrder.toMutableList()
+                                            mutable.add(toIdx, mutable.removeAt(fromIdx))
+                                            productOrder = mutable
+                                            lastSwapMs = now
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        }
+                                    }
+                                }
+                            },
+                            onDragEnd = {
+                                if (draggedProduct != null) {
+                                    draggedProduct = null
+                                    saveProductOrder(context, productOrder)
+                                }
+                            },
+                            onDragCancel = {
+                                if (draggedProduct != null) {
+                                    draggedProduct = null
+                                    saveProductOrder(context, productOrder)
+                                }
+                            }
+                        )
+                    },
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 20.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                if (uiState.isConnected && uiState.connectedDeviceName != null) {
-                    val activeName = uiState.connectedDeviceName ?: "Device"
+                if (sessions.isNotEmpty()) {
+                    val primarySession = sessions.first()
                     item(span = { GridItemSpan(2) }) {
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(20.dp))
@@ -199,42 +293,106 @@ fun HomeHubScreen(
                                     )
                                 )
                                 .border(1.5.dp, ConnectedGreen.copy(alpha = 0.65f), RoundedCornerShape(20.dp))
-                                .clickable(onClick = onOpenActiveRemote)
+                                .clickable { onOpenActiveSession(primarySession) }
                                 .padding(14.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "Connected: $activeName",
-                                    color = ConnectedGreen,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = "Tap to open remote",
-                                    color = TextSecondary,
-                                    fontSize = 12.sp
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Button(
-                                onClick = onOpenActiveRemote,
-                                colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
-                                shape = RoundedCornerShape(12.dp)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Open")
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = if (sessions.size == 1) {
+                                            "Connected: ${primarySession.title}"
+                                        } else {
+                                            "Connected (${sessions.size}): ${primarySession.title}"
+                                        },
+                                        color = ConnectedGreen,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (sessions.size == 1) {
+                                            "${primarySession.subtitle} • Tap to open"
+                                        } else {
+                                            "Tap any active device pill below to switch"
+                                        },
+                                        color = TextSecondary,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Button(
+                                    onClick = { onOpenActiveSession(primarySession) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = accent),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text("Open")
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                OutlinedButton(
+                                    onClick = onDisconnect,
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text("Off")
+                                }
                             }
-                            Spacer(modifier = Modifier.width(6.dp))
-                            OutlinedButton(
-                                onClick = onDisconnect,
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Text("Off")
+
+                            if (sessions.size > 1) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    sessions.forEach { session ->
+                                        Row(
+                                            modifier = Modifier
+                                                .clip(CircleShape)
+                                                .background(Color(0xFF101622))
+                                                .border(1.dp, accent.copy(alpha = 0.55f), CircleShape)
+                                                .clickable { onOpenActiveSession(session) }
+                                                .padding(start = 10.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(7.dp)
+                                                    .clip(CircleShape)
+                                                    .background(ConnectedGreen)
+                                            )
+                                            Text(
+                                                text = "${session.title} • ${session.subtitle}",
+                                                color = TextPrimary,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                maxLines = 1
+                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(18.dp)
+                                                    .clip(CircleShape)
+                                                    .background(RemoteSurfaceElevated)
+                                                    .clickable { onDisconnectSession(session) },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Close,
+                                                    contentDescription = "Disconnect ${session.title}",
+                                                    tint = TextSecondary,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -248,63 +406,27 @@ fun HomeHubScreen(
                     } else {
                         Offset.Zero
                     }
-
-                    ProductCard(
-                        product = product,
-                        isDragged = isDragged,
+                    // Outer container stays un-translated so itemBounds never feedback-loops during drag swaps
+                    Box(
                         modifier = Modifier
-                            .zIndex(if (isDragged) 10f else 0f)
-                            .graphicsLayer {
+                            .zIndex(if (isDragged) 20f else 0f)
+                            .onGloballyPositioned { coords ->
+                                itemBounds[product] = coords.boundsInRoot()
+                            }
+                    ) {
+                        ProductCard(
+                            product = product,
+                            isDragged = isDragged,
+                            modifier = Modifier.graphicsLayer {
                                 translationX = delta.x
                                 translationY = delta.y
                                 scaleX = if (isDragged) 1.05f else 1f
                                 scaleY = if (isDragged) 1.05f else 1f
-                            }
-                            .onGloballyPositioned { coords ->
-                                itemBounds[product] = coords.boundsInRoot()
-                            }
-                            .pointerInput(product) {
-                                detectDragGesturesAfterLongPress(
-                                    onDragStart = { startOffset ->
-                                        val rect = itemBounds[product] ?: return@detectDragGesturesAfterLongPress
-                                        draggedProduct = product
-                                        touchAnchorInItem = startOffset
-                                        pointerRoot = rect.topLeft + startOffset
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        pointerRoot += dragAmount
-                                        val now = System.currentTimeMillis()
-                                        if (now - lastSwapMs >= 140L) {
-                                            val hit = itemBounds.entries.firstOrNull { (other, rect) ->
-                                                other != product && rect.contains(pointerRoot)
-                                            }?.key
-                                            if (hit != null) {
-                                                val fromIdx = productOrder.indexOf(product)
-                                                val toIdx = productOrder.indexOf(hit)
-                                                if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
-                                                    val mutable = productOrder.toMutableList()
-                                                    mutable.add(toIdx, mutable.removeAt(fromIdx))
-                                                    productOrder = mutable
-                                                    lastSwapMs = now
-                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                }
-                                            }
-                                        }
-                                    },
-                                    onDragEnd = {
-                                        draggedProduct = null
-                                        saveProductOrder(context, productOrder)
-                                    },
-                                    onDragCancel = {
-                                        draggedProduct = null
-                                        saveProductOrder(context, productOrder)
-                                    }
-                                )
+                                alpha = if (isDragged) 0.94f else 1f
                             },
-                        onClick = { onSelectProduct(product) }
-                    )
+                            onClick = { onSelectProduct(product) }
+                        )
+                    }
                 }
             }
         }

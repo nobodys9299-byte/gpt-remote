@@ -14,7 +14,9 @@ data class TransferProgress(
     val totalBytes: Long,
     val isUpload: Boolean,
     val isComplete: Boolean = false,
-    val bytesPerSec: Long = 0L
+    val bytesPerSec: Long = 0L,
+    val isPaused: Boolean = false,
+    val transferId: String = ""
 )
 
 data class TransferHistoryItem(
@@ -24,7 +26,24 @@ data class TransferHistoryItem(
     val isSent: Boolean,
     val bytesPerSec: Long,
     val timestampMs: Long,
-    val localUriString: String? = null
+    val localUriString: String? = null,
+    val statusLabel: String = if (isSent) "Sent" else "Received"
+)
+
+enum class ActiveSessionKind {
+    PRIMARY_REMOTE,
+    TV_COMPANION,
+    PHONE_PEER,
+    SMART_BULB
+}
+
+data class ActiveSessionItem(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val kind: ActiveSessionKind,
+    val targetProduct: ProductType,
+    val targetBrandId: String
 )
 
 sealed interface ConnectionStatus {
@@ -104,6 +123,21 @@ data class RemoteUiState(
 
     val connectedBrandOption: BrandOption?
         get() {
+            val dev = (status as? ConnectionStatus.Connected)?.device
+            if (dev != null) {
+                if (dev.category == DeviceCategory.LAPTOP_PC) {
+                    return ProductCatalog.brandsFor(ProductType.PC_LAPTOP)
+                        .firstOrNull { it.id == connectedBrandId }
+                        ?: ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
+                }
+                val matched = connectedBrandId?.let { id ->
+                    ProductType.entries.firstNotNullOfOrNull { pt ->
+                        if (pt == ProductType.PHONE_TO_PHONE || pt == ProductType.SMART_BULB || pt == ProductType.PC_LAPTOP) null
+                        else ProductCatalog.brandsFor(pt).firstOrNull { it.id == id }
+                    }
+                }
+                return matched ?: ProductCatalog.brandsFor(ProductType.SMART_TV).first()
+            }
             if (connectedTvCompanion != null) {
                 return ProductCatalog.brandsFor(ProductType.SMART_TV)
                     .firstOrNull { it.id == connectedBrandId }
@@ -115,19 +149,80 @@ data class RemoteUiState(
             if (peerPhoneName != null) {
                 return ProductCatalog.brandsFor(ProductType.PHONE_TO_PHONE).firstOrNull()
             }
-            val dev = (status as? ConnectionStatus.Connected)?.device ?: return null
-            if (dev.category == DeviceCategory.LAPTOP_PC) {
-                return ProductCatalog.brandsFor(ProductType.PC_LAPTOP)
-                    .firstOrNull { it.id == connectedBrandId }
-                    ?: ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
+            return null
+        }
+
+    val activeSessions: List<ActiveSessionItem>
+        get() = buildList {
+            val dev = (status as? ConnectionStatus.Connected)?.device
+            if (dev != null) {
+                val resolvedBrand = if (dev.category == DeviceCategory.LAPTOP_PC) {
+                    ProductCatalog.brandsFor(ProductType.PC_LAPTOP)
+                        .firstOrNull { it.id == connectedBrandId }
+                        ?: ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
+                } else {
+                    connectedBrandId?.let { id ->
+                        ProductType.entries.firstNotNullOfOrNull { pt ->
+                            if (pt == ProductType.PHONE_TO_PHONE || pt == ProductType.SMART_BULB || pt == ProductType.PC_LAPTOP) null
+                            else ProductCatalog.brandsFor(pt).firstOrNull { it.id == id }
+                        }
+                    } ?: ProductCatalog.brandsFor(ProductType.SMART_TV).first()
+                }
+                val prod = resolvedBrand.productType
+                add(
+                    ActiveSessionItem(
+                        id = "primary_${dev.id}",
+                        title = dev.name,
+                        subtitle = if (dev.category == DeviceCategory.LAPTOP_PC) "PC Remote" else prod.title,
+                        kind = ActiveSessionKind.PRIMARY_REMOTE,
+                        targetProduct = prod,
+                        targetBrandId = resolvedBrand.id
+                    )
+                )
             }
-            val explicit = connectedBrandId?.let { id ->
-                ProductType.entries.firstNotNullOfOrNull { pt ->
-                    ProductCatalog.brandsFor(pt).firstOrNull { it.id == id }
+            connectedTvCompanion?.let { tv ->
+                val sameTvAsPrimary = dev != null && dev.category == DeviceCategory.ANDROID_TV &&
+                    dev.name.equals(tv.name, ignoreCase = true)
+                if (!sameTvAsPrimary) {
+                    val tvBrand = ProductCatalog.brandsFor(ProductType.SMART_TV)
+                        .firstOrNull { it.id == connectedBrandId }
+                        ?: ProductCatalog.brandsFor(ProductType.SMART_TV).first()
+                    add(
+                        ActiveSessionItem(
+                            id = "tvcomp_${tv.host}",
+                            title = tv.name,
+                            subtitle = "TV Companion",
+                            kind = ActiveSessionKind.TV_COMPANION,
+                            targetProduct = ProductType.SMART_TV,
+                            targetBrandId = tvBrand.id
+                        )
+                    )
                 }
             }
-            if (explicit != null) return explicit
-            return ProductCatalog.brandsFor(ProductType.SMART_TV).firstOrNull()
+            peerPhoneName?.let { pName ->
+                add(
+                    ActiveSessionItem(
+                        id = "phone_$pName",
+                        title = pName,
+                        subtitle = "Phone Share",
+                        kind = ActiveSessionKind.PHONE_PEER,
+                        targetProduct = ProductType.PHONE_TO_PHONE,
+                        targetBrandId = ProductCatalog.brandsFor(ProductType.PHONE_TO_PHONE).first().id
+                    )
+                )
+            }
+            connectedBulb?.let { bulb ->
+                add(
+                    ActiveSessionItem(
+                        id = "bulb_${bulb.host}",
+                        title = bulb.name,
+                        subtitle = "Smart Bulb",
+                        kind = ActiveSessionKind.SMART_BULB,
+                        targetProduct = ProductType.SMART_BULB,
+                        targetBrandId = ProductCatalog.brandsFor(ProductType.SMART_BULB).first().id
+                    )
+                )
+            }
         }
 
     fun isConnectedForBrand(brand: BrandOption): Boolean {
