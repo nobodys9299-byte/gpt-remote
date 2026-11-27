@@ -62,6 +62,8 @@ data class TvTransferProgress(
     val bytesPerSec: Long,
     val isUpload: Boolean,
     val isComplete: Boolean = false,
+    val isPaused: Boolean = false,
+    val sessionId: String = "",
 )
 
 data class TvCompanionUiState(
@@ -103,9 +105,20 @@ class TvCompanionService : Service() {
         const val BEACON_PORT = 58769
         const val TCP_PORT = 58765
         const val HTTP_PORT = 58768
-        private const val TRANSFER_BUF = 1024 * 1024
+        private const val TRANSFER_BUF = 2 * 1024 * 1024
         private const val CHANNEL_ID = "gpt_remote_tv_companion"
         private const val NOTIF_ID = 4102
+
+        @Volatile
+        private var instance: TvCompanionService? = null
+
+        fun togglePauseFromTv() {
+            instance?.handlePauseOrResumeFromTv()
+        }
+
+        fun cancelFromTv() {
+            instance?.handleCancelFromTv()
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -113,8 +126,12 @@ class TvCompanionService : Service() {
     private lateinit var pairCode: String
     private val historyLock = Any()
     private val cancelledSessions = ConcurrentHashMap.newKeySet<String>()
+    private val pausedSessions = ConcurrentHashMap.newKeySet<String>()
+    private val sessionControlCommands = ConcurrentHashMap<String, String>()
     private val activeDownloadCancel = AtomicBoolean(false)
     private val uploadParts = ConcurrentHashMap<String, File>()
+    @Volatile
+    private var activeIncomingSessionId: String? = null
 
     @Volatile
     private var tcpServer: ServerSocket? = null
@@ -129,6 +146,7 @@ class TvCompanionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         storageDir = File(getExternalFilesDir(null) ?: filesDir, "GptRemoteTV").apply {
             if (!exists()) mkdirs()
         }
@@ -158,6 +176,7 @@ class TvCompanionService : Service() {
     }
 
     override fun onDestroy() {
+        if (instance === this) instance = null
         runCatching { tcpServer?.close() }
         runCatching { httpServer?.close() }
         runCatching { udpSocket?.close() }
@@ -350,8 +369,8 @@ class TvCompanionService : Service() {
                 sock.soTimeout = 3_600_000
                 sock.tcpNoDelay = true
                 runCatching {
-                    sock.receiveBufferSize = 1024 * 1024
-                    sock.sendBufferSize = 1024 * 1024
+                    sock.receiveBufferSize = 2 * 1024 * 1024
+                    sock.sendBufferSize = 2 * 1024 * 1024
                 }
                 val bis = BufferedInputStream(sock.getInputStream(), TRANSFER_BUF)
                 val out = BufferedOutputStream(sock.getOutputStream(), TRANSFER_BUF)
@@ -424,6 +443,8 @@ class TvCompanionService : Service() {
                         val sid = query["session"].orEmpty().trim()
                         if (sid.isNotEmpty()) {
                             cancelledSessions.add(sid)
+                            pausedSessions.remove(sid)
+                            sessionControlCommands.remove(sid)
                             uploadParts.remove(sid)?.let { runCatching { it.delete() } }
                         } else {
                             activeDownloadCancel.set(true)
@@ -432,10 +453,53 @@ class TvCompanionService : Service() {
                         writeJsonResponse(out, 200, "{\"ok\":true}")
                     }
 
+                    method == "POST" && path == "/transfer-pause" -> {
+                        val sid = query["session"].orEmpty().trim()
+                        if (sid.isNotEmpty()) pausedSessions.add(sid)
+                        TvCompanionState.update { st ->
+                            val cur = st.transferProgress
+                            if (cur != null && (sid.isEmpty() || cur.sessionId == sid || cur.sessionId.isEmpty())) {
+                                st.copy(
+                                    transferProgress = cur.copy(isPaused = true, bytesPerSec = 0L),
+                                    statusText = "Paused ${cur.fileName}"
+                                )
+                            } else st
+                        }
+                        writeJsonResponse(out, 200, "{\"ok\":true}")
+                    }
+
+                    method == "POST" && path == "/transfer-resume" -> {
+                        val sid = query["session"].orEmpty().trim()
+                        if (sid.isNotEmpty()) pausedSessions.remove(sid)
+                        TvCompanionState.update { st ->
+                            val cur = st.transferProgress
+                            if (cur != null && (sid.isEmpty() || cur.sessionId == sid || cur.sessionId.isEmpty())) {
+                                st.copy(
+                                    transferProgress = cur.copy(isPaused = false),
+                                    statusText = "Receiving ${cur.fileName}"
+                                )
+                            } else st
+                        }
+                        writeJsonResponse(out, 200, "{\"ok\":true}")
+                    }
+
+                    method == "GET" && path == "/transfer-control" -> {
+                        val sid = query["session"].orEmpty().trim()
+                        val action = if (sid.isNotEmpty()) (sessionControlCommands.remove(sid) ?: "none") else "none"
+                        val isPaused = sid.isNotEmpty() && pausedSessions.contains(sid)
+                        val body = JSONObject().put("action", action).put("paused", isPaused).toString()
+                        writeJsonResponse(out, 200, body)
+                    }
+
                     method == "POST" && path == "/upload" -> {
                         val contentLength = headers["content-length"]?.toLongOrNull() ?: 0L
                         val sid = query["session"].orEmpty().trim()
-                        if (sid.isNotEmpty()) cancelledSessions.remove(sid)
+                        if (sid.isNotEmpty()) {
+                            cancelledSessions.remove(sid)
+                            pausedSessions.remove(sid)
+                            sessionControlCommands.remove(sid)
+                            activeIncomingSessionId = sid
+                        }
                         val offset = query["offset"]?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
                         val totalParam = query["total"]?.toLongOrNull()?.coerceAtLeast(0L) ?: contentLength
                         val totalExpected = max(totalParam, offset + contentLength)
@@ -472,7 +536,8 @@ class TvCompanionService : Service() {
                                 remaining -= read
                                 val overallDone = offset + done
                                 val now = System.currentTimeMillis()
-                                if (now - lastUiAt >= 160L || remaining == 0L) {
+                                val isSessionPaused = sid.isNotEmpty() && pausedSessions.contains(sid)
+                                if ((now - lastUiAt >= 220L || remaining == 0L) && !isSessionPaused) {
                                     lastUiAt = now
                                     val elapsedMs = max(1L, now - startedAt)
                                     val bps = (done * 1000L) / elapsedMs
@@ -486,6 +551,8 @@ class TvCompanionService : Service() {
                                                 bytesPerSec = bps,
                                                 isUpload = false,
                                                 isComplete = false,
+                                                isPaused = false,
+                                                sessionId = sid,
                                             ),
                                         )
                                     }
@@ -493,6 +560,7 @@ class TvCompanionService : Service() {
                             }
                         } finally {
                             runCatching { raf.close() }
+                            if (activeIncomingSessionId == sid) activeIncomingSessionId = null
                         }
 
                         val overallDone = offset + done
@@ -742,6 +810,50 @@ class TvCompanionService : Service() {
         }
     }
 
+    private fun handlePauseOrResumeFromTv() {
+        val cur = TvCompanionState.uiState.value.transferProgress ?: return
+        if (cur.isComplete) return
+        val sid = cur.sessionId.ifBlank { activeIncomingSessionId.orEmpty() }
+        if (cur.isPaused) {
+            if (sid.isNotEmpty()) {
+                pausedSessions.remove(sid)
+                sessionControlCommands[sid] = "resume"
+            }
+            TvCompanionState.update {
+                it.copy(
+                    transferProgress = cur.copy(isPaused = false),
+                    statusText = "Resuming ${cur.fileName}"
+                )
+            }
+        } else {
+            if (sid.isNotEmpty()) {
+                pausedSessions.add(sid)
+                sessionControlCommands[sid] = "pause"
+            }
+            TvCompanionState.update {
+                it.copy(
+                    transferProgress = cur.copy(isPaused = true, bytesPerSec = 0L),
+                    statusText = "Paused ${cur.fileName}"
+                )
+            }
+        }
+    }
+
+    private fun handleCancelFromTv() {
+        val cur = TvCompanionState.uiState.value.transferProgress
+        val sid = cur?.sessionId?.ifBlank { activeIncomingSessionId.orEmpty() } ?: activeIncomingSessionId.orEmpty()
+        if (sid.isNotEmpty()) {
+            cancelledSessions.add(sid)
+            pausedSessions.remove(sid)
+            sessionControlCommands[sid] = "cancel"
+        } else {
+            activeDownloadCancel.set(true)
+        }
+        TvCompanionState.update {
+            it.copy(transferProgress = null, statusText = "Cancelled ${cur?.fileName ?: "transfer"}")
+        }
+    }
+
     private fun buildNotification(text: String): Notification {
         val openIntent = PendingIntent.getActivity(
             this,
@@ -749,8 +861,20 @@ class TvCompanionService : Service() {
             Intent(this, TvMainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+        val largeIcon = runCatching {
+            val drawable = androidx.core.content.ContextCompat.getDrawable(this, R.drawable.tv_icon)
+            if (drawable != null) {
+                val bmp = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888)
+                val canvas = android.graphics.Canvas(bmp)
+                drawable.setBounds(0, 0, canvas.width, canvas.height)
+                drawable.draw(canvas)
+                bmp
+            } else null
+        }.getOrNull()
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.tv_icon)
+            .setSmallIcon(R.drawable.ic_tv_notif)
+            .apply { if (largeIcon != null) setLargeIcon(largeIcon) }
+            .setColor(0xFFFF6900.toInt())
             .setContentTitle("GPT Remote TV")
             .setContentText(text)
             .setContentIntent(openIntent)

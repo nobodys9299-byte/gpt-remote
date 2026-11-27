@@ -216,6 +216,34 @@ class SmartTvWebSocketClient(context: Context) {
         }
     }
 
+    fun closeApp(appId: String) {
+        scope.launch {
+            when (activeProtocol) {
+                SmartTvProtocol.SAMSUNG_TIZEN -> {
+                    val out = output ?: return@launch
+                    val msg = JSONObject().apply {
+                        put("method", "ms.remote.control")
+                        put("params", JSONObject().apply {
+                            put("Cmd", "Click")
+                            put("DataOfCmd", "KEY_EXIT")
+                            put("Option", "false")
+                            put("TypeOfRemote", "SendRemoteKey")
+                        })
+                    }
+                    runCatching { sendWsTextFrame(out, msg.toString()) }
+                }
+                SmartTvProtocol.LG_WEBOS -> {
+                    val lgId = lgAppId(appId)
+                    if (lgId != null) {
+                        sendLgCommand("ssap://system.launcher/close", JSONObject().put("id", lgId))
+                    } else {
+                        sendLgPointerKey("HOME")
+                    }
+                }
+            }
+        }
+    }
+
     fun openBrowserUrl(url: String) {
         if (url.isBlank()) return
         scope.launch {

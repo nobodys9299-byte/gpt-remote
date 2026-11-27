@@ -5,10 +5,12 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.media.ThumbnailUtils
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.LruCache
 import android.util.Size
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -117,6 +119,7 @@ import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.model.TransferHistoryItem
 import com.gptremote.mitv.model.TransferProgress
+import com.gptremote.mitv.model.TransferQueueItem
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.ui.theme.ConnectedGreen
 import com.gptremote.mitv.ui.theme.MiOrange
@@ -408,8 +411,8 @@ fun PcFileSharePanel(
     onCancelTransfer: () -> Unit = {},
     onOpenConnect: () -> Unit
 ) {
-    val isWifiPc = (uiState.status as? ConnectionStatus.Connected)?.device?.transport == TransportMode.WIFI_PC
-    var showAllShared by remember { mutableStateOf(false) }
+    val isWifiPc = uiState.connectedWifiPcDevice != null ||
+        (uiState.status as? ConnectionStatus.Connected)?.device?.transport == TransportMode.WIFI_PC
 
     LaunchedEffect(isWifiPc) {
         if (isWifiPc) {
@@ -468,68 +471,11 @@ fun PcFileSharePanel(
         uiState.transferProgress?.let { prog ->
             TransferProgressCard(
                 prog = prog,
+                queueItems = uiState.pcTransferQueue,
                 onPause = onPauseTransfer,
                 onResume = onResumeTransfer,
                 onCancel = onCancelTransfer
             )
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text("PC Shared Files (${uiState.sharedPcFiles.size})", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                Text("Tap a file to download from PC", color = TextSecondary, fontSize = 11.sp)
-            }
-            IconButton(onClick = onRefreshFiles, enabled = isWifiPc) {
-                Icon(Icons.Rounded.Refresh, contentDescription = "Refresh PC Files", tint = WifiBlue)
-            }
-        }
-
-        if (uiState.sharedPcFiles.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(RemoteSurfaceElevated)
-                    .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
-                    .padding(16.dp)
-            ) {
-                Text(
-                    text = if (isWifiPc) {
-                        "No files in PC Downloads/GptRemote yet. Add files in GPT Remote PC or send from phone above."
-                    } else {
-                        "Connect via Wi-Fi PC to browse and exchange files."
-                    },
-                    color = TextSecondary,
-                    fontSize = 12.sp
-                )
-            }
-        } else {
-            val visibleFiles = if (showAllShared) uiState.sharedPcFiles else uiState.sharedPcFiles.take(5)
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                visibleFiles.forEach { file ->
-                    SharedFileRow(
-                        file = file,
-                        enabled = !uiState.isTransferringFile,
-                        onClick = { onDownloadFile(file) }
-                    )
-                }
-                if (uiState.sharedPcFiles.size > 5) {
-                    TextButton(
-                        onClick = { showAllShared = !showAllShared },
-                        modifier = Modifier.align(Alignment.End)
-                    ) {
-                        Text(
-                            text = if (showAllShared) "Show Less" else "View All (${uiState.sharedPcFiles.size})",
-                            color = WifiBlue,
-                            fontSize = 12.sp
-                        )
-                    }
-                }
-            }
         }
 
         TransferHistorySection(
@@ -564,214 +510,245 @@ fun PhoneSharePanel(
         onStartHost()
     }
 
-    var showQrCode by remember { mutableStateOf(false) }
+    var activeMode by remember { mutableStateOf("send") }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Hotspot Helper Card (Auto Local Hotspot / System Hotspot)
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(20.dp))
-                .background(RemoteSurfaceElevated)
-                .border(1.dp, RemoteBorder, RoundedCornerShape(20.dp))
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        // Primary Send / Receive Selector Row (No idle hotspot clutter at top)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            val sendSelected = activeMode == "send"
+            Button(
+                onClick = { activeMode = "send" },
+                modifier = Modifier
+                    .weight(1f)
+                    .height(54.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (sendSelected) MiOrange else RemoteSurfaceElevated,
+                    contentColor = if (sendSelected) Color.White else TextPrimary
+                ),
+                shape = RoundedCornerShape(16.dp)
             ) {
-                Icon(Icons.Rounded.WifiTethering, contentDescription = null, tint = WifiBlue)
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = if (uiState.phoneHotspotSsid != null) "Hotspot Active: ${uiState.phoneHotspotSsid}" else "Wi-Fi / Direct Hotspot",
-                        color = if (uiState.phoneHotspotSsid != null) ConnectedGreen else TextPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = if (!uiState.phoneHotspotPassword.isNullOrBlank()) {
-                            "Password: ${uiState.phoneHotspotPassword} • Join on 2nd phone then scan QR"
-                        } else {
-                            "Use same Wi-Fi, or start Hotspot here to connect directly"
-                        },
-                        color = TextSecondary,
-                        fontSize = 11.sp
-                    )
-                }
+                Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(19.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Send", fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
-            if (!uiState.phoneHotspotError.isNullOrBlank()) {
-                Text(uiState.phoneHotspotError, color = Color(0xFFFBBF24), fontSize = 11.sp)
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+
+            val recvSelected = activeMode == "receive"
+            Button(
+                onClick = {
+                    activeMode = "receive"
+                    onStartHost()
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .height(54.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (recvSelected) WifiBlue else RemoteSurfaceElevated,
+                    contentColor = if (recvSelected) Color(0xFF062033) else TextPrimary
+                ),
+                shape = RoundedCornerShape(16.dp)
             ) {
-                if (uiState.phoneHotspotSsid != null) {
-                    OutlinedButton(
-                        onClick = onStopLocalHotspot,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    ) { Text("Stop Hotspot", fontSize = 12.sp) }
-                } else {
-                    FilledTonalButton(
-                        onClick = onStartLocalHotspot,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    ) { Text("Start Hotspot", fontSize = 12.sp) }
-                }
-                OutlinedButton(
-                    onClick = onOpenHotspotSettings,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Icon(Icons.Rounded.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Settings", fontSize = 12.sp)
-                }
+                Icon(Icons.Rounded.CloudDownload, contentDescription = null, modifier = Modifier.size(19.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Receive", fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
         }
 
-        // Clean Pair & Send Card
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(22.dp))
-                .background(RemoteSurfaceElevated)
-                .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
-                .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        if (activeMode == "send") {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(RemoteSurfaceElevated)
+                    .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                if (uiState.peerPhoneName != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Connected: ${uiState.peerPhoneName}",
+                                color = ConnectedGreen,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Ready to send files or apps",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(onClick = onScanPeerQr, shape = RoundedCornerShape(12.dp)) {
+                                Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Switch", fontSize = 11.sp)
+                            }
+                            TextButton(onClick = onDisconnectPeer) {
+                                Text("Off", color = Color(0xFFF87171), fontSize = 12.sp)
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onSendFilesToPeer,
+                            modifier = Modifier.weight(1.25f).height(48.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Send Files", fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        }
+                        FilledTonalButton(
+                            onClick = onSendAppsToPeer,
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Rounded.Android, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Apps (.apk)", fontSize = 12.sp, maxLines = 1)
+                        }
+                    }
+                } else {
                     Text(
-                        text = uiState.peerPhoneName?.let { "Connected: $it" } ?: "Pair & Share Files",
-                        color = if (uiState.peerPhoneName != null) ConnectedGreen else TextPrimary,
+                        text = "Send Files to Phone",
+                        color = TextPrimary,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = if (uiState.peerPhoneName != null) {
-                            "Two-way phone transfer ready"
-                        } else {
-                            "Show your QR code or scan the other phone's QR"
-                        },
+                        text = "Tap Receive on the other phone, then scan its QR code",
                         color = TextSecondary,
-                        fontSize = 11.sp
+                        fontSize = 12.sp
                     )
-                }
-                if (uiState.peerPhoneName != null) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(onClick = onScanPeerQr, shape = RoundedCornerShape(12.dp)) {
-                            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(15.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Switch", fontSize = 11.sp)
-                        }
-                        TextButton(onClick = onDisconnectPeer) {
-                            Text("Off", color = Color(0xFFF87171), fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (uiState.peerPhoneName == null) {
-                    FilledTonalButton(
-                        onClick = {
-                            onStartHost()
-                            showQrCode = !showQrCode
-                        },
-                        modifier = Modifier.weight(1f).height(48.dp),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(Icons.Rounded.QrCode2, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(if (showQrCode) "Hide QR" else "Show QR", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    }
                     Button(
                         onClick = onScanPeerQr,
-                        modifier = Modifier.weight(1f).height(48.dp),
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
                         shape = RoundedCornerShape(14.dp)
                     ) {
                         Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Scan QR", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Scan Receiver QR", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     }
-                } else {
-                    Button(
-                        onClick = onSendFilesToPeer,
-                        modifier = Modifier.weight(1.25f).height(48.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
-                        shape = RoundedCornerShape(14.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Rounded.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Send Files", fontWeight = FontWeight.SemiBold, maxLines = 1)
-                    }
-                    FilledTonalButton(
-                        onClick = onSendAppsToPeer,
-                        modifier = Modifier.weight(1f).height(48.dp),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(Icons.Rounded.Android, contentDescription = null, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Apps (.apk)", fontSize = 12.sp, maxLines = 1)
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            onStartHost()
-                            showQrCode = !showQrCode
-                        },
-                        modifier = Modifier.height(48.dp),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(Icons.Rounded.QrCode2, contentDescription = "Toggle QR", modifier = Modifier.size(18.dp))
+                        OutlinedButton(
+                            onClick = if (uiState.phoneHotspotSsid != null) onStopLocalHotspot else onStartLocalHotspot,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Rounded.WifiTethering, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(if (uiState.phoneHotspotSsid != null) "Hotspot On" else "Hotspot", fontSize = 12.sp)
+                        }
+                        OutlinedButton(
+                            onClick = onOpenHotspotSettings,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Rounded.Wifi, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Wi-Fi Settings", fontSize = 12.sp)
+                        }
                     }
                 }
             }
-
-            if (showQrCode) {
+        } else {
+            // Receive mode: Show QR + inline Hotspot / Wi-Fi toggle when needed
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(RemoteSurfaceElevated)
+                    .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = if (uiState.peerPhoneName != null) "Connected: ${uiState.peerPhoneName}" else "Receive Files on This Phone",
+                    color = if (uiState.peerPhoneName != null) ConnectedGreen else TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
                 val qrUrl = uiState.phoneHostQrUrl
                 val qrBitmap = remember(qrUrl) { qrUrl?.let { generateQrBitmap(it, 420) } }
                 if (qrBitmap != null) {
                     Box(
                         modifier = Modifier
-                            .size(185.dp)
+                            .size(190.dp)
                             .clip(RoundedCornerShape(16.dp))
                             .background(Color.White)
                             .padding(8.dp)
                     ) {
                         Image(
                             bitmap = qrBitmap.asImageBitmap(),
-                            contentDescription = "Phone Share QR Code",
+                            contentDescription = "Receive Files QR Code",
                             modifier = Modifier.fillMaxSize()
                         )
                     }
                     Text(
-                        text = qrUrl ?: "",
+                        text = "Scan this QR from the sender phone's Send tab",
                         color = TextSecondary,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        fontSize = 11.sp
                     )
                 } else {
                     Text(
-                        text = "Turn on Wi-Fi or Hotspot first",
+                        text = "Connect to Wi-Fi or turn on Hotspot below to generate your Receive QR",
                         color = Color(0xFFFBBF24),
                         fontSize = 12.sp
                     )
+                }
+                if (uiState.phoneHotspotSsid != null) {
+                    Text(
+                        text = "Hotspot Active: ${uiState.phoneHotspotSsid} • Pass: ${uiState.phoneHotspotPassword.orEmpty()}",
+                        color = ConnectedGreen,
+                        fontSize = 11.sp
+                    )
+                }
+                if (!uiState.phoneHotspotError.isNullOrBlank()) {
+                    Text(uiState.phoneHotspotError, color = Color(0xFFFBBF24), fontSize = 11.sp)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilledTonalButton(
+                        onClick = if (uiState.phoneHotspotSsid != null) onStopLocalHotspot else onStartLocalHotspot,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Rounded.WifiTethering, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (uiState.phoneHotspotSsid != null) "Stop Hotspot" else "Start Hotspot", fontSize = 12.sp)
+                    }
+                    OutlinedButton(
+                        onClick = onOpenHotspotSettings,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Rounded.Wifi, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Wi-Fi Settings", fontSize = 12.sp)
+                    }
                 }
             }
         }
@@ -779,6 +756,7 @@ fun PhoneSharePanel(
         uiState.phoneTransferProgress?.let { prog ->
             TransferProgressCard(
                 prog = prog,
+                queueItems = uiState.phoneTransferQueue,
                 onPause = onPauseTransfer,
                 onResume = onResumeTransfer,
                 onCancel = onCancelTransfer
@@ -1071,6 +1049,7 @@ fun TvCompanionSheetDialog(
                         uiState.tvTransferProgress?.let { prog ->
                             TransferProgressCard(
                                 prog = prog,
+                                queueItems = uiState.tvTransferQueue,
                                 onPause = onPauseTvTransfer,
                                 onResume = onResumeTvTransfer,
                                 onCancel = onCancelTvTransfer
@@ -1464,6 +1443,7 @@ fun InstalledAppsPickerDialog(
 @Composable
 fun TransferProgressCard(
     prog: TransferProgress,
+    queueItems: List<TransferQueueItem> = emptyList(),
     onPause: () -> Unit = {},
     onResume: () -> Unit = {},
     onCancel: () -> Unit = {},
@@ -1476,6 +1456,89 @@ fun TransferProgressCard(
         prog.isComplete -> ConnectedGreen
         prog.isPaused -> Color(0xFFFBBF24)
         else -> MiOrange
+    }
+    var showQueueModal by remember { mutableStateOf(false) }
+
+    if (showQueueModal && queueItems.isNotEmpty()) {
+        Dialog(onDismissRequest = { showQueueModal = false }) {
+            Surface(
+                color = RemoteSurfaceElevated,
+                shape = RoundedCornerShape(22.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("Sending Queue (${queueItems.size})", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            Text("Live batch status", color = TextSecondary, fontSize = 11.sp)
+                        }
+                        IconButton(onClick = { showQueueModal = false }) {
+                            Icon(Icons.Rounded.Close, contentDescription = "Close Queue", tint = TextSecondary)
+                        }
+                    }
+                    LazyColumn(
+                        modifier = Modifier.weight(1f, fill = false),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(queueItems, key = { it.id }) { q ->
+                            val stColor = when (q.status) {
+                                "Sending" -> MiOrange
+                                "Paused" -> Color(0xFFFBBF24)
+                                "Sent" -> ConnectedGreen
+                                "Cancelled", "Failed" -> Color(0xFFF87171)
+                                else -> TextSecondary
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(RemoteSurface)
+                                    .border(1.dp, RemoteBorder, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    FileThumbnailBadge(fileName = q.fileName, uriString = null, size = 30.dp)
+                                    Column {
+                                        Text(
+                                            text = q.fileName,
+                                            color = TextPrimary,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(formatFileSize(q.sizeBytes), color = TextSecondary, fontSize = 10.sp)
+                                    }
+                                }
+                                Text(
+                                    text = q.status,
+                                    color = stColor,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Column(
@@ -1506,6 +1569,19 @@ fun TransferProgressCard(
                 modifier = Modifier.weight(1f)
             )
             Spacer(modifier = Modifier.width(8.dp))
+            if (queueItems.size > 1) {
+                Text(
+                    text = "View All (${queueItems.size})",
+                    color = WifiBlue,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { showQueueModal = true }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+            }
             Text(
                 text = when {
                     prog.isComplete -> "Done"
@@ -1583,7 +1659,6 @@ fun TransferHistorySection(
     if (items.isEmpty()) return
 
     var filterMode by remember { mutableIntStateOf(0) }
-    var showAllHistory by remember { mutableStateOf(false) }
     val sentItems = remember(items) { items.filter { it.isSent && it.statusLabel == "Sent" } }
     val recvItems = remember(items) { items.filter { !it.isSent && it.statusLabel == "Received" } }
     val shown = when (filterMode) {
@@ -1596,18 +1671,7 @@ fun TransferHistorySection(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            if (shown.size > 4) {
-                TextButton(onClick = { showAllHistory = !showAllHistory }) {
-                    Text(if (showAllHistory) "Show Less" else "View All (${shown.size})", color = WifiBlue, fontSize = 11.sp)
-                }
-            }
-        }
+        Text(title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1637,8 +1701,7 @@ fun TransferHistorySection(
                 fontSize = 12.sp
             )
         } else {
-            val visibleItems = if (showAllHistory) shown else shown.take(4)
-            visibleItems.forEach { entry ->
+            shown.forEach { entry ->
                 val timeStr = remember(entry.timestampMs) {
                     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(entry.timestampMs))
                 }
@@ -1742,6 +1805,10 @@ private fun SharedFileRow(
     }
 }
 
+private object ThumbnailMemoryCache {
+    val cache = LruCache<String, ImageBitmap>(48)
+}
+
 @Composable
 private fun FileThumbnailBadge(
     fileName: String,
@@ -1753,31 +1820,61 @@ private fun FileThumbnailBadge(
     val isVideo = ext in listOf("mp4", "mkv", "mov", "webm", "avi", "m4v")
     val context = LocalContext.current
 
-    val thumb by produceState<ImageBitmap?>(null, uriString, ext) {
+    val thumb by produceState<ImageBitmap?>(
+        initialValue = if (!uriString.isNullOrBlank()) ThumbnailMemoryCache.cache.get(uriString) else null,
+        uriString,
+        ext
+    ) {
         if (uriString.isNullOrBlank() || (!isImage && !isVideo)) {
             value = null
             return@produceState
         }
+        val cached = ThumbnailMemoryCache.cache.get(uriString)
+        if (cached != null) {
+            value = cached
+            return@produceState
+        }
         value = withContext(Dispatchers.IO) {
-            runCatching {
+            val loaded = runCatching {
                 val uri = Uri.parse(uriString)
+                var bmp: Bitmap? = null
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    context.contentResolver.loadThumbnail(uri, Size(128, 128), null).asImageBitmap()
-                } else if (isImage) {
+                    bmp = runCatching { context.contentResolver.loadThumbnail(uri, Size(128, 128), null) }.getOrNull()
+                }
+                if (bmp == null && isVideo) {
+                    val mmr = MediaMetadataRetriever()
+                    try {
+                        mmr.setDataSource(context, uri)
+                        val frame = mmr.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                            ?: mmr.frameAtTime
+                        if (frame != null) {
+                            bmp = ThumbnailUtils.extractThumbnail(frame, 112, 112, ThumbnailUtils.OPTIONS_RECYCLE_INPUT)
+                        }
+                    } finally {
+                        runCatching { mmr.release() }
+                    }
+                } else if (bmp == null && isImage) {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     context.contentResolver.openInputStream(uri)?.use { inp ->
-                        BitmapFactory.decodeStream(inp)?.let { bmp ->
-                            Bitmap.createScaledBitmap(bmp, 96, 96, true).asImageBitmap()
+                        BitmapFactory.decodeStream(inp, null, bounds)
+                    }
+                    var sample = 1
+                    while (bounds.outWidth / sample > 256 || bounds.outHeight / sample > 256) {
+                        sample *= 2
+                    }
+                    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                    context.contentResolver.openInputStream(uri)?.use { inp ->
+                        BitmapFactory.decodeStream(inp, null, opts)?.let { decoded ->
+                            bmp = ThumbnailUtils.extractThumbnail(decoded, 112, 112, ThumbnailUtils.OPTIONS_RECYCLE_INPUT)
                         }
                     }
-                } else {
-                    @Suppress("DEPRECATION")
-                    val path = uri.path
-                    if (path != null) {
-                        @Suppress("DEPRECATION")
-                        ThumbnailUtils.createVideoThumbnail(path, MediaStore.Images.Thumbnails.MINI_KIND)?.asImageBitmap()
-                    } else null
                 }
+                bmp?.asImageBitmap()
             }.getOrNull()
+            if (loaded != null) {
+                ThumbnailMemoryCache.cache.put(uriString, loaded)
+            }
+            loaded
         }
     }
 

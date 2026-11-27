@@ -4,11 +4,16 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
+import android.media.MediaMetadataRetriever
+import android.media.ThumbnailUtils
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.LruCache
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -37,18 +42,23 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.VideoFile
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -58,6 +68,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -68,6 +79,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -77,7 +89,9 @@ import androidx.core.content.FileProvider
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -414,10 +428,15 @@ private fun TvDashboardScreen(
                     val pct = if (tp.totalBytes > 0L) {
                         (tp.bytesDone.toFloat() / tp.totalBytes.toFloat()).coerceIn(0f, 1f)
                     } else 1f
+                    val barColor = when {
+                        tp.isComplete -> Color(0xFF4ADE80)
+                        tp.isPaused -> Color(0xFFFBBF24)
+                        else -> Color(0xFF22D3EE)
+                    }
                     Surface(
                         color = Color(0xFF132238),
                         shape = RoundedCornerShape(18.dp),
-                        border = BorderStroke(1.dp, Color(0xFF22D3EE).copy(alpha = 0.45f)),
+                        border = BorderStroke(1.dp, barColor.copy(alpha = 0.5f)),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column(
@@ -429,7 +448,11 @@ private fun TvDashboardScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                             ) {
                                 Text(
-                                    if (tp.isComplete) "Received ${tp.fileName}" else "Receiving ${tp.fileName}",
+                                    text = when {
+                                        tp.isComplete -> "Received ${tp.fileName}"
+                                        tp.isPaused -> "Paused: ${tp.fileName}"
+                                        else -> "Receiving ${tp.fileName}"
+                                    },
                                     color = Color.White,
                                     fontWeight = FontWeight.SemiBold,
                                     maxLines = 1,
@@ -437,8 +460,12 @@ private fun TvDashboardScreen(
                                     modifier = Modifier.weight(1f),
                                 )
                                 Text(
-                                    "${TvCompanionState.formatBytes(tp.bytesPerSec)}/s • ${(pct * 100).toInt()}%",
-                                    color = Color(0xFF22D3EE),
+                                    text = if (tp.isPaused) {
+                                        "Paused • ${(pct * 100).toInt()}%"
+                                    } else {
+                                        "${TvCompanionState.formatBytes(tp.bytesPerSec)}/s • ${(pct * 100).toInt()}%"
+                                    },
+                                    color = barColor,
                                     fontWeight = FontWeight.Bold,
                                 )
                             }
@@ -448,9 +475,47 @@ private fun TvDashboardScreen(
                                     .fillMaxWidth()
                                     .height(7.dp)
                                     .clip(RoundedCornerShape(99.dp)),
-                                color = Color(0xFF22D3EE),
+                                color = barColor,
                                 trackColor = Color(0xFF1E293B),
                             )
+                            if (!tp.isComplete) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    FilledTonalButton(
+                                        onClick = { TvCompanionService.togglePauseFromTv() },
+                                        shape = RoundedCornerShape(10.dp),
+                                        colors = ButtonDefaults.filledTonalButtonColors(
+                                            containerColor = Color(0xFF1E293B),
+                                            contentColor = Color(0xFF22D3EE),
+                                        ),
+                                    ) {
+                                        Icon(
+                                            imageVector = if (tp.isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(if (tp.isPaused) "Resume" else "Pause", fontSize = 12.sp)
+                                    }
+                                    OutlinedButton(
+                                        onClick = { TvCompanionService.cancelFromTv() },
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, Color(0xFFF87171).copy(alpha = 0.65f)),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Close,
+                                            contentDescription = null,
+                                            tint = Color(0xFFF87171),
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Cancel", color = Color(0xFFF87171), fontSize = 12.sp)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -531,18 +596,98 @@ private fun TvDashboardScreen(
     }
 }
 
+private object TvThumbCache {
+    private val cache = LruCache<String, Bitmap>(48)
+
+    fun get(key: String): Bitmap? = cache.get(key)
+
+    fun put(key: String, bmp: Bitmap) {
+        cache.put(key, bmp)
+    }
+}
+
 @Composable
 private fun TvFileRow(
     item: TvReceivedFile,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     val lower = item.name.lowercase(Locale.US)
+    val isVideo = lower.endsWith(".mp4") || lower.endsWith(".mkv") || lower.endsWith(".mov") ||
+        lower.endsWith(".webm") || lower.endsWith(".avi") || lower.endsWith(".m4v")
+    val isImage = lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") ||
+        lower.endsWith(".webp") || lower.endsWith(".gif") || lower.endsWith(".bmp")
+    val isApk = lower.endsWith(".apk")
     val icon = when {
-        lower.endsWith(".apk") -> Icons.Rounded.Android
-        lower.endsWith(".mp4") || lower.endsWith(".mkv") || lower.endsWith(".mov") -> Icons.Rounded.VideoFile
-        lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") -> Icons.Rounded.Image
+        isApk -> Icons.Rounded.Android
+        isVideo -> Icons.Rounded.VideoFile
+        isImage -> Icons.Rounded.Image
         else -> Icons.Rounded.Description
+    }
+    val thumb by produceState<Bitmap?>(initialValue = TvThumbCache.get(item.absolutePath), item.absolutePath, item.sizeBytes) {
+        val cached = TvThumbCache.get(item.absolutePath)
+        if (cached != null) {
+            value = cached
+            return@produceState
+        }
+        if (!isVideo && !isImage && !isApk) {
+            value = null
+            return@produceState
+        }
+        value = withContext(Dispatchers.IO) {
+            val loaded: Bitmap? = runCatching {
+                when {
+                    isVideo -> {
+                        val mmr = MediaMetadataRetriever()
+                        try {
+                            mmr.setDataSource(item.absolutePath)
+                            val frame = mmr.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                ?: mmr.frameAtTime
+                            frame?.let {
+                                ThumbnailUtils.extractThumbnail(it, 112, 112, ThumbnailUtils.OPTIONS_RECYCLE_INPUT)
+                            }
+                        } finally {
+                            runCatching { mmr.release() }
+                        }
+                    }
+                    isImage -> {
+                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeFile(item.absolutePath, bounds)
+                        var sample = 1
+                        while (bounds.outWidth / sample > 256 || bounds.outHeight / sample > 256) {
+                            sample *= 2
+                        }
+                        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                        BitmapFactory.decodeFile(item.absolutePath, opts)?.let { bmp ->
+                            ThumbnailUtils.extractThumbnail(bmp, 112, 112, ThumbnailUtils.OPTIONS_RECYCLE_INPUT)
+                        }
+                    }
+                    isApk -> {
+                        val pm = context.packageManager
+                        @Suppress("DEPRECATION")
+                        val pkgInfo = pm.getPackageArchiveInfo(item.absolutePath, 0)
+                        val ai = pkgInfo?.applicationInfo?.apply {
+                            sourceDir = item.absolutePath
+                            publicSourceDir = item.absolutePath
+                        }
+                        val drw = ai?.loadIcon(pm)
+                        if (drw != null) {
+                            val bmp = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888)
+                            val cvs = Canvas(bmp)
+                            drw.setBounds(0, 0, cvs.width, cvs.height)
+                            drw.draw(cvs)
+                            bmp
+                        } else null
+                    }
+                    else -> null
+                }
+            }.getOrNull()
+            if (loaded != null) {
+                TvThumbCache.put(item.absolutePath, loaded)
+            }
+            loaded
+        }
     }
     val dateStr = remember(item.timestampMs) {
         SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date(item.timestampMs))
@@ -568,12 +713,24 @@ private fun TvFileRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = if (lower.endsWith(".apk")) Color(0xFF4ADE80) else Color(0xFF22D3EE),
-                modifier = Modifier.size(28.dp),
-            )
+            if (thumb != null) {
+                Image(
+                    bitmap = thumb!!.asImageBitmap(),
+                    contentDescription = item.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp)),
+                )
+            } else {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = if (isApk) Color(0xFF4ADE80) else Color(0xFF22D3EE),
+                    modifier = Modifier.size(32.dp),
+                )
+            }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     item.name,

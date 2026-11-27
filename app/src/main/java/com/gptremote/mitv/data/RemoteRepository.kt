@@ -28,6 +28,7 @@ import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.model.SavedDevice
 import com.gptremote.mitv.model.TransferHistoryItem
 import com.gptremote.mitv.model.TransferProgress
+import com.gptremote.mitv.model.TransferQueueItem
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
 import java.io.File
@@ -133,7 +134,8 @@ class RemoteRepository(context: Context) {
         val files: List<SharedPcFile>,
         val isTransferring: Boolean,
         val transferProgress: TransferProgress?,
-        val pcHistory: List<TransferHistoryItem>
+        val pcHistory: List<TransferHistoryItem>,
+        val pcQueue: List<TransferQueueItem>
     )
 
     private data class PhoneShareFlows(
@@ -147,7 +149,8 @@ class RemoteRepository(context: Context) {
         val hotspotPassword: String?,
         val hotspotError: String?,
         val browserShareUrl: String?,
-        val hostedMediaItems: List<HostedMediaItem>
+        val hostedMediaItems: List<HostedMediaItem>,
+        val phoneQueue: List<TransferQueueItem>
     )
 
     private data class TvCompanionFlows(
@@ -156,7 +159,8 @@ class RemoteRepository(context: Context) {
         val tvFiles: List<SharedPcFile>,
         val tvProgress: TransferProgress?,
         val tvHistory: List<TransferHistoryItem>,
-        val castTargetKind: String?
+        val castTargetKind: String?,
+        val tvQueue: List<TransferQueueItem>
     )
 
     private data class DlnaFlows(
@@ -241,7 +245,8 @@ class RemoteRepository(context: Context) {
         wifiPcClient.sharedFiles,
         wifiPcClient.isTransferringFile,
         wifiPcClient.transferProgress,
-        wifiPcClient.pcTransferHistory
+        wifiPcClient.pcTransferHistory,
+        wifiPcClient.pcTransferQueue
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         MediaShareFlows(
@@ -251,7 +256,8 @@ class RemoteRepository(context: Context) {
             files = values[3] as List<SharedPcFile>,
             isTransferring = values[4] as Boolean,
             transferProgress = values[5] as TransferProgress?,
-            pcHistory = values[6] as List<TransferHistoryItem>
+            pcHistory = values[6] as List<TransferHistoryItem>,
+            pcQueue = values[7] as List<TransferQueueItem>
         )
     }
 
@@ -266,7 +272,8 @@ class RemoteRepository(context: Context) {
         phoneShareServer.hotspotPassword,
         phoneShareServer.hotspotError,
         phoneShareServer.browserShareUrl,
-        phoneShareServer.hostedMediaItems
+        phoneShareServer.hostedMediaItems,
+        phoneShareServer.transferQueue
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         PhoneShareFlows(
@@ -280,7 +287,8 @@ class RemoteRepository(context: Context) {
             hotspotPassword = values[7] as String?,
             hotspotError = values[8] as String?,
             browserShareUrl = values[9] as String?,
-            hostedMediaItems = values[10] as List<HostedMediaItem>
+            hostedMediaItems = values[10] as List<HostedMediaItem>,
+            phoneQueue = values[11] as List<TransferQueueItem>
         )
     }
 
@@ -298,7 +306,8 @@ class RemoteRepository(context: Context) {
         wifiPcClient.tvSharedFiles,
         wifiPcClient.tvTransferProgress,
         wifiPcClient.tvTransferHistory,
-        ScreenCastService.castTargetKind
+        ScreenCastService.castTargetKind,
+        wifiPcClient.tvTransferQueue
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         TvCompanionFlows(
@@ -307,7 +316,8 @@ class RemoteRepository(context: Context) {
             tvFiles = values[2] as List<SharedPcFile>,
             tvProgress = values[3] as TransferProgress?,
             tvHistory = values[4] as List<TransferHistoryItem>,
-            castTargetKind = values[5] as String?
+            castTargetKind = values[5] as String?,
+            tvQueue = values[6] as List<TransferQueueItem>
         )
     }
 
@@ -393,6 +403,7 @@ class RemoteRepository(context: Context) {
             sharedPcFiles = media.files,
             isTransferringFile = media.isTransferring,
             transferProgress = media.transferProgress,
+            pcTransferQueue = media.pcQueue,
             pcTransferHistory = media.pcHistory,
             smartBulbs = disc.bulbs,
             isScanningBulbs = disc.isScanningBulbs,
@@ -402,6 +413,7 @@ class RemoteRepository(context: Context) {
             peerPhoneName = phone.peerName,
             peerPhoneFiles = phone.peerFiles,
             phoneTransferProgress = phone.phoneProgress,
+            phoneTransferQueue = phone.phoneQueue,
             phoneTransferHistory = phone.phoneHistory,
             phoneHotspotSsid = phone.hotspotSsid,
             phoneHotspotPassword = phone.hotspotPassword,
@@ -415,6 +427,7 @@ class RemoteRepository(context: Context) {
             connectedTvCompanion = tv.connectedTv,
             tvCompanionFiles = tv.tvFiles,
             tvTransferProgress = tv.tvProgress,
+            tvTransferQueue = tv.tvQueue,
             tvTransferHistory = tv.tvHistory,
             isCastingToTv = media.isCastingPhone && tv.castTargetKind == "tv",
             lastStatusBanner = flags.banner,
@@ -755,6 +768,8 @@ class RemoteRepository(context: Context) {
         wifiPcClient.stopDiscovery()
         wifiPcClient.connect(device)
     }
+
+    fun reconnectPcIfNeeded() = wifiPcClient.reconnectIfNeeded()
 
     fun addAndConnectManualWifi(host: String, nickname: String, category: DeviceCategory) {
         val cleanHost = host.trim()
@@ -1241,6 +1256,37 @@ class RemoteRepository(context: Context) {
                 }
             }
             else -> statusBanner.value = "Connect via Wi-Fi or Bluetooth first to launch ${app.name}."
+        }
+    }
+
+    fun closeApp(app: LaunchableApp) {
+        haptics.click()
+        when (val current = uiState.value.status) {
+            is ConnectionStatus.Connected -> {
+                when (current.device.transport) {
+                    TransportMode.WIFI_ANDROID_TV -> {
+                        if (smartTvWsClient.connectionStatus.value is ConnectionStatus.Connected) {
+                            smartTvWsClient.closeApp(app.id)
+                        } else {
+                            wifiTvClient.sendButton(RemoteButton.HOME)
+                        }
+                    }
+                    TransportMode.WIFI_PC -> {
+                        wifiPcClient.closeApp(app.pcAppKey ?: app.id)
+                    }
+                    TransportMode.BLUETOOTH_HID -> {
+                        if (selectedBrand.value?.productType == ProductType.PC_LAPTOP ||
+                            current.device.category == DeviceCategory.LAPTOP_PC
+                        ) {
+                            bluetoothHid.closePcApp()
+                        } else {
+                            bluetoothHid.sendButton(RemoteButton.HOME)
+                        }
+                    }
+                }
+                statusBanner.value = "Closing ${app.name}..."
+            }
+            else -> statusBanner.value = "Connect via Wi-Fi or Bluetooth first to close ${app.name}."
         }
     }
 

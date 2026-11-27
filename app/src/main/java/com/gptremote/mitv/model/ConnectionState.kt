@@ -19,6 +19,13 @@ data class TransferProgress(
     val transferId: String = ""
 )
 
+data class TransferQueueItem(
+    val id: String,
+    val fileName: String,
+    val sizeBytes: Long,
+    val status: String = "Queued"
+)
+
 data class TransferHistoryItem(
     val id: String,
     val fileName: String,
@@ -82,6 +89,7 @@ data class RemoteUiState(
     val sharedPcFiles: List<SharedPcFile> = emptyList(),
     val isTransferringFile: Boolean = false,
     val transferProgress: TransferProgress? = null,
+    val pcTransferQueue: List<TransferQueueItem> = emptyList(),
     val pcTransferHistory: List<TransferHistoryItem> = emptyList(),
     val smartBulbs: List<DiscoveredSmartBulb> = emptyList(),
     val isScanningBulbs: Boolean = false,
@@ -91,6 +99,7 @@ data class RemoteUiState(
     val peerPhoneName: String? = null,
     val peerPhoneFiles: List<SharedPcFile> = emptyList(),
     val phoneTransferProgress: TransferProgress? = null,
+    val phoneTransferQueue: List<TransferQueueItem> = emptyList(),
     val phoneTransferHistory: List<TransferHistoryItem> = emptyList(),
     val phoneHotspotSsid: String? = null,
     val phoneHotspotPassword: String? = null,
@@ -104,6 +113,7 @@ data class RemoteUiState(
     val connectedTvCompanion: TvDevice.WifiPc? = null,
     val tvCompanionFiles: List<SharedPcFile> = emptyList(),
     val tvTransferProgress: TransferProgress? = null,
+    val tvTransferQueue: List<TransferQueueItem> = emptyList(),
     val tvTransferHistory: List<TransferHistoryItem> = emptyList(),
     val isCastingToTv: Boolean = false,
     val lastStatusBanner: String? = null,

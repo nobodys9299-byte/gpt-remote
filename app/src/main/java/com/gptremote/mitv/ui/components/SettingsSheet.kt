@@ -1,6 +1,7 @@
 package com.gptremote.mitv.ui.components
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,31 +10,47 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.QrCode2
+import androidx.compose.material.icons.rounded.QrCodeScanner
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.gptremote.mitv.haptic.HapticStrength
 import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.ui.theme.LocalAccentSoft
@@ -53,8 +70,69 @@ fun SettingsSheet(
     onSelectHapticStrength: (HapticStrength) -> Unit,
     onToggleSound: (Boolean) -> Unit,
     onSelectAccentTheme: (AppAccentTheme) -> Unit,
+    onScanQrCode: (() -> Unit)? = null,
+    phoneQrPayload: String? = null,
+    onRequestHostQr: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
+    var showMyQrDialog by remember { mutableStateOf(false) }
+
+    if (showMyQrDialog) {
+        Dialog(onDismissRequest = { showMyQrDialog = false }) {
+            Surface(
+                color = RemoteSurfaceElevated,
+                shape = RoundedCornerShape(24.dp),
+                border = BorderStroke(1.dp, RemoteBorder)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("My Phone QR Code", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        IconButton(onClick = { showMyQrDialog = false }) {
+                            Icon(Icons.Rounded.Close, contentDescription = "Close", tint = TextPrimary)
+                        }
+                    }
+                    val bmp = remember(phoneQrPayload) {
+                        phoneQrPayload?.takeIf { it.isNotBlank() }?.let { generateQrBitmap(it, 440) }
+                    }
+                    if (bmp != null) {
+                        Box(
+                            modifier = Modifier
+                                .size(210.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(Color.White)
+                                .padding(10.dp)
+                        ) {
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = "Phone Share QR Code",
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        Text(
+                            text = "Scan from another GPT Remote phone to connect & send files",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    } else {
+                        Text(
+                            text = "Connect to Wi-Fi or turn on Hotspot so this phone has a local IP for QR pairing.",
+                            color = Color(0xFFFBBF24),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = RemoteSurface
@@ -72,6 +150,45 @@ fun SettingsSheet(
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
             )
+
+            if (onScanQrCode != null || onRequestHostQr != null || phoneQrPayload != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (onScanQrCode != null) {
+                        Button(
+                            onClick = {
+                                onDismiss()
+                                onScanQrCode()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Scan QR Code", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            onRequestHostQr?.invoke()
+                            showMyQrDialog = true
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.QrCode2, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Show QR Code", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
 
             // Vibration Haptic Strength
             Column(
@@ -149,7 +266,11 @@ fun SettingsSheet(
                     onCheckedChange = onToggleSound,
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White,
-                        checkedTrackColor = MiOrange
+                        checkedTrackColor = MiOrange,
+                        checkedBorderColor = MiOrange,
+                        uncheckedThumbColor = Color(0xFFE2E8F0),
+                        uncheckedTrackColor = Color(0xFF334155),
+                        uncheckedBorderColor = Color(0xFF64748B)
                     )
                 )
             }

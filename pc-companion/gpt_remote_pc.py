@@ -98,6 +98,52 @@ class InputBackend:
             if app in linux_apps:
                 subprocess.Popen(linux_apps[app])
 
+    def close_app(self, app: str) -> None:
+        system = platform.system()
+        if system == "Windows":
+            proc_map = {
+                "calc": ["CalculatorApp.exe", "calc.exe"],
+                "terminal": ["cmd.exe", "WindowsTerminal.exe"],
+                "taskmgr": ["Taskmgr.exe"],
+                "settings": ["SystemSettings.exe"],
+                "browser": ["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"],
+                "youtube": ["chrome.exe", "msedge.exe"],
+                "netflix": ["chrome.exe", "msedge.exe"],
+            }
+            targets = proc_map.get(app, [])
+            killed = False
+            for exe in targets:
+                try:
+                    res = subprocess.run(
+                        ["taskkill", "/F", "/IM", exe],
+                        capture_output=True,
+                        creationflags=0x08000000,
+                    )
+                    if res.returncode == 0:
+                        killed = True
+                except Exception:
+                    pass
+            if not killed:
+                try:
+                    # Fallback: close foreground window cleanly via Alt+F4
+                    user32 = ctypes.windll.user32
+                    user32.keybd_event(0x12, 0, 0, 0)
+                    user32.keybd_event(0x73, 0, 0, 0)
+                    user32.keybd_event(0x73, 0, 2, 0)
+                    user32.keybd_event(0x12, 0, 2, 0)
+                except Exception:
+                    pass
+        elif system == "Darwin":
+            mac_procs = {"calc": "Calculator", "terminal": "Terminal", "browser": "Safari"}
+            name = mac_procs.get(app)
+            if name:
+                subprocess.Popen(["pkill", "-x", name])
+        else:
+            linux_procs = {"calc": "gnome-calculator", "terminal": "x-terminal-emulator"}
+            name = linux_procs.get(app)
+            if name:
+                subprocess.Popen(["pkill", "-f", name])
+
 
 def create_backend() -> InputBackend:
     if platform.system() == "Windows":
@@ -332,38 +378,109 @@ class PynputBackend(InputBackend):
 
 # ---- Screen Capture Helper ----
 
+def _overlay_windows_cursor(
+    img,
+    mon_left: int = 0,
+    mon_top: int = 0,
+    mon_w: int = 0,
+    mon_h: int = 0,
+):
+    """Draws the live Windows mouse cursor arrow onto the captured screen image."""
+    if platform.system() != "Windows":
+        return img
+    try:
+        from ctypes import wintypes
+        from PIL import ImageDraw
+
+        class _CURSORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("hCursor", wintypes.HANDLE),
+                ("ptScreenPos", wintypes.POINT),
+            ]
+
+        user32 = ctypes.windll.user32
+        user32.GetCursorInfo.argtypes = [ctypes.c_void_p]
+        user32.GetCursorInfo.restype = wintypes.BOOL
+        ci = _CURSORINFO()
+        ci.cbSize = ctypes.sizeof(_CURSORINFO)
+        if not user32.GetCursorInfo(ctypes.byref(ci)):
+            return img
+        if (ci.flags & 0x00000001) == 0:
+            return img
+
+        px = ci.ptScreenPos.x - mon_left
+        py = ci.ptScreenPos.y - mon_top
+        if mon_w > 0 and mon_h > 0:
+            cx = int(round(px * (img.width / float(mon_w))))
+            cy = int(round(py * (img.height / float(mon_h))))
+        else:
+            cx, cy = int(px), int(py)
+        if not (0 <= cx < img.width and 0 <= cy < img.height):
+            return img
+
+        draw = ImageDraw.Draw(img)
+        sc = max(1.0, img.height / 760.0)
+        pts = [
+            (cx, cy),
+            (cx, cy + int(round(19 * sc))),
+            (cx + int(round(4.5 * sc)), cy + int(round(14.5 * sc))),
+            (cx + int(round(7.8 * sc)), cy + int(round(21.5 * sc))),
+            (cx + int(round(10.5 * sc)), cy + int(round(20.2 * sc))),
+            (cx + int(round(7.2 * sc)), cy + int(round(13.2 * sc))),
+            (cx + int(round(13.5 * sc)), cy + int(round(13.2 * sc))),
+        ]
+        draw.polygon(pts, fill=(255, 255, 255), outline=(15, 23, 42))
+    except Exception:
+        pass
+    return img
+
+
 def capture_pc_jpeg(
     max_width: int = 1920,
     quality: int = 76,
     sct_ctx=None,
 ) -> bytes | None:
-    """Captures the primary PC screen as JPEG bytes. Reuses mss context for ~30fps speed."""
+    """Captures the primary PC screen as JPEG bytes with live cursor overlay."""
     try:
         from PIL import Image
     except ImportError:
         return None
 
     img = None
+    mon_left, mon_top, mon_w, mon_h = 0, 0, 0, 0
     try:
         if sct_ctx is not None:
             mon = sct_ctx.monitors[1] if len(sct_ctx.monitors) > 1 else sct_ctx.monitors[0]
             raw = sct_ctx.grab(mon)
+            mon_left = int(mon.get("left", 0))
+            mon_top = int(mon.get("top", 0))
+            mon_w = int(mon.get("width", raw.size[0]))
+            mon_h = int(mon.get("height", raw.size[1]))
             img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
         else:
             import mss  # type: ignore
             with mss.mss() as sct:
                 mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
                 raw = sct.grab(mon)
+                mon_left = int(mon.get("left", 0))
+                mon_top = int(mon.get("top", 0))
+                mon_w = int(mon.get("width", raw.size[0]))
+                mon_h = int(mon.get("height", raw.size[1]))
                 img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
     except Exception:
         try:
             from PIL import ImageGrab
             img = ImageGrab.grab()
+            mon_w, mon_h = img.size
         except Exception:
             img = None
 
     if img is None:
         return None
+
+    img = _overlay_windows_cursor(img, mon_left, mon_top, mon_w, mon_h)
 
     w, h = img.size
     if w > max_width:
@@ -420,12 +537,66 @@ class RemoteServerState:
         self.transfer_history: list[dict] = []
         self.transfer_cancel_event = threading.Event()
         self.cancelled_sessions: set[str] = set()
+        self.paused_sessions: set[str] = set()
+        self.session_control_commands: dict[str, str] = {}
         self.active_transfer_session: str | None = None
         self.upload_parts: dict[str, tuple[str, str]] = {}
         self.on_change = None
         self.on_files_change = None
         self.on_phone_frame = None
         self.on_transfer = None
+
+    def request_pause_or_resume_transfer(self, session_id: str = "") -> None:
+        with self._lock:
+            target_sid = session_id or self.active_transfer_session or ""
+            info = self.transfer_info
+            if not info:
+                return
+            was_paused = bool(info.get("paused")) or (bool(target_sid) and target_sid in self.paused_sessions)
+            info_name = info.get("filename", "transfer")
+            info_done = int(info.get("done", 0))
+            info_total = int(info.get("total", max(1, info_done)))
+            if was_paused:
+                if target_sid:
+                    self.paused_sessions.discard(target_sid)
+                    self.session_control_commands[target_sid] = "resume"
+                new_dir = "Receiving from Phone"
+                new_paused = False
+            else:
+                if target_sid:
+                    self.paused_sessions.add(target_sid)
+                    self.session_control_commands[target_sid] = "pause"
+                new_dir = "Paused"
+                new_paused = True
+        self.update_transfer(new_dir, info_name, info_done, info_total, True, 0.0, paused=new_paused)
+
+    def set_remote_paused(self, session_id: str, paused: bool) -> None:
+        with self._lock:
+            target_sid = session_id or self.active_transfer_session or ""
+            if target_sid:
+                if paused:
+                    self.paused_sessions.add(target_sid)
+                else:
+                    self.paused_sessions.discard(target_sid)
+            info = self.transfer_info
+            if not info:
+                return
+            info_name = info.get("filename", "transfer")
+            info_done = int(info.get("done", 0))
+            info_total = int(info.get("total", max(1, info_done)))
+        if paused:
+            self.update_transfer("Paused", info_name, info_done, info_total, True, 0.0, paused=True)
+        else:
+            self.update_transfer("Receiving from Phone", info_name, info_done, info_total, True, 0.0, paused=False)
+
+    def pop_control_command(self, session_id: str) -> tuple[str, bool]:
+        sid = session_id.strip()
+        with self._lock:
+            if not sid:
+                return "none", False
+            action = self.session_control_commands.pop(sid, "none")
+            is_paused = sid in self.paused_sessions
+            return action, is_paused
 
     def request_cancel_transfer(self, session_id: str = "") -> None:
         target_sid = session_id or self.active_transfer_session or ""
@@ -434,6 +605,8 @@ class RemoteServerState:
         with self._lock:
             if target_sid:
                 self.cancelled_sessions.add(target_sid)
+                self.paused_sessions.discard(target_sid)
+                self.session_control_commands[target_sid] = "cancel"
             else:
                 self.transfer_cancel_event.set()
             if self.transfer_info:
@@ -446,7 +619,7 @@ class RemoteServerState:
             except OSError:
                 pass
         if info_name:
-            self.update_transfer("Cancelled", info_name, info_done, max(1, info_done), False, 0.0)
+            self.update_transfer("Cancelled", info_name, info_done, max(1, info_done), False, 0.0, paused=False)
             self.record_history("cancelled", info_name, info_done, "", 0.0)
 
     def report_bind_error(self, msg: str) -> None:
@@ -464,6 +637,7 @@ class RemoteServerState:
         total_bytes: int,
         active: bool = True,
         speed_bps: float = 0.0,
+        paused: bool = False,
     ) -> None:
         with self._lock:
             self.transfer_info = {
@@ -473,6 +647,7 @@ class RemoteServerState:
                 "total": total_bytes,
                 "active": active,
                 "speed_bps": speed_bps,
+                "paused": paused,
             }
             cb = self.on_transfer
         if cb:
@@ -634,6 +809,8 @@ def handle_client(
                     backend.text(msg.get("s", ""))
                 elif t == "launch":
                     backend.launch(msg.get("app", ""))
+                elif t == "close_app":
+                    backend.close_app(msg.get("app", ""))
                 elif t == "ping":
                     conn.sendall(b'{"type":"pong"}\n')
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
@@ -765,13 +942,200 @@ def unique_target_path(folder: str, filename: str) -> str:
     return candidate
 
 
-TRANSFER_CHUNK_SIZE = 1024 * 1024
+TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024
 
 
 class ThreadingHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     request_queue_size = 32
     allow_reuse_address = True
+
+
+def _extract_windows_shell_image(path: str, size: int = 48):
+    """Uses IShellItemImageFactory::GetImage on Windows to extract native Explorer thumbnails (videos/APKs/docs)."""
+    if platform.system() != "Windows" or not os.path.exists(path):
+        return None
+    try:
+        from ctypes import wintypes
+        from PIL import Image
+
+        class _SIZE(ctypes.Structure):
+            _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        class _BITMAP(ctypes.Structure):
+            _fields_ = [
+                ("bmType", ctypes.c_long),
+                ("bmWidth", ctypes.c_long),
+                ("bmHeight", ctypes.c_long),
+                ("bmWidthBytes", ctypes.c_long),
+                ("bmPlanes", wintypes.WORD),
+                ("bmBitsPixel", wintypes.WORD),
+                ("bmBits", ctypes.c_void_p),
+            ]
+
+        class _BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        iid = _GUID(0xBCC18B79, 0xBA16, 0x442F, (ctypes.c_ubyte * 8)(0x80, 0xC4, 0x8A, 0x59, 0xC3, 0x0C, 0x46, 0x3B))
+        ole32 = ctypes.windll.ole32
+        shell32 = ctypes.windll.shell32
+        gdi32 = ctypes.windll.gdi32
+        user32 = ctypes.windll.user32
+
+        ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        shell32.SHCreateItemFromParsingName.argtypes = [
+            wintypes.LPCWSTR,
+            ctypes.c_void_p,
+            ctypes.POINTER(_GUID),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        shell32.SHCreateItemFromParsingName.restype = ctypes.c_long
+        gdi32.GetObjectW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        gdi32.GetObjectW.restype = ctypes.c_int
+        gdi32.GetDIBits.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.UINT,
+            wintypes.UINT,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.UINT,
+        ]
+        gdi32.GetDIBits.restype = ctypes.c_int
+        gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+        gdi32.DeleteObject.restype = wintypes.BOOL
+        user32.GetDC.argtypes = [ctypes.c_void_p]
+        user32.GetDC.restype = ctypes.c_void_p
+        user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        user32.ReleaseDC.restype = ctypes.c_int
+
+        ole32.CoInitializeEx(None, 0x2)
+        item_ptr = ctypes.c_void_p()
+        hr = shell32.SHCreateItemFromParsingName(
+            os.path.abspath(path), None, ctypes.byref(iid), ctypes.byref(item_ptr)
+        )
+        if hr != 0 or not item_ptr.value:
+            return None
+
+        try:
+            vtable = ctypes.cast(item_ptr, ctypes.POINTER(ctypes.c_void_p))[0]
+            fn_ptr = ctypes.cast(vtable, ctypes.POINTER(ctypes.c_void_p))[3]  # GetImage
+            GET_IMAGE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, _SIZE, ctypes.c_int, ctypes.POINTER(wintypes.HBITMAP))
+            get_image = GET_IMAGE(fn_ptr)
+
+            hbmp = wintypes.HBITMAP()
+            hr_img = get_image(item_ptr, _SIZE(size, size), 0x00000000, ctypes.byref(hbmp))
+            if hr_img != 0 or not hbmp.value:
+                return None
+
+            try:
+                bm = _BITMAP()
+                if not gdi32.GetObjectW(hbmp, ctypes.sizeof(_BITMAP), ctypes.byref(bm)):
+                    return None
+                w, h = bm.bmWidth, bm.bmHeight
+                if w <= 0 or h <= 0:
+                    return None
+
+                bmi = _BITMAPINFOHEADER()
+                bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+                bmi.biWidth = w
+                bmi.biHeight = -h
+                bmi.biPlanes = 1
+                bmi.biBitCount = 32
+                bmi.biCompression = 0  # BI_RGB
+
+                buf = (ctypes.c_ubyte * (w * h * 4))()
+                hdc = user32.GetDC(None)
+                try:
+                    lines = gdi32.GetDIBits(hdc, hbmp, 0, h, buf, ctypes.byref(bmi), 0)
+                finally:
+                    user32.ReleaseDC(None, hdc)
+                if lines == 0:
+                    return None
+                return Image.frombuffer("RGBA", (w, h), bytes(buf), "raw", "BGRA", 0, 1).convert("RGB")
+            finally:
+                gdi32.DeleteObject(hbmp)
+        finally:
+            vtable = ctypes.cast(item_ptr, ctypes.POINTER(ctypes.c_void_p))[0]
+            rel_ptr = ctypes.cast(vtable, ctypes.POINTER(ctypes.c_void_p))[2]  # IUnknown::Release
+            RELEASE = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+            RELEASE(rel_ptr)(item_ptr)
+    except Exception:
+        return None
+
+
+def generate_file_preview_pil(path: str, size: int = 44):
+    """Returns a PIL RGB/RGBA thumbnail for image/video/file with rounded stylized fallback."""
+    try:
+        from PIL import Image, ImageDraw, ImageOps
+    except ImportError:
+        return None
+
+    ext = os.path.splitext(path)[1].lower()
+    is_img = ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+    img = None
+    if is_img and os.path.isfile(path):
+        try:
+            with Image.open(path) as im:
+                im = ImageOps.exif_transpose(im)
+                img = ImageOps.fit(im.convert("RGB"), (size, size), Image.Resampling.BILINEAR)
+        except Exception:
+            img = None
+
+    if img is None and os.path.isfile(path):
+        shell_im = _extract_windows_shell_image(path, max(64, size * 2))
+        if shell_im is not None:
+            try:
+                img = ImageOps.fit(shell_im, (size, size), Image.Resampling.BILINEAR)
+            except Exception:
+                img = None
+
+    if img is None:
+        bg_hex, label = ("#17324F", "FILE")
+        if ext in (".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"):
+            bg_hex, label = ("#0F3B5C", "VID")
+        elif is_img:
+            bg_hex, label = ("#4A1C3C", "IMG")
+        elif ext == ".apk":
+            bg_hex, label = ("#123D2B", "APK")
+        elif ext == ".pdf":
+            bg_hex, label = ("#4B1B22", "PDF")
+        elif ext in (".zip", ".rar", ".7z", ".tar", ".gz"):
+            bg_hex, label = ("#473311", "ZIP")
+        elif ext in (".mp3", ".wav", ".m4a", ".aac", ".flac"):
+            bg_hex, label = ("#12423D", "AUD")
+        elif ext in (".exe", ".msi"):
+            bg_hex, label = ("#322354", "APP")
+
+        img = Image.new("RGB", (size, size), bg_hex)
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([1, 1, size - 2, size - 2], outline="#3B4963", width=1)
+        tx = max(4, (size - len(label) * 7) // 2)
+        ty = max(6, (size - 10) // 2)
+        draw.text((tx, ty), label, fill="#F8FAFC")
+
+    return img
 
 
 def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event) -> None:
@@ -785,8 +1149,8 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
             super().setup()
             try:
                 self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
             except OSError:
                 pass
 
@@ -830,6 +1194,29 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                     if part_entry and os.path.isfile(part_entry[0]):
                         existing = os.path.getsize(part_entry[0])
                 self._send_json(200, {"bytes": existing})
+            elif parsed.path == "/transfer-control":
+                params = urllib.parse.parse_qs(parsed.query)
+                sid = params.get("session", [""])[0].strip()
+                action, is_paused = state.pop_control_command(sid)
+                self._send_json(200, {"action": action, "paused": is_paused})
+            elif parsed.path == "/thumb":
+                params = urllib.parse.parse_qs(parsed.query)
+                safe_name = sanitize_filename(params.get("name", [""])[0])
+                full = os.path.join(state.shared_dir, safe_name)
+                pil_img = generate_file_preview_pil(full, 96)
+                if pil_img is None:
+                    self.send_error(404)
+                    return
+                buf = io.BytesIO()
+                pil_img.save(buf, format="JPEG", quality=82)
+                raw = buf.getvalue()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(raw)
+                self.wfile.flush()
             elif parsed.path == "/download":
                 params = urllib.parse.parse_qs(parsed.query)
                 raw_name = params.get("name", [""])[0]
@@ -865,8 +1252,8 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 self.end_headers()
 
                 sent_this_conn = 0
-                last_notify = 0
-                start_ts = time.monotonic()
+                last_emit_ts = time.monotonic()
+                start_ts = last_emit_ts
                 state.update_transfer("Sending to Phone", safe_name, start_offset, size, True, 0.0)
                 cancelled = False
                 try:
@@ -885,9 +1272,10 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                             sent_this_conn += len(chunk)
                             remaining -= len(chunk)
                             total_done = start_offset + sent_this_conn
-                            if sent_this_conn - last_notify >= TRANSFER_CHUNK_SIZE or remaining == 0:
-                                last_notify = sent_this_conn
-                                spd = sent_this_conn / max(0.001, time.monotonic() - start_ts)
+                            now_ts = time.monotonic()
+                            if now_ts - last_emit_ts >= 0.22 or remaining == 0:
+                                last_emit_ts = now_ts
+                                spd = sent_this_conn / max(0.001, now_ts - start_ts)
                                 state.update_transfer("Sending to Phone", safe_name, total_done, size, True, spd)
                     self.wfile.flush()
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
@@ -922,6 +1310,22 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 self._send_json(200, {"ok": True, "cancelled": True})
                 return
 
+            if parsed.path == "/transfer-pause":
+                sid = params.get("session", [""])[0].strip()
+                if 0 < length < 65536:
+                    self.rfile.read(length)
+                state.set_remote_paused(sid, True)
+                self._send_json(200, {"ok": True, "paused": True})
+                return
+
+            if parsed.path == "/transfer-resume":
+                sid = params.get("session", [""])[0].strip()
+                if 0 < length < 65536:
+                    self.rfile.read(length)
+                state.set_remote_paused(sid, False)
+                self._send_json(200, {"ok": True, "paused": False})
+                return
+
             if parsed.path == "/upload":
                 sid = params.get("session", [""])[0].strip()
                 offset = max(0, int(params.get("offset", ["0"])[0] or "0"))
@@ -933,6 +1337,8 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 os.makedirs(state.shared_dir, exist_ok=True)
                 if sid:
                     state.cancelled_sessions.discard(sid)
+                    state.paused_sessions.discard(sid)
+                    state.session_control_commands.pop(sid, None)
                     part_entry = state.upload_parts.get(sid)
                     part_path = part_entry[0] if part_entry else os.path.join(state.shared_dir, f".upload_{sanitize_filename(sid)}.gptpart")
                     state.upload_parts[sid] = (part_path, safe_name)
@@ -943,9 +1349,9 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
 
                 remaining = length
                 received = 0
-                last_notify = 0
                 start_ts = time.monotonic()
-                state.update_transfer("Receiving from Phone", safe_name, offset, total_expected, True, 0.0)
+                last_emit_ts = start_ts
+                state.update_transfer("Receiving from Phone", safe_name, offset, total_expected, True, 0.0, paused=False)
                 cancelled = False
                 completed = False
                 saved_path = part_path
@@ -966,10 +1372,11 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                             remaining -= len(chunk)
                             received += len(chunk)
                             overall_done = offset + received
-                            if received - last_notify >= TRANSFER_CHUNK_SIZE or remaining == 0:
-                                last_notify = received
-                                spd = received / max(0.001, time.monotonic() - start_ts)
-                                state.update_transfer("Receiving from Phone", safe_name, overall_done, total_expected, True, spd)
+                            now_ts = time.monotonic()
+                            if (now_ts - last_emit_ts >= 0.22 or remaining == 0) and not (sid and sid in state.paused_sessions):
+                                last_emit_ts = now_ts
+                                spd = received / max(0.001, now_ts - start_ts)
+                                state.update_transfer("Receiving from Phone", safe_name, overall_done, total_expected, True, spd, paused=False)
                     overall_done = offset + received
                     if cancelled or (sid and sid in state.cancelled_sessions):
                         if sid:
@@ -1242,37 +1649,7 @@ def run_windows_desktop_app(
         pady=7,
         cursor="hand2",
     )
-    qr_toggle_btn.pack(side="left", padx=(0, 8))
-
-    tk.Button(
-        btn_hdr,
-        text="Allow Firewall",
-        command=allow_windows_firewall,
-        bg=ELEV,
-        fg=BLUE,
-        activebackground=BORDER,
-        activeforeground=BLUE,
-        relief="flat",
-        font=("Segoe UI", 9, "bold"),
-        padx=12,
-        pady=7,
-        cursor="hand2",
-    ).pack(side="left", padx=(0, 8))
-
-    tk.Button(
-        btn_hdr,
-        text="Exit App",
-        command=quit_completely,
-        bg="#341A1D",
-        fg="#F87171",
-        activebackground="#4C2226",
-        activeforeground="#FCA5A5",
-        relief="flat",
-        font=("Segoe UI", 9, "bold"),
-        padx=12,
-        pady=7,
-        cursor="hand2",
-    ).pack(side="left")
+    qr_toggle_btn.pack(side="left")
 
     # Main 2-Column Landscape Grid
     main_row = tk.Frame(root, bg=BG)
@@ -1586,8 +1963,23 @@ def run_windows_desktop_app(
         cursor="hand2",
     )
 
+    transfer_pause_btn = tk.Button(
+        prog_hdr,
+        text="Pause",
+        command=lambda: state.request_pause_or_resume_transfer(),
+        bg=ELEV,
+        fg=BLUE,
+        activebackground=BORDER,
+        activeforeground=TXT,
+        relief="flat",
+        font=("Segoe UI", 8, "bold"),
+        padx=8,
+        pady=2,
+        cursor="hand2",
+    )
+
     transfer_pct_lbl = tk.Label(
-        prog_hdr, textvariable=transfer_pct_var, bg=CARD, fg=ORANGE, font=("Segoe UI", 10, "bold")
+        prog_hdr, textvariable=transfer_pct_var, bg=CARD, fg=ORANGE, font=("Segoe UI", 13, "bold")
     )
     transfer_pct_lbl.pack(side="right")
 
@@ -1598,7 +1990,7 @@ def run_windows_desktop_app(
         anchor="w", padx=16, pady=(0, 12)
     )
 
-    def draw_progress_bar(fraction: float, active: bool):
+    def draw_progress_bar(fraction: float, active: bool, paused: bool = False):
         prog_canvas.delete("all")
         w = prog_canvas.winfo_width()
         if w < 10:
@@ -1607,21 +1999,29 @@ def run_windows_desktop_app(
         fill_w = max(0, min(w, int(w * fraction)))
         prog_canvas.create_rectangle(0, 0, w, h, fill=ELEV, outline="")
         if fill_w > 0:
-            color = ORANGE if active else GREEN
+            color = "#FBBF24" if paused else (ORANGE if active else GREEN)
             prog_canvas.create_rectangle(0, 0, fill_w, h, fill=color, outline="")
 
     def refresh_transfer():
         info = state.transfer_info
         if not info:
+            transfer_pause_btn.pack_forget()
             transfer_cancel_btn.pack_forget()
             transfer_title_var.set("File Transfer Ready")
             transfer_pct_var.set("")
             transfer_detail_var.set("Progress appears here when sending or receiving files")
             draw_progress_bar(0.0, False)
             return
+        is_paused = bool(info.get("paused"))
         if info.get("active"):
-            transfer_cancel_btn.pack(side="right", padx=(0, 8))
+            transfer_cancel_btn.pack(side="right", padx=(0, 6))
+            transfer_pause_btn.configure(
+                text="Resume" if is_paused else "Pause",
+                fg=GREEN if is_paused else BLUE,
+            )
+            transfer_pause_btn.pack(side="right", padx=(0, 6))
         else:
+            transfer_pause_btn.pack_forget()
             transfer_cancel_btn.pack_forget()
         total = max(1, info["total"])
         done = info["done"]
@@ -1629,14 +2029,14 @@ def run_windows_desktop_app(
         pct = int(round(frac * 100))
         done_mb = done / (1024.0 * 1024.0)
         tot_mb = total / (1024.0 * 1024.0)
-        speed_txt = format_speed(info.get("speed_bps", 0.0))
+        speed_txt = "Paused" if is_paused else format_speed(info.get("speed_bps", 0.0))
         transfer_title_var.set(f"{info['direction']}: {info['filename']}")
         transfer_pct_var.set(f"{pct}%")
         d_lower = str(info.get("direction", "")).lower()
-        pct_color = "#FBBF24" if ("pause" in d_lower or "cancel" in d_lower) else (ORANGE if info["active"] else GREEN)
+        pct_color = "#FBBF24" if (is_paused or "pause" in d_lower or "cancel" in d_lower) else (ORANGE if info["active"] else GREEN)
         transfer_pct_lbl.configure(fg=pct_color)
         transfer_detail_var.set(f"{done_mb:.2f} MB / {tot_mb:.2f} MB   •   {speed_txt}")
-        draw_progress_bar(frac, info["active"])
+        draw_progress_bar(frac, info["active"], paused=is_paused)
 
     prog_canvas.bind("<Configure>", lambda _e: refresh_transfer())
 
@@ -1665,16 +2065,33 @@ def run_windows_desktop_app(
     tab_sent_btn.pack(side="left", padx=(0, 6))
     tab_recv_btn.pack(side="left")
 
-    files_listbox = tk.Listbox(
-        file_card,
-        bg=ELEV,
-        fg=TXT,
-        selectbackground=ORANGE,
-        selectforeground="#FFFFFF",
-        borderwidth=0,
-        highlightthickness=0,
-        font=("Segoe UI", 9),
-    )
+    files_list_wrap = tk.Frame(file_card, bg=ELEV)
+    files_canvas = tk.Canvas(files_list_wrap, bg=ELEV, highlightthickness=0, borderwidth=0)
+    files_scroll = tk.Scrollbar(files_list_wrap, orient="vertical", command=files_canvas.yview)
+    files_inner = tk.Frame(files_canvas, bg=ELEV)
+    files_canvas_win = files_canvas.create_window((0, 0), window=files_inner, anchor="nw")
+    files_canvas.configure(yscrollcommand=files_scroll.set)
+    files_canvas.pack(side="left", fill="both", expand=True)
+    files_scroll.pack(side="right", fill="y")
+
+    def _on_inner_cfg(_e=None):
+        files_canvas.configure(scrollregion=files_canvas.bbox("all"))
+
+    def _on_canvas_cfg(event):
+        files_canvas.itemconfigure(files_canvas_win, width=event.width)
+
+    files_inner.bind("<Configure>", _on_inner_cfg)
+    files_canvas.bind("<Configure>", _on_canvas_cfg)
+
+    def _on_wheel(event):
+        try:
+            files_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        except Exception:
+            pass
+
+    files_canvas.bind("<MouseWheel>", _on_wheel)
+
+    thumb_photo_cache: dict[str, object] = {}
 
     def format_size_short(sz: int) -> str:
         if sz >= 1024 * 1024:
@@ -1684,23 +2101,109 @@ def run_windows_desktop_app(
     def file_badge_and_color(filename: str) -> tuple[str, str]:
         ext = os.path.splitext(filename)[1].lower()
         if ext in (".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"):
-            return "[VID]", "#38BDF8"
+            return "VID", "#38BDF8"
         if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"):
-            return "[IMG]", "#F472B6"
+            return "IMG", "#F472B6"
         if ext == ".apk":
-            return "[APK]", "#34D399"
+            return "APK", "#34D399"
         if ext == ".pdf":
-            return "[PDF]", "#F87171"
+            return "PDF", "#F87171"
         if ext in (".zip", ".rar", ".7z", ".tar", ".gz"):
-            return "[ZIP]", "#FBBF24"
+            return "ZIP", "#FBBF24"
         if ext in (".mp3", ".wav", ".m4a", ".aac", ".flac"):
-            return "[AUD]", "#2DD4BF"
+            return "AUD", "#2DD4BF"
         if ext in (".exe", ".msi"):
-            return "[APP]", "#A78BFA"
-        return "[FILE]", TXT
+            return "APP", "#A78BFA"
+        return "FILE", TXT
+
+    def open_path_directly(path: str):
+        if path and os.path.exists(path):
+            try:
+                os.startfile(path)
+            except Exception as exc:
+                messagebox.showerror("Open File", f"Could not open file: {exc}")
+        else:
+            messagebox.showwarning("File Missing", f"File no longer exists:\n{path}")
+
+    def attach_thumb_async(lbl_widget: tk.Label, full_path: str):
+        cached = thumb_photo_cache.get(full_path)
+        if cached is not None:
+            lbl_widget.configure(image=cached, text="", width=40, height=40)
+            return
+
+        def worker():
+            pil_im = generate_file_preview_pil(full_path, 40)
+            if pil_im is None:
+                return
+
+            def apply_ui():
+                if not lbl_widget.winfo_exists():
+                    return
+                try:
+                    from PIL import ImageTk
+                    photo = ImageTk.PhotoImage(pil_im)
+                    if len(thumb_photo_cache) > 120:
+                        thumb_photo_cache.clear()
+                    thumb_photo_cache[full_path] = photo
+                    lbl_widget.configure(image=photo, text="", width=40, height=40)
+                except Exception:
+                    pass
+
+            try:
+                root.after(0, apply_ui)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def build_file_row(name: str, sub_txt: str, full_path: str):
+        badge, color = file_badge_and_color(name)
+        row_card = tk.Frame(files_inner, bg=CARD, highlightbackground=BORDER, highlightthickness=1, cursor="hand2")
+        row_card.pack(fill="x", padx=8, pady=4)
+
+        thumb_lbl = tk.Label(
+            row_card,
+            text=badge,
+            bg=ELEV,
+            fg=color,
+            font=("Segoe UI", 8, "bold"),
+            width=5,
+            height=2,
+        )
+        thumb_lbl.pack(side="left", padx=(8, 10), pady=6)
+        if full_path and os.path.isfile(full_path):
+            attach_thumb_async(thumb_lbl, full_path)
+
+        text_col = tk.Frame(row_card, bg=CARD)
+        text_col.pack(side="left", fill="both", expand=True, pady=6)
+        name_lbl = tk.Label(text_col, text=name, bg=CARD, fg=TXT, font=("Segoe UI", 9, "bold"), anchor="w")
+        name_lbl.pack(fill="x")
+        sub_lbl = tk.Label(text_col, text=sub_txt, bg=CARD, fg=SUB, font=("Segoe UI", 8), anchor="w")
+        sub_lbl.pack(fill="x")
+
+        open_btn = tk.Button(
+            row_card,
+            text="Open",
+            command=lambda p=full_path: open_path_directly(p),
+            bg=ELEV,
+            fg=BLUE,
+            activebackground=BORDER,
+            activeforeground=TXT,
+            relief="flat",
+            font=("Segoe UI", 8, "bold"),
+            padx=10,
+            pady=4,
+            cursor="hand2",
+        )
+        open_btn.pack(side="right", padx=(6, 10))
+
+        for w_item in (row_card, thumb_lbl, text_col, name_lbl, sub_lbl):
+            w_item.bind("<Double-Button-1>", lambda _e, p=full_path: open_path_directly(p))
+            w_item.bind("<MouseWheel>", _on_wheel)
 
     def refresh_files():
-        files_listbox.delete(0, tk.END)
+        for child in files_inner.winfo_children():
+            child.destroy()
         visible_paths.clear()
         os.makedirs(state.shared_dir, exist_ok=True)
         mode = history_mode.get()
@@ -1728,36 +2231,42 @@ def run_windows_desktop_app(
                 if not e.endswith(".gptpart") and os.path.isfile(os.path.join(state.shared_dir, e))
             )
             if not entries:
-                files_listbox.insert(tk.END, "  (Folder empty — click + Share File or send from phone)")
+                tk.Label(
+                    files_inner,
+                    text="Folder empty — click + Share File or send from phone",
+                    bg=ELEV,
+                    fg=SUB,
+                    font=("Segoe UI", 9),
+                    pady=24,
+                ).pack(fill="x")
             else:
-                for row_idx, e in enumerate(entries):
+                for e in entries:
                     full = os.path.join(state.shared_dir, e)
                     sz = os.path.getsize(full)
-                    badge, color = file_badge_and_color(e)
                     visible_paths.append(full)
-                    files_listbox.insert(tk.END, f"  {badge}  {e}    ({format_size_short(sz)})")
-                    try:
-                        files_listbox.itemconfig(row_idx, fg=color)
-                    except Exception:
-                        pass
+                    build_file_row(e, format_size_short(sz), full)
         else:
             items = [h for h in state.transfer_history if h["kind"] == mode]
             if not items:
                 label = "sent to phone" if mode == "sent" else "received from phone"
-                files_listbox.insert(tk.END, f"  (No files {label} in this session yet)")
+                tk.Label(
+                    files_inner,
+                    text=f"No files {label} in this session yet",
+                    bg=ELEV,
+                    fg=SUB,
+                    font=("Segoe UI", 9),
+                    pady=24,
+                ).pack(fill="x")
             else:
-                for row_idx, h in enumerate(items):
+                for h in items:
                     spd = format_speed(h.get("speed_bps", 0.0))
-                    badge, color = file_badge_and_color(h["filename"])
                     visible_paths.append(h["path"])
-                    files_listbox.insert(
-                        tk.END,
-                        f"  [{h['ts']}]  {badge}  {h['filename']}    ({format_size_short(h['size'])} • {spd})",
+                    build_file_row(
+                        h["filename"],
+                        f"{h['ts']}  •  {format_size_short(h['size'])}  •  {spd}",
+                        h["path"],
                     )
-                    try:
-                        files_listbox.itemconfig(row_idx, fg=color)
-                    except Exception:
-                        pass
+        files_canvas.yview_moveto(0.0)
 
     def set_history_mode(mode: str):
         history_mode.set(mode)
@@ -1766,24 +2275,6 @@ def run_windows_desktop_app(
     tab_all_btn.configure(command=lambda: set_history_mode("all"))
     tab_sent_btn.configure(command=lambda: set_history_mode("sent"))
     tab_recv_btn.configure(command=lambda: set_history_mode("received"))
-
-    def open_selected_file(_event=None):
-        sel = files_listbox.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        if 0 <= idx < len(visible_paths):
-            path = visible_paths[idx]
-            if os.path.exists(path):
-                try:
-                    os.startfile(path)
-                except Exception as exc:
-                    messagebox.showerror("Open File", f"Could not open file: {exc}")
-            else:
-                messagebox.showwarning("File Missing", f"File no longer exists:\n{path}")
-
-    files_listbox.bind("<Double-Button-1>", open_selected_file)
-    files_listbox.bind("<Return>", open_selected_file)
 
     def add_files_to_share():
         picked = filedialog.askopenfilenames(title="Select file(s) to share with phone")
@@ -1826,7 +2317,7 @@ def run_windows_desktop_app(
         font=("Segoe UI", 8),
     ).pack(anchor="w", padx=16, pady=(0, 8))
 
-    files_listbox.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+    files_list_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
     # Wire live background state updates safely onto Tk thread
     state.on_change = lambda: root.after(0, refresh_status)

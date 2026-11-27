@@ -299,32 +299,24 @@ class MainActivity : ComponentActivity() {
                 if (pendingShareUris.isNotEmpty()) {
                     ShareIncomingFilesDialog(
                         uris = pendingShareUris,
-                        pcHost = viewModel.getConnectedPcHost(),
+                        pcName = uiState.connectedWifiPcDevice?.name,
+                        pcHost = uiState.connectedWifiPcDevice?.host ?: viewModel.getConnectedPcHost(),
                         peerPhoneName = uiState.peerPhoneName,
                         tvCompanionName = uiState.connectedTvCompanion?.name,
                         onSendToPc = {
                             val uris = pendingShareUris
                             incomingShareUris.value = emptyList()
-                            if (viewModel.getConnectedPcHost() != null) {
-                                viewModel.uploadFilesToPc(uris)
-                                val pcBrand = ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
-                                viewModel.selectProductBrand(pcBrand)
-                                route = AppRoute.Remote(pcBrand)
-                            } else {
-                                queuedShareAfterQr = uris
-                                showGlobalQrScanner = true
-                            }
+                            viewModel.uploadFilesToPc(uris)
+                            val pcBrand = ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
+                            viewModel.selectProductBrand(pcBrand)
+                            route = AppRoute.Remote(pcBrand)
                         },
                         onSendToPhone = {
                             val uris = pendingShareUris
                             incomingShareUris.value = emptyList()
                             val phoneBrand = ProductCatalog.brandsFor(ProductType.PHONE_TO_PHONE).first()
                             viewModel.selectProductBrand(phoneBrand)
-                            if (uiState.peerPhoneName != null) {
-                                viewModel.sendFilesToPeerPhone(uris)
-                            } else {
-                                viewModel.addLocalFilesToPhoneShare(uris)
-                            }
+                            viewModel.sendFilesToPeerPhone(uris)
                             route = AppRoute.Remote(phoneBrand)
                         },
                         onSendToTvCompanion = {
@@ -332,21 +324,7 @@ class MainActivity : ComponentActivity() {
                             incomingShareUris.value = emptyList()
                             val tvBrand = ProductCatalog.brandsFor(ProductType.SMART_TV).first()
                             viewModel.selectProductBrand(tvBrand)
-                            if (uiState.connectedTvCompanion != null) {
-                                viewModel.uploadFilesToTv(uris)
-                                route = AppRoute.Remote(tvBrand)
-                            } else {
-                                queuedShareAfterQr = uris
-                                showGlobalQrScanner = true
-                            }
-                        },
-                        onShareViaTvBrowserOrDlna = {
-                            val uris = pendingShareUris
-                            incomingShareUris.value = emptyList()
-                            val tvBrand = ProductCatalog.brandsFor(ProductType.SMART_TV).first()
-                            viewModel.selectProductBrand(tvBrand)
-                            viewModel.addLocalFilesToPhoneShare(uris)
-                            viewModel.startTvBrowserShareHost()
+                            viewModel.uploadFilesToTv(uris)
                             route = AppRoute.Remote(tvBrand)
                         },
                         onScanQrAndSend = {
@@ -383,6 +361,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onDisconnectSession = viewModel::disconnectSession,
                             onScanQrCode = { showGlobalQrScanner = true },
+                            onRequestHostQr = viewModel::startPhoneShareHost,
                             onDisconnect = viewModel::disconnect,
                             onSelectHapticStrength = viewModel::setHapticStrength,
                             onToggleSound = viewModel::setSoundEnabled,
@@ -552,6 +531,7 @@ class MainActivity : ComponentActivity() {
                             onButtonPress = viewModel::pressButton,
                             onApplianceAction = viewModel::sendApplianceAction,
                             onLaunchApp = viewModel::launchApp,
+                            onCloseApp = viewModel::closeApp,
                             onSendText = viewModel::sendText,
                             onMouseMove = viewModel::moveMouse,
                             onMouseClick = viewModel::clickMouse,
@@ -639,6 +619,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.reconnectPcIfNeeded()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -683,17 +668,18 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ShareIncomingFilesDialog(
     uris: List<Uri>,
+    pcName: String?,
     pcHost: String?,
     peerPhoneName: String?,
     tvCompanionName: String?,
     onSendToPc: () -> Unit,
     onSendToPhone: () -> Unit,
     onSendToTvCompanion: () -> Unit,
-    onShareViaTvBrowserOrDlna: () -> Unit,
     onScanQrAndSend: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val accent = MiOrange
+    val hasAnyConnected = pcHost != null || tvCompanionName != null || peerPhoneName != null
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = RemoteSurface,
@@ -706,7 +692,11 @@ private fun ShareIncomingFilesDialog(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Choose where to send via GPT Remote",
+                    text = if (hasAnyConnected) {
+                        "Tap a connected device or scan a QR code"
+                    } else {
+                        "Scan any PC, TV, or Phone QR code to send"
+                    },
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
@@ -714,38 +704,37 @@ private fun ShareIncomingFilesDialog(
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                ShareTargetRow(
-                    icon = Icons.Rounded.Laptop,
-                    title = if (pcHost != null) "Send to PC ($pcHost)" else "Send to PC (Scan QR)",
-                    subtitle = if (pcHost != null) "Upload directly to PC Companion" else "Scan PC QR and send immediately",
-                    tint = WifiBlue,
-                    onClick = onSendToPc
-                )
-                ShareTargetRow(
-                    icon = Icons.Rounded.PhonelinkSetup,
-                    title = if (peerPhoneName != null) "Send to Phone ($peerPhoneName)" else "Share to Another Phone",
-                    subtitle = if (peerPhoneName != null) "Push to connected phone now" else "Host via Phone-to-Phone QR / Hotspot",
-                    tint = ConnectedGreen,
-                    onClick = onSendToPhone
-                )
-                ShareTargetRow(
-                    icon = Icons.Rounded.Tv,
-                    title = if (tvCompanionName != null) "Send to TV ($tvCompanionName)" else "Send to Android TV App",
-                    subtitle = if (tvCompanionName != null) "Upload to Android TV Companion" else "Scan TV QR and upload APK/media",
-                    tint = accent,
-                    onClick = onSendToTvCompanion
-                )
-                ShareTargetRow(
-                    icon = Icons.Rounded.Cast,
-                    title = "Play / Share on Smart TV (Samsung, LG)",
-                    subtitle = "Open TV Browser QR or Cast via DLNA",
-                    tint = Color(0xFFFBBF24),
-                    onClick = onShareViaTvBrowserOrDlna
-                )
+                if (pcHost != null) {
+                    ShareTargetRow(
+                        icon = Icons.Rounded.Laptop,
+                        title = pcName?.takeIf { it.isNotBlank() } ?: "PC ($pcHost)",
+                        subtitle = "Connected • Upload to PC ($pcHost)",
+                        tint = WifiBlue,
+                        onClick = onSendToPc
+                    )
+                }
+                if (tvCompanionName != null) {
+                    ShareTargetRow(
+                        icon = Icons.Rounded.Tv,
+                        title = tvCompanionName,
+                        subtitle = "Connected • Upload to Android TV",
+                        tint = ConnectedGreen,
+                        onClick = onSendToTvCompanion
+                    )
+                }
+                if (peerPhoneName != null) {
+                    ShareTargetRow(
+                        icon = Icons.Rounded.PhonelinkSetup,
+                        title = peerPhoneName,
+                        subtitle = "Connected • Send to Peer Phone",
+                        tint = ConnectedGreen,
+                        onClick = onSendToPhone
+                    )
+                }
                 ShareTargetRow(
                     icon = Icons.Rounded.QrCodeScanner,
-                    title = "Scan Any QR Code & Send",
-                    subtitle = "Point camera at PC, TV, or Phone QR",
+                    title = "Scan QR Code & Send",
+                    subtitle = "Scan PC, TV, or Phone QR to connect & send",
                     tint = accent,
                     onClick = onScanQrAndSend
                 )

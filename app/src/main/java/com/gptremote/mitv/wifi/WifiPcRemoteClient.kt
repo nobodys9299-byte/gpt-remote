@@ -15,6 +15,7 @@ import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.TransferHistoryItem
 import com.gptremote.mitv.model.TransferProgress
+import com.gptremote.mitv.model.TransferQueueItem
 import kotlin.math.max
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
@@ -104,6 +105,9 @@ class WifiPcRemoteClient {
     private val _pcTransferHistory = MutableStateFlow<List<TransferHistoryItem>>(emptyList())
     val pcTransferHistory: StateFlow<List<TransferHistoryItem>> = _pcTransferHistory.asStateFlow()
 
+    private val _pcTransferQueue = MutableStateFlow<List<TransferQueueItem>>(emptyList())
+    val pcTransferQueue: StateFlow<List<TransferQueueItem>> = _pcTransferQueue.asStateFlow()
+
     private val _discoveredTvCompanions = MutableStateFlow<List<TvDevice.WifiPc>>(emptyList())
     val discoveredTvCompanions: StateFlow<List<TvDevice.WifiPc>> = _discoveredTvCompanions.asStateFlow()
 
@@ -118,6 +122,9 @@ class WifiPcRemoteClient {
 
     private val _tvTransferHistory = MutableStateFlow<List<TransferHistoryItem>>(emptyList())
     val tvTransferHistory: StateFlow<List<TransferHistoryItem>> = _tvTransferHistory.asStateFlow()
+
+    private val _tvTransferQueue = MutableStateFlow<List<TransferQueueItem>>(emptyList())
+    val tvTransferQueue: StateFlow<List<TransferQueueItem>> = _tvTransferQueue.asStateFlow()
 
     private fun appendPcHistory(item: TransferHistoryItem) {
         _pcTransferHistory.value = listOf(item) + _pcTransferHistory.value.take(99)
@@ -141,6 +148,7 @@ class WifiPcRemoteClient {
     private var mirrorJob: Job? = null
     private var mirrorSocket: Socket? = null
     private val userDisconnectedPc = AtomicBoolean(false)
+    @Volatile private var lastConnectedPc: TvDevice.WifiPc? = null
 
     private data class PendingUploadSpec(
         val isTv: Boolean,
@@ -148,7 +156,8 @@ class WifiPcRemoteClient {
         val authToken: String,
         val uris: List<Uri>,
         val startIndex: Int,
-        val sessionId: String
+        val sessionId: String,
+        val checkResume: Boolean = false
     )
 
     private data class PendingDownloadSpec(
@@ -184,7 +193,7 @@ class WifiPcRemoteClient {
     }
 
     val connectedHostIp: String?
-        get() = activeDevice?.host
+        get() = activeDevice?.host ?: lastConnectedPc?.host
 
     private fun startWorkers() {
         senderJob = scope.launch {
@@ -416,6 +425,7 @@ class WifiPcRemoteClient {
         disconnect()
         userDisconnectedPc.set(false)
         activeDevice = device
+        lastConnectedPc = device
         _connectionStatus.value = ConnectionStatus.Connecting(device.name, TransportMode.WIFI_PC)
 
         connectJob = CoroutineScope(Dispatchers.IO).launch {
@@ -423,63 +433,89 @@ class WifiPcRemoteClient {
         }
     }
 
+    fun reconnectIfNeeded() {
+        val dev = lastConnectedPc ?: return
+        if (userDisconnectedPc.get()) return
+        val s = socket
+        if (activeDevice?.id == dev.id && s != null && !s.isClosed && s.isConnected) return
+        activeDevice = dev
+        if (connectJob?.isActive == true) return
+        connectJob = CoroutineScope(Dispatchers.IO).launch {
+            connectTcpInternal(dev, isReconnect = true)
+        }
+    }
+
     private suspend fun connectTcpInternal(device: TvDevice.WifiPc, isReconnect: Boolean) {
-        try {
-            val tcp = Socket()
-            tcp.tcpNoDelay = true
-            tcp.keepAlive = true
-            runCatching { tcp.receiveBufferSize = 256 * 1024 }
-            tcp.connect(InetSocketAddress(device.host, device.port), 5000)
-            if (userDisconnectedPc.get() || activeDevice?.id != device.id) {
-                runCatching { tcp.close() }
-                return
-            }
-            socket = tcp
-            writer = BufferedWriter(OutputStreamWriter(tcp.getOutputStream(), Charsets.UTF_8))
-            _connectionStatus.value = ConnectionStatus.Connected(device)
-            if (!isReconnect) refreshSharedFiles()
-
-            pingJob?.cancel()
-            pingJob = CoroutineScope(Dispatchers.IO).launch {
-                while (isActive && socket === tcp && !tcp.isClosed) {
-                    delay(5000L)
-                    if (socket === tcp && !tcp.isClosed) {
-                        sendQueue.trySend("""{"t":"ping"}""")
-                    }
-                }
-            }
-
-            val reader = BufferedReader(InputStreamReader(tcp.getInputStream(), Charsets.UTF_8))
-            readerJob = CoroutineScope(Dispatchers.IO).launch {
+        val maxAttempts = if (isReconnect) 3 else 1
+        var lastErr: Exception? = null
+        for (attempt in 1..maxAttempts) {
+            try {
+                val tcp = Socket()
+                tcp.tcpNoDelay = true
+                tcp.keepAlive = true
                 runCatching {
-                    while (isActive && !tcp.isClosed) {
-                        val line = reader.readLine() ?: break
-                        if (line.isBlank()) continue
-                    }
+                    tcp.receiveBufferSize = 512 * 1024
+                    tcp.sendBufferSize = 512 * 1024
                 }
-                if (socket === tcp && !userDisconnectedPc.get()) {
+                tcp.connect(InetSocketAddress(device.host, device.port), 5000)
+                if (userDisconnectedPc.get() || activeDevice?.id != device.id) {
                     runCatching { tcp.close() }
-                    delay(450L)
-                    if (!userDisconnectedPc.get() && activeDevice?.id == device.id) {
-                        connectTcpInternal(device, isReconnect = true)
-                    } else if (socket === tcp) {
-                        handleConnectionLost("PC companion closed connection")
+                    return
+                }
+                socket = tcp
+                writer = BufferedWriter(OutputStreamWriter(tcp.getOutputStream(), Charsets.UTF_8))
+                lastConnectedPc = device
+                _connectionStatus.value = ConnectionStatus.Connected(device)
+                if (!isReconnect) refreshSharedFiles()
+
+                pingJob?.cancel()
+                pingJob = CoroutineScope(Dispatchers.IO).launch {
+                    while (isActive && socket === tcp && !tcp.isClosed) {
+                        delay(5000L)
+                        if (socket === tcp && !tcp.isClosed) {
+                            sendQueue.trySend("""{"t":"ping"}""")
+                        }
                     }
                 }
+
+                val reader = BufferedReader(InputStreamReader(tcp.getInputStream(), Charsets.UTF_8))
+                readerJob = CoroutineScope(Dispatchers.IO).launch {
+                    runCatching {
+                        while (isActive && !tcp.isClosed) {
+                            val line = reader.readLine() ?: break
+                            if (line.isBlank()) continue
+                        }
+                    }
+                    if (socket === tcp && !userDisconnectedPc.get()) {
+                        runCatching { tcp.close() }
+                        delay(450L)
+                        if (!userDisconnectedPc.get() && activeDevice?.id == device.id) {
+                            connectTcpInternal(device, isReconnect = true)
+                        } else if (socket === tcp) {
+                            handleConnectionLost("PC companion closed connection")
+                        }
+                    }
+                }
+                return
+            } catch (e: Exception) {
+                lastErr = e
+                if (attempt < maxAttempts && !userDisconnectedPc.get() && activeDevice?.id == device.id) {
+                    delay(700L)
+                }
             }
-        } catch (e: Exception) {
-            if (!userDisconnectedPc.get() && activeDevice?.id == device.id) {
-                activeDevice = null
-                _connectionStatus.value = ConnectionStatus.Error(
-                    message = "Cannot reach PC at ${device.host}:${device.port}. Open GPT Remote PC & allow Windows Firewall (${e.message ?: "timeout"}).",
-                    transport = TransportMode.WIFI_PC
-                )
-            }
+        }
+        if (!userDisconnectedPc.get() && activeDevice?.id == device.id) {
+            activeDevice = null
+            _connectionStatus.value = ConnectionStatus.Error(
+                message = "Cannot reach PC at ${device.host}:${device.port}. Open GPT Remote PC & allow Windows Firewall (${lastErr?.message ?: "timeout"}).",
+                transport = TransportMode.WIFI_PC
+            )
         }
     }
 
     fun disconnect() {
         userDisconnectedPc.set(true)
+        lastConnectedPc = null
         connectJob?.cancel()
         connectJob = null
         readerJob?.cancel()
@@ -575,18 +611,64 @@ class WifiPcRemoteClient {
         }
     }
 
+    private fun sendRemoteTransferCommand(
+        host: String?,
+        authToken: String,
+        endpoint: String,
+        sessionId: String?
+    ) {
+        val h = host?.trim().orEmpty()
+        val sid = sessionId?.trim().orEmpty()
+        if (h.isEmpty() || sid.isEmpty()) return
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val c = (URL("http://$h:$FILE_HTTP_PORT/$endpoint?session=${URLEncoder.encode(sid, "UTF-8")}").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 2000
+                    readTimeout = 2000
+                    if (authToken.isNotBlank()) setRequestProperty("X-Auth-Token", authToken)
+                }
+                c.responseCode
+                c.disconnect()
+            }
+        }
+    }
+
+    private fun updateQueueStatusForSession(
+        queueFlow: MutableStateFlow<List<TransferQueueItem>>,
+        fileName: String?,
+        newStatus: String
+    ) {
+        if (fileName.isNullOrBlank() || queueFlow.value.isEmpty()) return
+        queueFlow.value = queueFlow.value.map { item ->
+            if (item.fileName == fileName && (item.status == "Sending" || item.status == "Paused")) {
+                item.copy(status = newStatus)
+            } else {
+                item
+            }
+        }
+    }
+
     fun pausePcTransfer() {
         val cur = _transferProgress.value ?: return
         if (cur.isComplete) return
         pcPausedFlag.set(true)
         _transferProgress.value = cur.copy(isPaused = true, bytesPerSec = 0L)
+        updateQueueStatusForSession(_pcTransferQueue, cur.fileName, "Paused")
+        val sid = activePcSessionId ?: cur.transferId
+        sendRemoteTransferCommand(activeDevice?.host ?: lastConnectedPc?.host, "", "transfer-pause", sid)
     }
 
     fun resumePcTransfer(context: Context, onComplete: (String) -> Unit) {
+        val host = activeDevice?.host ?: lastConnectedPc?.host
+        val sid = activePcSessionId ?: _transferProgress.value?.transferId
         if (pcTransferJob?.isActive == true) {
             pcCancelledFlag.set(false)
             pcPausedFlag.set(false)
-            _transferProgress.value = _transferProgress.value?.copy(isPaused = false)
+            val cur = _transferProgress.value
+            _transferProgress.value = cur?.copy(isPaused = false)
+            updateQueueStatusForSession(_pcTransferQueue, cur?.fileName, "Sending")
+            sendRemoteTransferCommand(host, "", "transfer-resume", sid)
             return
         }
         val up = pcPausedUpload
@@ -594,7 +676,8 @@ class WifiPcRemoteClient {
             pcPausedUpload = null
             pcPausedFlag.set(false)
             pcCancelledFlag.set(false)
-            startUploadJob(context, up, onComplete)
+            sendRemoteTransferCommand(host, "", "transfer-resume", up.sessionId)
+            startUploadJob(context, up.copy(checkResume = true), onComplete)
             return
         }
         val dl = pcPausedDownload
@@ -609,7 +692,7 @@ class WifiPcRemoteClient {
     fun cancelPcTransfer(onComplete: (String) -> Unit) {
         cancelTransferInternal(
             isTv = false,
-            host = activeDevice?.host,
+            host = activeDevice?.host ?: lastConnectedPc?.host,
             authToken = "",
             sessionId = activePcSessionId ?: _transferProgress.value?.transferId.orEmpty(),
             progressFlow = _transferProgress,
@@ -624,6 +707,7 @@ class WifiPcRemoteClient {
                 pcPausedUpload = null
                 pcPausedDownload = null
                 activePcSessionId = null
+                _pcTransferQueue.value = emptyList()
                 _isTransferringFile.value = false
             },
             historyAppender = ::appendPcHistory,
@@ -636,13 +720,22 @@ class WifiPcRemoteClient {
         if (cur.isComplete) return
         tvPausedFlag.set(true)
         _tvTransferProgress.value = cur.copy(isPaused = true, bytesPerSec = 0L)
+        updateQueueStatusForSession(_tvTransferQueue, cur.fileName, "Paused")
+        val tv = _connectedTvCompanion.value
+        val sid = activeTvSessionId ?: cur.transferId
+        sendRemoteTransferCommand(tv?.host, tv?.osName.orEmpty(), "transfer-pause", sid)
     }
 
     fun resumeTvTransfer(context: Context, onComplete: (String) -> Unit) {
+        val tv = _connectedTvCompanion.value
+        val sid = activeTvSessionId ?: _tvTransferProgress.value?.transferId
         if (tvTransferJob?.isActive == true) {
             tvCancelledFlag.set(false)
             tvPausedFlag.set(false)
-            _tvTransferProgress.value = _tvTransferProgress.value?.copy(isPaused = false)
+            val cur = _tvTransferProgress.value
+            _tvTransferProgress.value = cur?.copy(isPaused = false)
+            updateQueueStatusForSession(_tvTransferQueue, cur?.fileName, "Sending")
+            sendRemoteTransferCommand(tv?.host, tv?.osName.orEmpty(), "transfer-resume", sid)
             return
         }
         val up = tvPausedUpload
@@ -650,7 +743,8 @@ class WifiPcRemoteClient {
             tvPausedUpload = null
             tvPausedFlag.set(false)
             tvCancelledFlag.set(false)
-            startUploadJob(context, up, onComplete)
+            sendRemoteTransferCommand(tv?.host, tv?.osName.orEmpty(), "transfer-resume", up.sessionId)
+            startUploadJob(context, up.copy(checkResume = true), onComplete)
             return
         }
         val dl = tvPausedDownload
@@ -681,6 +775,7 @@ class WifiPcRemoteClient {
                 tvPausedUpload = null
                 tvPausedDownload = null
                 activeTvSessionId = null
+                _tvTransferQueue.value = emptyList()
             },
             historyAppender = ::appendTvHistory,
             onComplete = onComplete
@@ -748,11 +843,12 @@ class WifiPcRemoteClient {
         uploadFiles(context, listOf(uri), onComplete)
 
     fun uploadFiles(context: Context, uris: List<Uri>, onComplete: (String) -> Unit) {
-        val host = activeDevice?.host
+        val host = activeDevice?.host ?: lastConnectedPc?.host
         if (host == null) {
             onComplete("Connect to your PC via Wi-Fi first.")
             return
         }
+        reconnectIfNeeded()
         if (uris.isEmpty()) return
         pcPausedFlag.set(false)
         pcCancelledFlag.set(false)
@@ -765,18 +861,20 @@ class WifiPcRemoteClient {
                 authToken = "",
                 uris = uris,
                 startIndex = 0,
-                sessionId = "pc_${System.currentTimeMillis()}"
+                sessionId = "pc_${System.currentTimeMillis()}",
+                checkResume = false
             ),
             onComplete
         )
     }
 
     fun downloadFile(context: Context, fileName: String, onComplete: (String) -> Unit) {
-        val host = activeDevice?.host
+        val host = activeDevice?.host ?: lastConnectedPc?.host
         if (host == null) {
             onComplete("Connect to your PC via Wi-Fi first.")
             return
         }
+        reconnectIfNeeded()
         pcPausedFlag.set(false)
         pcCancelledFlag.set(false)
         pcPausedDownload = null
@@ -905,6 +1003,7 @@ class WifiPcRemoteClient {
 
     private fun startUploadJob(context: Context, spec: PendingUploadSpec, onComplete: (String) -> Unit) {
         val progressFlow = if (spec.isTv) _tvTransferProgress else _transferProgress
+        val queueFlow = if (spec.isTv) _tvTransferQueue else _pcTransferQueue
         val cancelFlag = if (spec.isTv) tvCancelledFlag else pcCancelledFlag
         val pauseFlag = if (spec.isTv) tvPausedFlag else pcPausedFlag
         val job = CoroutineScope(Dispatchers.IO).launch {
@@ -912,14 +1011,31 @@ class WifiPcRemoteClient {
             var count = 0
             var cancelledCount = 0
             var lastSaved = ""
+            val queueItems = (spec.startIndex until spec.uris.size).mapIndexed { qIdx, origIdx ->
+                val u = spec.uris[origIdx]
+                TransferQueueItem(
+                    id = "q_${spec.sessionId}_$qIdx",
+                    fileName = resolveFileName(context, u),
+                    sizeBytes = resolveFileSize(context, u).coerceAtLeast(0L),
+                    status = if (qIdx == 0) "Sending" else "Queued"
+                )
+            }.toMutableList()
+            queueFlow.value = queueItems.toList()
             try {
                 val resolver = context.contentResolver
                 for (idx in spec.startIndex until spec.uris.size) {
+                    val relIdx = idx - spec.startIndex
                     val uri = spec.uris[idx]
-                    val filename = resolveFileName(context, uri)
+                    val filename = queueItems.getOrNull(relIdx)?.fileName ?: resolveFileName(context, uri)
                     val size = resolveFileSize(context, uri)
                     val sessionId = if (idx == spec.startIndex) spec.sessionId else "${if (spec.isTv) "tv" else "pc"}_${System.currentTimeMillis()}_$idx"
                     if (spec.isTv) activeTvSessionId = sessionId else activePcSessionId = sessionId
+                    if (relIdx in queueItems.indices) {
+                        queueItems[relIdx] = queueItems[relIdx].copy(
+                            status = if (pauseFlag.get()) "Paused" else "Sending"
+                        )
+                        queueFlow.value = queueItems.toList()
+                    }
 
                     var sent = 0L
                     var activeMs = 0L
@@ -928,20 +1044,65 @@ class WifiPcRemoteClient {
                     var lastEmit = lastSliceMs
                     var fatalError = false
 
+                    val controlPoller = CoroutineScope(Dispatchers.IO).launch {
+                        while (isActive && !cancelFlag.get()) {
+                            delay(420L)
+                            if (cancelFlag.get()) break
+                            val ctrl = runCatching {
+                                val u = "http://${spec.host}:$FILE_HTTP_PORT/transfer-control?session=${URLEncoder.encode(sessionId, "UTF-8")}"
+                                val c = (URL(u).openConnection() as HttpURLConnection).apply {
+                                    connectTimeout = 1500
+                                    readTimeout = 1500
+                                    if (spec.authToken.isNotBlank()) setRequestProperty("X-Auth-Token", spec.authToken)
+                                }
+                                val txt = c.inputStream.bufferedReader().use { it.readText() }
+                                c.disconnect()
+                                JSONObject(txt).optString("action", "none")
+                            }.getOrNull() ?: continue
+                            when (ctrl) {
+                                "pause" -> if (!pauseFlag.get()) {
+                                    pauseFlag.set(true)
+                                    progressFlow.value = progressFlow.value?.copy(isPaused = true, bytesPerSec = 0L)
+                                    if (relIdx in queueItems.indices) {
+                                        queueItems[relIdx] = queueItems[relIdx].copy(status = "Paused")
+                                        queueFlow.value = queueItems.toList()
+                                    }
+                                }
+                                "resume" -> if (pauseFlag.get()) {
+                                    pauseFlag.set(false)
+                                    progressFlow.value = progressFlow.value?.copy(isPaused = false)
+                                    if (relIdx in queueItems.indices) {
+                                        queueItems[relIdx] = queueItems[relIdx].copy(status = "Sending")
+                                        queueFlow.value = queueItems.toList()
+                                    }
+                                }
+                                "cancel" -> {
+                                    cancelFlag.set(true)
+                                    runCatching { (if (spec.isTv) tvHttpConn else pcHttpConn)?.disconnect() }
+                                    break
+                                }
+                            }
+                        }
+                    }
+
                     try {
-                        val remoteOffset = runCatching {
-                            val stUrl = "http://${spec.host}:$FILE_HTTP_PORT/upload-status?session=${URLEncoder.encode(sessionId, "UTF-8")}"
-                            val stConn = (URL(stUrl).openConnection() as HttpURLConnection).apply {
-                                connectTimeout = 2500
-                                readTimeout = 2500
-                                if (spec.authToken.isNotBlank()) setRequestProperty("X-Auth-Token", spec.authToken)
-                            }
-                            val txt = stConn.inputStream.bufferedReader().use { it.readText() }
-                            stConn.disconnect()
-                            JSONObject(txt).optLong("bytes", 0L).let { off ->
-                                if (size > 0) off.coerceIn(0L, size) else off.coerceAtLeast(0L)
-                            }
-                        }.getOrDefault(0L)
+                        val remoteOffset = if (spec.checkResume && idx == spec.startIndex) {
+                            runCatching {
+                                val stUrl = "http://${spec.host}:$FILE_HTTP_PORT/upload-status?session=${URLEncoder.encode(sessionId, "UTF-8")}"
+                                val stConn = (URL(stUrl).openConnection() as HttpURLConnection).apply {
+                                    connectTimeout = 2500
+                                    readTimeout = 2500
+                                    if (spec.authToken.isNotBlank()) setRequestProperty("X-Auth-Token", spec.authToken)
+                                }
+                                val txt = stConn.inputStream.bufferedReader().use { it.readText() }
+                                stConn.disconnect()
+                                JSONObject(txt).optLong("bytes", 0L).let { off ->
+                                    if (size > 0) off.coerceIn(0L, size) else off.coerceAtLeast(0L)
+                                }
+                            }.getOrDefault(0L)
+                        } else {
+                            0L
+                        }
 
                         val remainingBytes = if (size > 0) (size - remoteOffset).coerceAtLeast(0L) else -1L
                         sent = remoteOffset
@@ -992,7 +1153,7 @@ class WifiPcRemoteClient {
                                     sent += n
                                     uploadedThisConn += n
                                     val now = System.currentTimeMillis()
-                                    if (now - lastEmit >= 160L || (size > 0 && sent >= size)) {
+                                    if (now - lastEmit >= 220L || (size > 0 && sent >= size)) {
                                         activeMs += (now - lastSliceMs).coerceAtLeast(0L)
                                         lastSliceMs = now
                                         lastEmit = now
@@ -1041,6 +1202,10 @@ class WifiPcRemoteClient {
                             bytesPerSec = finalSpd,
                             transferId = sessionId
                         )
+                        if (relIdx in queueItems.indices) {
+                            queueItems[relIdx] = queueItems[relIdx].copy(fileName = savedAs, status = "Sent")
+                            queueFlow.value = queueItems.toList()
+                        }
                         val item = TransferHistoryItem(
                             id = "${if (spec.isTv) "tv" else "pc"}_up_${System.nanoTime()}",
                             fileName = savedAs,
@@ -1063,6 +1228,10 @@ class WifiPcRemoteClient {
                         }
                         if (cancelFlag.compareAndSet(true, false)) {
                             pauseFlag.set(false)
+                            if (relIdx in queueItems.indices) {
+                                queueItems[relIdx] = queueItems[relIdx].copy(status = "Cancelled")
+                                queueFlow.value = queueItems.toList()
+                            }
                             val cancelItem = TransferHistoryItem(
                                 id = "${if (spec.isTv) "tv" else "pc"}_cancel_${System.nanoTime()}",
                                 fileName = filename,
@@ -1076,6 +1245,10 @@ class WifiPcRemoteClient {
                             cancelledCount++
                             onComplete("Cancelled '$filename'.")
                         } else {
+                            if (relIdx in queueItems.indices) {
+                                queueItems[relIdx] = queueItems[relIdx].copy(status = "Failed")
+                                queueFlow.value = queueItems.toList()
+                            }
                             val failItem = TransferHistoryItem(
                                 id = "${if (spec.isTv) "tv" else "pc"}_fail_${System.nanoTime()}",
                                 fileName = filename,
@@ -1090,6 +1263,8 @@ class WifiPcRemoteClient {
                             onComplete("Transfer failed: ${e.message ?: "error"}")
                             fatalError = true
                         }
+                    } finally {
+                        controlPoller.cancel()
                     }
                     if (fatalError) break
                 }
@@ -1106,6 +1281,7 @@ class WifiPcRemoteClient {
             } finally {
                 cancelFlag.set(false)
                 pauseFlag.set(false)
+                queueFlow.value = emptyList()
                 if (spec.isTv) {
                     tvPausedUpload = null
                     tvHttpConn = null
@@ -1172,7 +1348,7 @@ class WifiPcRemoteClient {
                             done += n
                             dlThisConn += n
                             val now = System.currentTimeMillis()
-                            if (now - lastEmit >= 160L || (total > 0 && done >= total)) {
+                            if (now - lastEmit >= 220L || (total > 0 && done >= total)) {
                                 activeMs += (now - lastSliceMs).coerceAtLeast(0L)
                                 lastSliceMs = now
                                 lastEmit = now
@@ -1414,6 +1590,11 @@ class WifiPcRemoteClient {
         sendQueue.trySend(JSONObject().put("t", "launch").put("app", appKey).toString())
     }
 
+    fun closeApp(appKey: String) {
+        if (writer == null || appKey.isBlank()) return
+        sendQueue.trySend(JSONObject().put("t", "close_app").put("app", appKey).toString())
+    }
+
     private fun handleConnectionLost(reason: String?) {
         if (activeDevice != null) {
             stopPcScreenMirror()
@@ -1445,7 +1626,7 @@ class WifiPcRemoteClient {
         const val SCREEN_PORT = 58767
         const val FILE_HTTP_PORT = 58768
         const val DISCOVER_MAGIC = "GPT_REMOTE_DISCOVER_V1"
-        private const val TRANSFER_BUF = 1024 * 1024
+        private const val TRANSFER_BUF = 2 * 1024 * 1024
 
         fun buttonToPcKeyName(button: RemoteButton): String? = when (button) {
             RemoteButton.DPAD_UP -> "up"

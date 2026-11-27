@@ -27,8 +27,10 @@ import androidx.compose.material.icons.rounded.AcUnit
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Air
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Gamepad
 import androidx.compose.material.icons.rounded.Home
@@ -37,8 +39,11 @@ import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Kitchen
 import androidx.compose.material.icons.rounded.Lightbulb
+import androidx.compose.material.icons.rounded.LocalCafe
 import androidx.compose.material.icons.rounded.LocalLaundryService
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.NightsStay
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PowerSettingsNew
@@ -49,6 +54,7 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SettingsRemote
 import androidx.compose.material.icons.rounded.Speaker
 import androidx.compose.material.icons.rounded.TouchApp
+import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -226,6 +232,7 @@ fun RemoteScreen(
     onButtonPress: (RemoteButton, Boolean) -> Unit,
     onApplianceAction: (String) -> Unit,
     onLaunchApp: (LaunchableApp) -> Unit,
+    onCloseApp: (LaunchableApp) -> Unit = {},
     onSendText: (String) -> Unit,
     onMouseMove: (dx: Int, dy: Int, wheel: Int) -> Unit,
     onMouseClick: (MouseButton) -> Unit,
@@ -360,6 +367,7 @@ fun RemoteScreen(
                     onMouseMove = onMouseMove,
                     onMouseClick = onMouseClick,
                     onLaunchApp = onLaunchApp,
+                    onCloseApp = onCloseApp,
                     onOpenKeyboard = { showKeyboardSheet = true },
                     onOpenTvFileShare = { tvSheetMode = TvSheetMode.FILE_SHARE },
                     onOpenTvScreenCast = { tvSheetMode = TvSheetMode.SCREEN_CAST }
@@ -371,6 +379,7 @@ fun RemoteScreen(
                     onMouseMove = onMouseMove,
                     onMouseClick = onMouseClick,
                     onLaunchApp = onLaunchApp,
+                    onCloseApp = onCloseApp,
                     onOpenKeyboard = { showKeyboardSheet = true },
                     onStartPcMirror = onStartPcMirror,
                     onStopPcMirror = onStopPcMirror,
@@ -399,7 +408,8 @@ fun RemoteScreen(
                 ProductType.SET_TOP_BOX -> SetTopBoxRemoteBody(
                     brand = brand,
                     onButtonPress = onButtonPress,
-                    onLaunchApp = onLaunchApp
+                    onLaunchApp = onLaunchApp,
+                    onCloseApp = onCloseApp
                 )
 
                 ProductType.SOUNDBAR -> SoundbarRemoteBody(onButtonPress = onButtonPress)
@@ -410,7 +420,8 @@ fun RemoteScreen(
                     onButtonPress = onButtonPress,
                     onMouseMove = onMouseMove,
                     onMouseClick = onMouseClick,
-                    onLaunchApp = onLaunchApp
+                    onLaunchApp = onLaunchApp,
+                    onCloseApp = onCloseApp
                 )
 
                 ProductType.CEILING_FAN -> FanRemoteBody(onAction = onApplianceAction)
@@ -494,6 +505,9 @@ fun RemoteScreen(
             onSelectHapticStrength = onSelectHapticStrength,
             onToggleSound = onToggleSound,
             onSelectAccentTheme = onSelectAccentTheme,
+            onScanQrCode = { showPhoneQrScanner = true },
+            phoneQrPayload = uiState.phoneHostQrUrl,
+            onRequestHostQr = onStartPhoneShareHost,
             onDismiss = { showSettingsSheet = false }
         )
     }
@@ -738,6 +752,7 @@ private fun TvRemoteBody(
     onMouseMove: (Int, Int, Int) -> Unit,
     onMouseClick: (MouseButton) -> Unit,
     onLaunchApp: (LaunchableApp) -> Unit,
+    onCloseApp: (LaunchableApp) -> Unit = {},
     onOpenKeyboard: () -> Unit,
     onOpenTvFileShare: () -> Unit,
     onOpenTvScreenCast: () -> Unit
@@ -862,7 +877,8 @@ private fun TvRemoteBody(
             AppLauncherGrid(
                 apps = ProductCatalog.tvApps,
                 storageKey = "tv_apps_order",
-                onLaunch = onLaunchApp
+                onLaunch = onLaunchApp,
+                onClose = onCloseApp
             )
         }
 
@@ -911,6 +927,7 @@ private fun PcRemoteBody(
     onMouseMove: (Int, Int, Int) -> Unit,
     onMouseClick: (MouseButton) -> Unit,
     onLaunchApp: (LaunchableApp) -> Unit,
+    onCloseApp: (LaunchableApp) -> Unit = {},
     onOpenKeyboard: () -> Unit,
     onStartPcMirror: () -> Unit,
     onStopPcMirror: () -> Unit,
@@ -1023,7 +1040,8 @@ private fun PcRemoteBody(
             AppLauncherGrid(
                 apps = ProductCatalog.pcApps,
                 storageKey = "pc_apps_order",
-                onLaunch = onLaunchApp
+                onLaunch = onLaunchApp,
+                onClose = onCloseApp
             )
 
             // Shortcut keys & Volume/Media merged into Apps cleanly in 2 balanced rows
@@ -1363,7 +1381,8 @@ private fun WashingMachineRemoteBody(onAction: (String) -> Unit) {
 private fun SetTopBoxRemoteBody(
     brand: BrandOption,
     onButtonPress: (RemoteButton, Boolean) -> Unit,
-    onLaunchApp: (LaunchableApp) -> Unit
+    onLaunchApp: (LaunchableApp) -> Unit,
+    onCloseApp: (LaunchableApp) -> Unit = {}
 ) {
     var selectedTab by remember(brand) { mutableStateOf(RemoteSubTab.PRIMARY) }
     if (brand.supportsAppLaunch) {
@@ -1386,7 +1405,7 @@ private fun SetTopBoxRemoteBody(
     }
 
     if (selectedTab == RemoteSubTab.APPS && brand.supportsAppLaunch) {
-        AppLauncherGrid(apps = ProductCatalog.tvApps, storageKey = "tv_apps_order", onLaunch = onLaunchApp)
+        AppLauncherGrid(apps = ProductCatalog.tvApps, storageKey = "tv_apps_order", onLaunch = onLaunchApp, onClose = onCloseApp)
     } else {
         DPadControl(onButtonPress = { btn -> onButtonPress(btn, btn == RemoteButton.DPAD_CENTER) })
         Row(
@@ -1503,7 +1522,8 @@ private fun ProjectorRemoteBody(
     onButtonPress: (RemoteButton, Boolean) -> Unit,
     onMouseMove: (Int, Int, Int) -> Unit,
     onMouseClick: (MouseButton) -> Unit,
-    onLaunchApp: (LaunchableApp) -> Unit
+    onLaunchApp: (LaunchableApp) -> Unit,
+    onCloseApp: (LaunchableApp) -> Unit = {}
 ) {
     val tabs = remember(brand) {
         buildList {
@@ -1578,7 +1598,7 @@ private fun ProjectorRemoteBody(
         }
 
         RemoteSubTab.APPS -> {
-            AppLauncherGrid(apps = ProductCatalog.tvApps, storageKey = "tv_apps_order", onLaunch = onLaunchApp)
+            AppLauncherGrid(apps = ProductCatalog.tvApps, storageKey = "tv_apps_order", onLaunch = onLaunchApp, onClose = onCloseApp)
         }
 
         RemoteSubTab.SCREEN, RemoteSubTab.FILES -> Unit
@@ -1673,176 +1693,386 @@ private fun SmartBulbRemoteBody(
     onTogglePower: () -> Unit,
     onBulbAction: (power: Boolean?, brightness: Int?, rgb: Triple<Int, Int, Int>?, tempKelvin: Int?, irAction: String?) -> Unit
 ) {
-    var brightness by remember { mutableFloatStateOf(80f) }
-    var activeColor by remember { mutableStateOf(Color(0xFFFDE047)) }
-    var sceneLabel by remember { mutableStateOf("Warm 2700K") }
+    var modeTab by remember { mutableIntStateOf(0) } // 0 = RGB Colors, 1 = Warm to Cool White
+    var brightness by remember { mutableFloatStateOf(100f) }
+    var tempKelvin by remember { mutableFloatStateOf(3500f) }
+    var activeColor by remember { mutableStateOf(Color(0xFFFFA88C)) }
+    var activeScene by remember { mutableStateOf("") }
 
-    val bulbColors = listOf(
-        Triple(255, 68, 68) to ("Red" to "bulb_red"),
-        Triple(255, 165, 0) to ("Amber" to "bulb_amber"),
-        Triple(253, 224, 71) to ("Gold" to "bulb_warm"),
-        Triple(52, 211, 153) to ("Green" to "bulb_green"),
-        Triple(56, 189, 248) to ("Cyan" to "bulb_cool"),
-        Triple(99, 102, 241) to ("Blue" to "bulb_blue"),
-        Triple(192, 132, 252) to ("Purple" to "bulb_purple"),
-        Triple(248, 250, 252) to ("White" to "bulb_white")
+    val presetSwatches = listOf(
+        Triple(255, 179, 71) to "bulb_amber",
+        Triple(255, 255, 255) to "bulb_white",
+        Triple(255, 140, 0) to "bulb_amber",
+        Triple(255, 46, 67) to "bulb_red",
+        Triple(255, 204, 0) to "bulb_warm",
+        Triple(16, 216, 105) to "bulb_green",
+        Triple(0, 217, 255) to "bulb_cool",
+        Triple(37, 99, 235) to "bulb_blue",
+        Triple(168, 85, 247) to "bulb_purple",
+        Triple(244, 0, 89) to "bulb_red",
+        Triple(255, 168, 140) to "bulb_warm",
+        Triple(167, 243, 208) to "bulb_cool"
     )
 
-    // Sleek Radial Glow Lamp Header
-    Column(
+    val whiteDisplayColor = remember(tempKelvin) {
+        when {
+            tempKelvin < 3200f -> Color(0xFFFFCF86)
+            tempKelvin < 4800f -> Color(0xFFFFF4DE)
+            else -> Color(0xFFBAE6FD)
+        }
+    }
+    val orbColor = if (!isPowerOn) TextSecondary else if (modeTab == 0) activeColor else whiteDisplayColor
+    val amberAccent = Color(0xFFF59E0B)
+
+    // Interactive Glowing Bulb Orb
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
-            .background(
-                Brush.radialGradient(
-                    colors = listOf(
-                        if (isPowerOn) activeColor.copy(alpha = 0.28f) else RemoteSurface,
-                        RemoteSurfaceElevated
-                    )
-                )
-            )
-            .border(
-                width = 1.5.dp,
-                color = if (isPowerOn) activeColor.copy(alpha = 0.7f) else RemoteBorder,
-                shape = RoundedCornerShape(28.dp)
-            )
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(vertical = 4.dp),
+        contentAlignment = Alignment.Center
     ) {
         Box(
             modifier = Modifier
-                .size(86.dp)
+                .size(182.dp)
                 .clip(CircleShape)
                 .background(
-                    if (isPowerOn) activeColor.copy(alpha = 0.25f) else RemoteSurface
-                )
-                .border(2.5.dp, if (isPowerOn) activeColor else RemoteBorder, CircleShape)
-                .clickable(onClick = onTogglePower),
+                    Brush.radialGradient(
+                        colors = listOf(
+                            if (isPowerOn) orbColor.copy(alpha = 0.30f) else Color.Transparent,
+                            Color.Transparent
+                        )
+                    )
+                ),
             contentAlignment = Alignment.Center
         ) {
-            Icon(
-                imageVector = Icons.Rounded.Lightbulb,
-                contentDescription = "Toggle Bulb",
-                tint = if (isPowerOn) activeColor else TextSecondary,
-                modifier = Modifier.size(44.dp)
-            )
-        }
-        Text(
-            text = if (isPowerOn) "${brightness.roundToInt()}%  •  $sceneLabel" else "Bulb Off",
-            color = TextPrimary,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Button(
-            onClick = onTogglePower,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (isPowerOn) Color(0xFF334155) else MiOrange
-            ),
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Icon(Icons.Rounded.PowerSettingsNew, contentDescription = null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(if (isPowerOn) "Turn Off" else "Turn On", fontWeight = FontWeight.SemiBold)
+            Box(
+                modifier = Modifier
+                    .size(144.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                if (isPowerOn) orbColor.copy(alpha = 0.22f) else RemoteSurface,
+                                Color(0xFF1A1D24)
+                            )
+                        )
+                    )
+                    .border(
+                        width = 3.dp,
+                        color = if (isPowerOn) orbColor else RemoteBorder,
+                        shape = CircleShape
+                    )
+                    .clickable(onClick = onTogglePower),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Lightbulb,
+                    contentDescription = "Toggle Bulb Power",
+                    tint = if (isPowerOn) orbColor else TextSecondary.copy(alpha = 0.55f),
+                    modifier = Modifier
+                        .padding(bottom = 14.dp)
+                        .size(52.dp)
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 14.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x9912151C))
+                        .padding(horizontal = 12.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = if (isPowerOn) "${brightness.roundToInt()}%  •  ON" else "OFF",
+                        color = TextPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
         }
     }
 
-    // Dimmer Slider Card
+    // Dual Mode Toggle: RGB Colors | Warm to Cool White
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(RemoteSurfaceElevated)
+            .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        val rgbSelected = modeTab == 0
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .height(38.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (rgbSelected) Color(0xFF2563EB) else Color.Transparent)
+                .clickable { modeTab = 0 },
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Palette,
+                contentDescription = null,
+                tint = if (rgbSelected) Color.White else TextSecondary,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "RGB Colors",
+                color = if (rgbSelected) Color.White else TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
+        }
+
+        val whiteSelected = modeTab == 1
+        Row(
+            modifier = Modifier
+                .weight(1.1f)
+                .height(38.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (whiteSelected) Color(0xFF2563EB) else Color.Transparent)
+                .clickable { modeTab = 1 },
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.WbSunny,
+                contentDescription = null,
+                tint = if (whiteSelected) Color.White else TextSecondary,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "Warm to Cool White",
+                color = if (whiteSelected) Color.White else TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
+        }
+    }
+
+    // Brightness Slider Card
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(RemoteSurfaceElevated)
-            .border(1.dp, RemoteBorder, RoundedCornerShape(20.dp))
+            .border(1.dp, RemoteBorder, RoundedCornerShape(18.dp))
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Brightness", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text("${brightness.roundToInt()}%", color = MiOrange, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Rounded.WbSunny, contentDescription = null, tint = amberAccent, modifier = Modifier.size(18.dp))
+                Text("Brightness", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Text("${brightness.roundToInt()}%", color = amberAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
         Slider(
             value = brightness,
             onValueChange = { brightness = it },
             onValueChangeFinished = {
                 val lvl = brightness.roundToInt().coerceIn(10, 100)
-                onBulbAction(null, lvl, null, null, if (lvl >= 50) "bright_up" else "bright_down")
+                onBulbAction(true, lvl, null, null, if (lvl >= 50) "bright_up" else "bright_down")
             },
             valueRange = 10f..100f,
             colors = SliderDefaults.colors(
-                thumbColor = MiOrange,
-                activeTrackColor = MiOrange
+                thumbColor = amberAccent,
+                activeTrackColor = amberAccent,
+                inactiveTrackColor = Color(0xFF2D3342)
             )
         )
     }
 
-    // Scenes & White Temperatures
-    ApplianceToggleGrid(
-        items = listOf(
-            ToggleActionItem("Night (15%)", sceneLabel == "Night") {
-                sceneLabel = "Night"
-                brightness = 15f
-                activeColor = Color(0xFFFDE047)
-                onBulbAction(true, 15, null, 2400, "bright_down")
-            },
-            ToggleActionItem("Reading (4500K)", sceneLabel == "Reading") {
-                sceneLabel = "Reading"
-                brightness = 85f
-                activeColor = Color(0xFFF8FAFC)
-                onBulbAction(true, 85, null, 4500, "bulb_white")
-            },
-            ToggleActionItem("Warm (2700K)", sceneLabel == "Warm 2700K") {
-                sceneLabel = "Warm 2700K"
-                activeColor = Color(0xFFFDE047)
-                onBulbAction(true, null, null, 2700, "bulb_warm")
-            },
-            ToggleActionItem("Cool (6500K)", sceneLabel == "Cool 6500K") {
-                sceneLabel = "Cool 6500K"
-                activeColor = Color(0xFFBAE6FD)
-                onBulbAction(true, null, null, 6500, "bulb_cool")
-            }
-        )
-    )
+    if (modeTab == 0) {
+        // Color Presets (2 x 6 rounded squircles)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Color Presets", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("16M Colors", color = TextSecondary, fontSize = 11.sp)
+        }
 
-    // 8-Swatch Vivid Color Palette (2 rows of 4)
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
-            .background(RemoteSurfaceElevated)
-            .border(1.dp, RemoteBorder, RoundedCornerShape(22.dp))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Text("Color Mode", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        bulbColors.chunked(4).forEach { row ->
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            presetSwatches.chunked(6).forEach { row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    row.forEach { (rgb, irKey) ->
+                        val swatch = Color(rgb.first, rgb.second, rgb.third)
+                        val selected = activeColor == swatch && activeScene.isEmpty()
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(42.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(swatch)
+                                .border(
+                                    width = if (selected) 2.5.dp else 1.dp,
+                                    color = if (selected) Color.White else RemoteBorder.copy(alpha = 0.5f),
+                                    shape = RoundedCornerShape(14.dp)
+                                )
+                                .clickable {
+                                    activeColor = swatch
+                                    activeScene = ""
+                                    onBulbAction(true, null, rgb, null, irKey)
+                                }
+                        )
+                    }
+                }
+            }
+        }
+    } else {
+        // Warm to Cool White Kelvin Controls
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(RemoteSurfaceElevated)
+                .border(1.dp, RemoteBorder, RoundedCornerShape(18.dp))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                row.forEach { (rgb, meta) ->
-                    val (label, irKey) = meta
-                    val swatch = Color(rgb.first, rgb.second, rgb.third)
+                Text("Color Temperature", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("${tempKelvin.roundToInt()}K", color = whiteDisplayColor, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(10.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.horizontalGradient(
+                            colors = listOf(Color(0xFFFF9E44), Color(0xFFFFF1D6), Color(0xFF93C5FD))
+                        )
+                    )
+            )
+            Slider(
+                value = tempKelvin,
+                onValueChange = { tempKelvin = it },
+                onValueChangeFinished = {
+                    val k = tempKelvin.roundToInt().coerceIn(2200, 6500)
+                    onBulbAction(true, null, null, k, if (k >= 4500) "bulb_cool" else "bulb_warm")
+                },
+                valueRange = 2200f..6500f,
+                colors = SliderDefaults.colors(
+                    thumbColor = whiteDisplayColor,
+                    activeTrackColor = Color(0xFF2563EB),
+                    inactiveTrackColor = Color(0xFF2D3342)
+                )
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(2700 to "Warm 2700K", 4000 to "Natural 4000K", 6500 to "Cool 6500K").forEach { (kelvin, label) ->
+                    val chosen = kotlin.math.abs(tempKelvin - kelvin) < 350f
                     Box(
                         modifier = Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(swatch)
-                            .border(
-                                width = if (activeColor == swatch) 3.dp else 1.dp,
-                                color = if (activeColor == swatch) Color.White else RemoteBorder,
-                                shape = CircleShape
-                            )
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (chosen) Color(0xFF2563EB).copy(alpha = 0.25f) else RemoteSurface)
+                            .border(1.dp, if (chosen) Color(0xFF2563EB) else RemoteBorder, RoundedCornerShape(12.dp))
                             .clickable {
-                                activeColor = swatch
-                                sceneLabel = label
-                                onBulbAction(true, null, rgb, null, irKey)
+                                tempKelvin = kelvin.toFloat()
+                                activeScene = ""
+                                onBulbAction(true, null, null, kelvin, if (kelvin >= 4500) "bulb_cool" else "bulb_warm")
                             }
-                    )
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(label, color = if (chosen) TextPrimary else TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                    }
                 }
+            }
+        }
+    }
+
+    // Smart Ambience Scenes (5 rounded cards matching screenshot)
+    Text("Smart Ambience Scenes", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        data class BulbScene(
+            val label: String,
+            val icon: ImageVector,
+            val tint: Color,
+            val targetBright: Int,
+            val rgb: Triple<Int, Int, Int>?,
+            val kelvin: Int?,
+            val irKey: String
+        )
+        val scenes = listOf(
+            BulbScene("Relax", Icons.Rounded.LocalCafe, Color(0xFFF59E0B), 65, null, 2700, "bulb_warm"),
+            BulbScene("Read", Icons.Rounded.WbSunny, Color(0xFFE2E8F0), 95, null, 4500, "bulb_white"),
+            BulbScene("Night", Icons.Rounded.NightsStay, Color(0xFFFB923C), 15, null, 2200, "bright_down"),
+            BulbScene("Party", Icons.Rounded.AutoAwesome, Color(0xFFA855F7), 100, Triple(192, 68, 255), null, "bulb_purple"),
+            BulbScene("Romance", Icons.Rounded.Favorite, Color(0xFFF43F5E), 45, Triple(255, 72, 118), null, "bulb_red")
+        )
+        scenes.forEach { sc ->
+            val selected = activeScene == sc.label
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (selected) sc.tint.copy(alpha = 0.16f) else RemoteSurfaceElevated)
+                    .border(
+                        width = if (selected) 1.5.dp else 1.dp,
+                        color = if (selected) sc.tint else RemoteBorder,
+                        shape = RoundedCornerShape(16.dp)
+                    )
+                    .clickable {
+                        activeScene = sc.label
+                        brightness = sc.targetBright.toFloat()
+                        sc.rgb?.let { (r, g, b) ->
+                            modeTab = 0
+                            activeColor = Color(r, g, b)
+                        } ?: sc.kelvin?.let { k ->
+                            modeTab = 1
+                            tempKelvin = k.toFloat()
+                        }
+                        onBulbAction(true, sc.targetBright, sc.rgb, sc.kelvin, sc.irKey)
+                    }
+                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(sc.tint.copy(alpha = 0.18f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(sc.icon, contentDescription = sc.label, tint = sc.tint, modifier = Modifier.size(18.dp))
+                }
+                Text(
+                    text = sc.label,
+                    color = TextPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                    maxLines = 1
+                )
             }
         }
     }
@@ -1852,14 +2082,15 @@ private fun SmartBulbRemoteBody(
 private fun AppLauncherGrid(
     apps: List<LaunchableApp>,
     storageKey: String,
-    onLaunch: (LaunchableApp) -> Unit
+    onLaunch: (LaunchableApp) -> Unit,
+    onClose: (LaunchableApp) -> Unit = {}
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var orderedApps by remember(apps, storageKey) {
         mutableStateOf(loadAppOrder(context, storageKey, apps))
     }
-    val itemBounds = remember(storageKey) { mutableStateMapOf<String, Rect>() }
+    val itemBounds = remember(storageKey) { HashMap<String, Rect>() }
     var draggedId by remember { mutableStateOf<String?>(null) }
     var pointerRoot by remember { mutableStateOf(Offset.Zero) }
     var touchAnchor by remember { mutableStateOf(Offset.Zero) }
@@ -1870,7 +2101,7 @@ private fun AppLauncherGrid(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text(
-            text = if (draggedId != null) "Drag to reorder app" else "Tap to open • Hold & drag to reorder",
+            text = if (draggedId != null) "Drag to reorder app" else "Tap to open • Tap × to close • Hold to reorder",
             color = if (draggedId != null) MiOrange else TextSecondary,
             fontSize = 11.sp
         )
@@ -1952,19 +2183,36 @@ private fun AppLauncherGrid(
                                 )
                             }
                             .clickable { onLaunch(app) }
-                            .padding(horizontal = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            .padding(start = 10.dp, end = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         AppLogoBadge(app = app)
                         Text(
                             text = app.name,
                             color = TextPrimary,
-                            fontSize = 14.sp,
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF2B181C))
+                                .border(1.dp, Color(0xFFF87171).copy(alpha = 0.45f), CircleShape)
+                                .clickable { onClose(app) },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "Close ${app.name}",
+                                tint = Color(0xFFF87171),
+                                modifier = Modifier.size(13.dp)
+                            )
+                        }
                     }
                 }
                 if (row.size == 1) {

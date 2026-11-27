@@ -112,7 +112,8 @@ fun HomeHubScreen(
     onClearBanner: () -> Unit,
     onOpenActiveSession: (ActiveSessionItem) -> Unit = { onOpenActiveRemote() },
     onDisconnectSession: (ActiveSessionItem) -> Unit = { onDisconnect() },
-    onScanQrCode: () -> Unit = {}
+    onScanQrCode: () -> Unit = {},
+    onRequestHostQr: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
@@ -223,6 +224,9 @@ fun HomeHubScreen(
             onSelectHapticStrength = onSelectHapticStrength,
             onToggleSound = onToggleSound,
             onSelectAccentTheme = onSelectAccentTheme,
+            onScanQrCode = onScanQrCode,
+            phoneQrPayload = uiState.phoneHostQrUrl,
+            onRequestHostQr = onRequestHostQr,
             onDismiss = { showSettings = false }
         )
     }
@@ -280,25 +284,14 @@ fun HomeHubScreen(
                         fontSize = 13.sp
                     )
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilledTonalIconButton(
-                        onClick = onScanQrCode,
-                        colors = IconButtonDefaults.filledTonalIconButtonColors(
-                            containerColor = accent.copy(alpha = 0.16f),
-                            contentColor = accent
-                        )
-                    ) {
-                        Icon(Icons.Rounded.QrCodeScanner, contentDescription = "Scan QR Code")
-                    }
-                    FilledTonalIconButton(
-                        onClick = { showSettings = true },
-                        colors = IconButtonDefaults.filledTonalIconButtonColors(
-                            containerColor = RemoteSurfaceElevated,
-                            contentColor = accent
-                        )
-                    ) {
-                        Icon(Icons.Rounded.Settings, contentDescription = "Settings")
-                    }
+                FilledTonalIconButton(
+                    onClick = { showSettings = true },
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = RemoteSurfaceElevated,
+                        contentColor = accent
+                    )
+                ) {
+                    Icon(Icons.Rounded.Settings, contentDescription = "Settings")
                 }
             }
 

@@ -78,6 +78,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun connectWifiPc(device: TvDevice.WifiPc) = repository.connectWifiPc(device)
 
+    fun reconnectPcIfNeeded() = repository.reconnectPcIfNeeded()
+
     fun addAndConnectManualWifi(host: String, nickname: String, category: DeviceCategory) =
         repository.addAndConnectManualWifi(host, nickname, category)
 
@@ -195,6 +197,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     fun sendApplianceAction(actionKey: String) = repository.sendApplianceAction(actionKey)
 
     fun launchApp(app: LaunchableApp) = repository.launchApp(app)
+
+    fun closeApp(app: LaunchableApp) = repository.closeApp(app)
 
     fun sendText(text: String) = repository.sendText(text)
 
