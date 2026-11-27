@@ -37,13 +37,17 @@ jobs:
           cp app/build/outputs/apk/debug/app-debug.apk GptRemote-debug.apk
           cp tv-app/build/outputs/apk/debug/tv-app-debug.apk GptRemoteTV-debug.apk
 
-      - name: Upload Android APKs artifact
+      - name: Upload Android Phone APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: GptRemote-debug-apk
-          path: |
-            GptRemote-debug.apk
-            GptRemoteTV-debug.apk
+          path: GptRemote-debug.apk
+
+      - name: Upload Android TV APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GptRemoteTV-debug-apk
+          path: GptRemoteTV-debug.apk
 
   build-pc-exe:
     runs-on: windows-latest
@@ -85,10 +89,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download Android APK
+      - name: Download Android Phone APK
         uses: actions/download-artifact@v4
         with:
           name: GptRemote-debug-apk
+          path: release-assets
+
+      - name: Download Android TV APK
+        uses: actions/download-artifact@v4
+        with:
+          name: GptRemoteTV-debug-apk
           path: release-assets
 
       - name: Download Windows Installer & EXE
