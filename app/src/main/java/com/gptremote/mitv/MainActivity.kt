@@ -7,6 +7,7 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,16 +20,22 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
+import com.gptremote.mitv.data.RemoteRepository
 import com.gptremote.mitv.model.BrandOption
-import com.gptremote.mitv.model.DeviceCategory
 import com.gptremote.mitv.model.ProductCatalog
 import com.gptremote.mitv.model.ProductType
 import com.gptremote.mitv.ui.BrandPickerScreen
 import com.gptremote.mitv.ui.HomeHubScreen
 import com.gptremote.mitv.ui.RemoteScreen
 import com.gptremote.mitv.ui.RemoteViewModel
+import com.gptremote.mitv.ui.components.InstalledAppsPickerDialog
 import com.gptremote.mitv.ui.theme.MiTvRemoteTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private sealed interface AppRoute {
     data object Home : AppRoute
@@ -39,7 +46,8 @@ private sealed interface AppRoute {
 private enum class FilePickTarget {
     PC_UPLOAD,
     PHONE_HOST_ADD,
-    PHONE_PEER_SEND
+    PHONE_PEER_SEND,
+    TV_COMPANION_UPLOAD
 }
 
 class MainActivity : ComponentActivity() {
@@ -52,11 +60,14 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val uiState by viewModel.uiState.collectAsState()
+            val coroutineScope = rememberCoroutineScope()
 
             MiTvRemoteTheme(accentTheme = uiState.accentTheme) {
                 var hasBtPermissions by remember { mutableStateOf(viewModel.hasBluetoothPermissions()) }
                 var route by remember { mutableStateOf<AppRoute>(AppRoute.Home) }
                 var filePickTarget by remember { mutableStateOf(FilePickTarget.PC_UPLOAD) }
+                var appPickerTarget by remember { mutableStateOf<FilePickTarget?>(null) }
+                var installedAppsList by remember { mutableStateOf<List<RemoteRepository.ShareableAppInfo>>(emptyList()) }
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -65,6 +76,12 @@ class MainActivity : ComponentActivity() {
                     if (hasBtPermissions) {
                         viewModel.onPermissionsGranted()
                     }
+                }
+
+                val hotspotPermissionLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestMultiplePermissions()
+                ) {
+                    viewModel.startLocalHotspot()
                 }
 
                 val discoverableLauncher = rememberLauncherForActivityResult(
@@ -82,14 +99,35 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                val pickFileLauncher = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.OpenDocument()
-                ) { uri ->
-                    if (uri != null) {
+                val tvCastLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartActivityForResult()
+                ) { result ->
+                    val data = result.data
+                    if (result.resultCode == RESULT_OK && data != null) {
+                        viewModel.startPhoneCastToTv(result.resultCode, data)
+                    }
+                }
+
+                val pickFilesLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.OpenMultipleDocuments()
+                ) { uris ->
+                    if (uris.isNotEmpty()) {
                         when (filePickTarget) {
-                            FilePickTarget.PC_UPLOAD -> viewModel.uploadFileToPc(uri)
-                            FilePickTarget.PHONE_HOST_ADD -> viewModel.addLocalFileToPhoneShare(uri)
-                            FilePickTarget.PHONE_PEER_SEND -> viewModel.sendFileToPeerPhone(uri)
+                            FilePickTarget.PC_UPLOAD -> viewModel.uploadFilesToPc(uris)
+                            FilePickTarget.PHONE_HOST_ADD -> viewModel.addLocalFilesToPhoneShare(uris)
+                            FilePickTarget.PHONE_PEER_SEND -> viewModel.sendFilesToPeerPhone(uris)
+                            FilePickTarget.TV_COMPANION_UPLOAD -> viewModel.uploadFilesToTv(uris)
+                        }
+                    }
+                }
+
+                val openAppsPicker: (FilePickTarget) -> Unit = { target ->
+                    appPickerTarget = target
+                    if (installedAppsList.isEmpty()) {
+                        coroutineScope.launch {
+                            installedAppsList = withContext(Dispatchers.IO) {
+                                viewModel.queryInstalledAppsForShare()
+                            }
                         }
                     }
                 }
@@ -107,6 +145,10 @@ class MainActivity : ComponentActivity() {
                         }
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                             add(Manifest.permission.POST_NOTIFICATIONS)
+                            add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            // LocalOnlyHotspot requires ACCESS_FINE_LOCATION on Android 12
+                            add(Manifest.permission.ACCESS_FINE_LOCATION)
                         }
                     }.toTypedArray()
                     permissionLauncher.launch(perms)
@@ -118,6 +160,30 @@ class MainActivity : ComponentActivity() {
                     } else {
                         requestBtPermissions()
                     }
+                }
+
+                val currentAppTarget = appPickerTarget
+                if (currentAppTarget != null) {
+                    InstalledAppsPickerDialog(
+                        apps = installedAppsList,
+                        onConfirm = { chosen ->
+                            appPickerTarget = null
+                            coroutineScope.launch {
+                                val stagedUris = withContext(Dispatchers.IO) {
+                                    viewModel.stageAppsAsUris(chosen)
+                                }
+                                if (stagedUris.isNotEmpty()) {
+                                    when (currentAppTarget) {
+                                        FilePickTarget.PC_UPLOAD -> viewModel.uploadFilesToPc(stagedUris)
+                                        FilePickTarget.PHONE_HOST_ADD -> viewModel.addLocalFilesToPhoneShare(stagedUris)
+                                        FilePickTarget.PHONE_PEER_SEND -> viewModel.sendFilesToPeerPhone(stagedUris)
+                                        FilePickTarget.TV_COMPANION_UPLOAD -> viewModel.uploadFilesToTv(stagedUris)
+                                    }
+                                }
+                            }
+                        },
+                        onDismiss = { appPickerTarget = null }
+                    )
                 }
 
                 when (val current = route) {
@@ -134,14 +200,9 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onOpenActiveRemote = {
-                                val activeBrand = uiState.selectedBrand ?: run {
-                                    val fallbackProduct = if (uiState.connectedCategory == DeviceCategory.LAPTOP_PC) {
-                                        ProductType.PC_LAPTOP
-                                    } else {
-                                        ProductType.SMART_TV
-                                    }
-                                    ProductCatalog.brandsFor(fallbackProduct).first()
-                                }
+                                val activeBrand = uiState.connectedBrandOption
+                                    ?: ProductCatalog.brandsFor(ProductType.SMART_TV).first()
+                                viewModel.selectProductBrand(activeBrand)
                                 route = AppRoute.Remote(activeBrand)
                             },
                             onDisconnect = viewModel::disconnect,
@@ -182,6 +243,7 @@ class MainActivity : ComponentActivity() {
                             onNavigateBack = { route = backTarget },
                             onRequestBluetoothPermissions = requestBtPermissions,
                             onMakeDiscoverable = {
+                                viewModel.allowBluetoothIncomingPairing()
                                 val intent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
                                     putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120)
                                 }
@@ -220,20 +282,74 @@ class MainActivity : ComponentActivity() {
                             onRefreshPcFiles = viewModel::refreshPcFiles,
                             onPickFileToSend = {
                                 filePickTarget = FilePickTarget.PC_UPLOAD
-                                pickFileLauncher.launch(arrayOf("*/*"))
+                                pickFilesLauncher.launch(arrayOf("*/*"))
                             },
+                            onShareAppsToPc = { openAppsPicker(FilePickTarget.PC_UPLOAD) },
                             onDownloadPcFile = { file -> viewModel.downloadFileFromPc(file.name) },
                             onStartPhoneShareHost = viewModel::startPhoneShareHost,
+                            onStartLocalHotspot = {
+                                val hotspotPerms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+                                } else {
+                                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                                }
+                                val granted = hotspotPerms.all {
+                                    ContextCompat.checkSelfPermission(this@MainActivity, it) ==
+                                        android.content.pm.PackageManager.PERMISSION_GRANTED
+                                }
+                                if (granted) {
+                                    viewModel.startLocalHotspot()
+                                } else {
+                                    hotspotPermissionLauncher.launch(hotspotPerms)
+                                }
+                            },
+                            onStopLocalHotspot = viewModel::stopLocalHotspot,
+                            onOpenHotspotSettings = {
+                                runCatching {
+                                    startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+                                }.onFailure {
+                                    runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+                                }
+                            },
                             onPickHostFileToShare = {
                                 filePickTarget = FilePickTarget.PHONE_HOST_ADD
-                                pickFileLauncher.launch(arrayOf("*/*"))
+                                pickFilesLauncher.launch(arrayOf("*/*"))
                             },
+                            onShareHostApps = { openAppsPicker(FilePickTarget.PHONE_HOST_ADD) },
                             onRefreshPeerPhoneFiles = viewModel::refreshPeerPhoneFiles,
                             onPickFileForPeerPhone = {
                                 filePickTarget = FilePickTarget.PHONE_PEER_SEND
-                                pickFileLauncher.launch(arrayOf("*/*"))
+                                pickFilesLauncher.launch(arrayOf("*/*"))
                             },
+                            onShareAppsToPeerPhone = { openAppsPicker(FilePickTarget.PHONE_PEER_SEND) },
                             onDownloadFromPeerPhone = { file -> viewModel.downloadFileFromPeerPhone(file.name) },
+                            onOpenHistoryFile = { item ->
+                                viewModel.openTransferredFile(this@MainActivity, item.localUriString, item.fileName)
+                            },
+                            onScanTvCompanion = viewModel::startTvCompanionScan,
+                            onConnectTvManual = { host, token ->
+                                viewModel.connectTvCompanion(host, "Android TV ($host)", token)
+                            },
+                            onSelectTvCompanion = viewModel::connectTvCompanion,
+                            onDisconnectTv = viewModel::disconnectTvCompanion,
+                            onRefreshTvFiles = viewModel::refreshTvCompanionFiles,
+                            onPickFilesForTv = {
+                                filePickTarget = FilePickTarget.TV_COMPANION_UPLOAD
+                                pickFilesLauncher.launch(arrayOf("*/*"))
+                            },
+                            onShareAppsToTv = { openAppsPicker(FilePickTarget.TV_COMPANION_UPLOAD) },
+                            onDownloadTvFile = { file -> viewModel.downloadFileFromTv(file.name) },
+                            onStartPhoneCastToTv = {
+                                val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                                tvCastLauncher.launch(mgr.createScreenCaptureIntent())
+                            },
+                            onOpenSystemCastSettings = {
+                                runCatching {
+                                    startActivity(Intent(Settings.ACTION_CAST_SETTINGS))
+                                }.onFailure {
+                                    runCatching { startActivity(Intent(Settings.ACTION_DISPLAY_SETTINGS)) }
+                                }
+                            },
                             onButtonPress = viewModel::pressButton,
                             onApplianceAction = viewModel::sendApplianceAction,
                             onLaunchApp = viewModel::launchApp,

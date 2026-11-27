@@ -2,12 +2,20 @@ package com.gptremote.mitv.wifi
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import com.gptremote.mitv.model.TransferHistoryItem
 import com.gptremote.mitv.model.TransferProgress
+import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -75,8 +83,119 @@ class PhoneShareServer(context: Context) {
     private val _transferProgress = MutableStateFlow<TransferProgress?>(null)
     val transferProgress: StateFlow<TransferProgress?> = _transferProgress.asStateFlow()
 
+    private val _transferHistory = MutableStateFlow<List<TransferHistoryItem>>(emptyList())
+    val transferHistory: StateFlow<List<TransferHistoryItem>> = _transferHistory.asStateFlow()
+
+    private val _hotspotSsid = MutableStateFlow<String?>(null)
+    val hotspotSsid: StateFlow<String?> = _hotspotSsid.asStateFlow()
+
+    private val _hotspotPassword = MutableStateFlow<String?>(null)
+    val hotspotPassword: StateFlow<String?> = _hotspotPassword.asStateFlow()
+
+    private val _hotspotError = MutableStateFlow<String?>(null)
+    val hotspotError: StateFlow<String?> = _hotspotError.asStateFlow()
+
+    private var hotspotReservation: WifiManager.LocalOnlyHotspotReservation? = null
+
     private var peerHost: String? = null
     private var peerPort: Int = DEFAULT_PORT
+
+    private fun appendHistory(item: TransferHistoryItem) {
+        _transferHistory.value = listOf(item) + _transferHistory.value.take(99)
+    }
+
+    fun startLocalHotspot() {
+        _hotspotError.value = null
+        val wifiMgr = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        if (wifiMgr == null) {
+            _hotspotError.value = "Wi-Fi service unavailable."
+            return
+        }
+        val hasPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                appContext,
+                android.Manifest.permission.NEARBY_WIFI_DEVICES
+            ) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(
+                    appContext,
+                    android.Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(
+                appContext,
+                android.Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+        if (!hasPerm) {
+            _hotspotError.value = "Permission needed for quick Hotspot. Turn on Mobile Hotspot manually or grant permission."
+            return
+        }
+        if (hotspotReservation != null) {
+            startHostIfNeeded()
+            return
+        }
+        try {
+            wifiMgr.startLocalOnlyHotspot(
+                object : WifiManager.LocalOnlyHotspotCallback() {
+                    override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
+                        hotspotReservation = reservation
+                        val ssid: String
+                        val pwd: String
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            val config = reservation.softApConfiguration
+                            ssid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                config?.wifiSsid?.toString()?.trim('"') ?: "GPT-Share"
+                            } else {
+                                @Suppress("DEPRECATION")
+                                config?.ssid?.trim('"') ?: "GPT-Share"
+                            }
+                            pwd = config?.passphrase.orEmpty()
+                        } else {
+                            @Suppress("DEPRECATION")
+                            val wc = reservation.wifiConfiguration
+                            @Suppress("DEPRECATION")
+                            ssid = wc?.SSID?.trim('"') ?: "GPT-Share"
+                            @Suppress("DEPRECATION")
+                            pwd = wc?.preSharedKey.orEmpty()
+                        }
+                        _hotspotSsid.value = ssid
+                        _hotspotPassword.value = pwd
+                        _hotspotError.value = null
+                        scope.launch {
+                            delay(700L)
+                            startHostIfNeeded()
+                        }
+                    }
+
+                    override fun onFailed(reason: Int) {
+                        _hotspotError.value = "Hotspot busy (error $reason). Turn off existing Hotspot or open Settings -> Hotspot."
+                    }
+
+                    override fun onStopped() {
+                        hotspotReservation = null
+                        _hotspotSsid.value = null
+                        _hotspotPassword.value = null
+                    }
+                },
+                Handler(Looper.getMainLooper())
+            )
+        } catch (sec: SecurityException) {
+            _hotspotError.value = "Location / Nearby Wi-Fi permission required for quick Hotspot."
+        } catch (e: Exception) {
+            _hotspotError.value = "Could not start Hotspot (${e.message ?: "use system Hotspot"})."
+        }
+    }
+
+    fun stopLocalHotspot() {
+        runCatching { hotspotReservation?.close() }
+        hotspotReservation = null
+        _hotspotSsid.value = null
+        _hotspotPassword.value = null
+        scope.launch {
+            delay(400L)
+            startHostIfNeeded()
+        }
+    }
 
     fun startHostIfNeeded() {
         val ip = findLocalIpv4()
@@ -101,11 +220,16 @@ class PhoneShareServer(context: Context) {
         }
     }
 
-    fun addFileToShare(uri: Uri) {
-        val name = resolveFileName(uri)
-        val size = resolveFileSize(uri).coerceAtLeast(0L)
-        val item = LocalSharedUri(nextId++, uri, name, size, System.currentTimeMillis())
-        hostedItems.add(0, item)
+    fun addFileToShare(uri: Uri) = addFilesToShare(listOf(uri))
+
+    fun addFilesToShare(uris: List<Uri>) {
+        val now = System.currentTimeMillis()
+        for (uri in uris) {
+            val name = resolveFileName(uri)
+            val size = resolveFileSize(uri).coerceAtLeast(0L)
+            val item = LocalSharedUri(nextId++, uri, name, size, now)
+            hostedItems.add(0, item)
+        }
         _hostedFiles.value = hostedItems.map {
             SharedPcFile(it.name, it.sizeBytes, it.addedMs)
         }
@@ -150,51 +274,99 @@ class PhoneShareServer(context: Context) {
         }
     }
 
-    fun sendFileToPeer(uri: Uri, onComplete: (String) -> Unit) {
+    fun sendFileToPeer(uri: Uri, onComplete: (String) -> Unit) =
+        sendFilesToPeer(listOf(uri), onComplete)
+
+    fun sendFilesToPeer(uris: List<Uri>, onComplete: (String) -> Unit) {
         val host = peerHost
         if (host == null) {
             onComplete("Scan the receiver phone's QR code first.")
             return
         }
+        if (uris.isEmpty()) return
         scope.launch {
+            var successCount = 0
+            var lastName = ""
             try {
-                val name = resolveFileName(uri)
-                val total = resolveFileSize(uri).coerceAtLeast(1L)
-                _transferProgress.value = TransferProgress(name, 0L, total, isUpload = true)
+                for (uri in uris) {
+                    val name = resolveFileName(uri)
+                    lastName = name
+                    val total = resolveFileSize(uri).coerceAtLeast(1L)
+                    val startedMs = System.currentTimeMillis()
+                    _transferProgress.value = TransferProgress(name, 0L, total, isUpload = true, bytesPerSec = 0L)
 
-                val encodedName = URLEncoder.encode(name, "UTF-8").replace("+", "%20")
-                val conn = (URL("http://$host:$peerPort/upload").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 5000
-                    readTimeout = 60_000
-                    doOutput = true
-                    setRequestProperty("X-Filename", encodedName)
-                    if (total > 0) setFixedLengthStreamingMode(total) else setChunkedStreamingMode(32768)
-                }
-
-                var sent = 0L
-                val buf = ByteArray(32768)
-                appContext.contentResolver.openInputStream(uri)?.use { inp ->
-                    conn.outputStream.use { out ->
-                        while (true) {
-                            val n = inp.read(buf)
-                            if (n <= 0) break
-                            out.write(buf, 0, n)
-                            sent += n
-                            _transferProgress.value = TransferProgress(name, sent, maxOf(total, sent), isUpload = true)
-                        }
-                        out.flush()
+                    val encodedName = URLEncoder.encode(name, "UTF-8").replace("+", "%20")
+                    val conn = (URL("http://$host:$peerPort/upload").openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        connectTimeout = 5000
+                        readTimeout = 60_000
+                        doOutput = true
+                        setRequestProperty("X-Filename", encodedName)
+                        if (total > 0) setFixedLengthStreamingMode(total) else setChunkedStreamingMode(65536)
                     }
-                } ?: throw IllegalStateException("Cannot read selected file")
 
-                val code = conn.responseCode
-                conn.disconnect()
-                if (code !in 200..299) throw IllegalStateException("HTTP $code")
-                _transferProgress.value = TransferProgress(name, maxOf(total, sent), maxOf(total, sent), isUpload = true, isComplete = true)
-                delay(1400)
+                    var sent = 0L
+                    var lastEmit = startedMs
+                    val buf = ByteArray(65536)
+                    appContext.contentResolver.openInputStream(uri)?.use { inp ->
+                        conn.outputStream.use { out ->
+                            while (true) {
+                                val n = inp.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                sent += n
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmit >= 160L || sent >= total) {
+                                    lastEmit = now
+                                    val spd = (sent * 1000L) / max(1L, now - startedMs)
+                                    _transferProgress.value = TransferProgress(
+                                        fileName = name,
+                                        bytesDone = sent,
+                                        totalBytes = maxOf(total, sent),
+                                        isUpload = true,
+                                        bytesPerSec = spd
+                                    )
+                                }
+                            }
+                            out.flush()
+                        }
+                    } ?: throw IllegalStateException("Cannot read selected file $name")
+
+                    val code = conn.responseCode
+                    conn.disconnect()
+                    if (code !in 200..299) throw IllegalStateException("HTTP $code")
+
+                    val finalSpd = (sent * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
+                    _transferProgress.value = TransferProgress(
+                        fileName = name,
+                        bytesDone = maxOf(total, sent),
+                        totalBytes = maxOf(total, sent),
+                        isUpload = true,
+                        isComplete = true,
+                        bytesPerSec = finalSpd
+                    )
+                    appendHistory(
+                        TransferHistoryItem(
+                            id = "ph_sent_${System.nanoTime()}",
+                            fileName = name,
+                            sizeBytes = maxOf(total, sent),
+                            isSent = true,
+                            bytesPerSec = finalSpd,
+                            timestampMs = System.currentTimeMillis(),
+                            localUriString = uri.toString()
+                        )
+                    )
+                    successCount++
+                }
+                delay(1200)
                 _transferProgress.value = null
                 refreshPeerFiles()
-                onComplete("Sent '$name' to ${_peerName.value}")
+                val msg = if (successCount == 1) {
+                    "Sent '$lastName' to ${_peerName.value}"
+                } else {
+                    "Sent $successCount file(s) to ${_peerName.value}"
+                }
+                onComplete(msg)
             } catch (e: Exception) {
                 _transferProgress.value = null
                 onComplete("Phone send failed: ${e.message ?: "error"}")
@@ -217,14 +389,49 @@ class PhoneShareServer(context: Context) {
                 }
                 if (conn.responseCode !in 200..299) throw IllegalStateException("HTTP ${conn.responseCode}")
                 val total = conn.contentLengthLong.coerceAtLeast(0L)
-                _transferProgress.value = TransferProgress(fileName, 0L, total, isUpload = false)
+                val startedMs = System.currentTimeMillis()
+                var lastEmit = startedMs
+                var doneBytes = 0L
+                _transferProgress.value = TransferProgress(fileName, 0L, total, isUpload = false, bytesPerSec = 0L)
 
-                saveStreamToDownloads(fileName, conn.inputStream) { done ->
-                    _transferProgress.value = TransferProgress(fileName, done, maxOf(total, done), isUpload = false)
+                val savedUri = saveStreamToDownloads(fileName, conn.inputStream) { done ->
+                    doneBytes = done
+                    val now = System.currentTimeMillis()
+                    if (now - lastEmit >= 160L || (total > 0 && done >= total)) {
+                        lastEmit = now
+                        val spd = (done * 1000L) / max(1L, now - startedMs)
+                        _transferProgress.value = TransferProgress(
+                            fileName = fileName,
+                            bytesDone = done,
+                            totalBytes = maxOf(total, done),
+                            isUpload = false,
+                            bytesPerSec = spd
+                        )
+                    }
                 }
                 conn.disconnect()
-                _transferProgress.value = TransferProgress(fileName, total, total, isUpload = false, isComplete = true)
-                delay(1400)
+                val finalSize = maxOf(total, doneBytes)
+                val finalSpd = (finalSize * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
+                _transferProgress.value = TransferProgress(
+                    fileName = fileName,
+                    bytesDone = finalSize,
+                    totalBytes = finalSize,
+                    isUpload = false,
+                    isComplete = true,
+                    bytesPerSec = finalSpd
+                )
+                appendHistory(
+                    TransferHistoryItem(
+                        id = "ph_dl_${System.nanoTime()}",
+                        fileName = fileName,
+                        sizeBytes = finalSize,
+                        isSent = false,
+                        bytesPerSec = finalSpd,
+                        timestampMs = System.currentTimeMillis(),
+                        localUriString = savedUri?.toString()
+                    )
+                )
+                delay(1200)
                 _transferProgress.value = null
                 onComplete("Saved '$fileName' to Downloads/GptRemote")
             } catch (e: Exception) {
@@ -289,18 +496,43 @@ class PhoneShareServer(context: Context) {
                     val head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n${lenHeader}Connection: close\r\n\r\n"
                     out.write(head.toByteArray(Charsets.UTF_8))
                     var sent = 0L
-                    val buf = ByteArray(32768)
-                    _transferProgress.value = TransferProgress(item.name, 0L, item.sizeBytes, isUpload = true)
+                    val startedMs = System.currentTimeMillis()
+                    var lastEmit = startedMs
+                    val buf = ByteArray(65536)
+                    _transferProgress.value = TransferProgress(item.name, 0L, item.sizeBytes, isUpload = true, bytesPerSec = 0L)
                     appContext.contentResolver.openInputStream(item.uri)?.use { fis ->
                         while (true) {
                             val n = fis.read(buf)
                             if (n <= 0) break
                             out.write(buf, 0, n)
                             sent += n
-                            _transferProgress.value = TransferProgress(item.name, sent, maxOf(item.sizeBytes, sent), isUpload = true)
+                            val now = System.currentTimeMillis()
+                            if (now - lastEmit >= 160L || sent >= item.sizeBytes) {
+                                lastEmit = now
+                                val spd = (sent * 1000L) / max(1L, now - startedMs)
+                                _transferProgress.value = TransferProgress(
+                                    fileName = item.name,
+                                    bytesDone = sent,
+                                    totalBytes = maxOf(item.sizeBytes, sent),
+                                    isUpload = true,
+                                    bytesPerSec = spd
+                                )
+                            }
                         }
                     }
                     out.flush()
+                    val finalSpd = (sent * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
+                    appendHistory(
+                        TransferHistoryItem(
+                            id = "ph_host_sent_${System.nanoTime()}",
+                            fileName = item.name,
+                            sizeBytes = sent,
+                            isSent = true,
+                            bytesPerSec = finalSpd,
+                            timestampMs = System.currentTimeMillis(),
+                            localUriString = item.uri.toString()
+                        )
+                    )
                     _transferProgress.value = null
                 }
 
@@ -308,17 +540,45 @@ class PhoneShareServer(context: Context) {
                     val rawName = headerMap["x-filename"]?.let { URLDecoder.decode(it, "UTF-8") } ?: "shared_file.bin"
                     val cleanName = rawName.substringAfterLast('/').substringAfterLast('\\').ifBlank { "shared_file.bin" }
                     val contentLength = headerMap["content-length"]?.toLongOrNull() ?: 0L
-                    _transferProgress.value = TransferProgress(cleanName, 0L, contentLength, isUpload = false)
+                    val startedMs = System.currentTimeMillis()
+                    var lastEmit = startedMs
+                    var received = 0L
+                    _transferProgress.value = TransferProgress(cleanName, 0L, contentLength, isUpload = false, bytesPerSec = 0L)
 
                     val limitedInput = if (contentLength > 0) {
                         BoundedInputStream(inp, contentLength)
                     } else {
                         inp
                     }
-                    saveStreamToDownloads(cleanName, limitedInput) { done ->
-                        _transferProgress.value = TransferProgress(cleanName, done, maxOf(contentLength, done), isUpload = false)
+                    val savedUri = saveStreamToDownloads(cleanName, limitedInput) { done ->
+                        received = done
+                        val now = System.currentTimeMillis()
+                        if (now - lastEmit >= 160L || (contentLength > 0 && done >= contentLength)) {
+                            lastEmit = now
+                            val spd = (done * 1000L) / max(1L, now - startedMs)
+                            _transferProgress.value = TransferProgress(
+                                fileName = cleanName,
+                                bytesDone = done,
+                                totalBytes = maxOf(contentLength, done),
+                                isUpload = false,
+                                bytesPerSec = spd
+                            )
+                        }
                     }
-                    _transferProgress.value = TransferProgress(cleanName, contentLength, contentLength, isUpload = false, isComplete = true)
+                    val finalSize = maxOf(contentLength, received)
+                    val finalSpd = (finalSize * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
+                    appendHistory(
+                        TransferHistoryItem(
+                            id = "ph_host_recv_${System.nanoTime()}",
+                            fileName = cleanName,
+                            sizeBytes = finalSize,
+                            isSent = false,
+                            bytesPerSec = finalSpd,
+                            timestampMs = System.currentTimeMillis(),
+                            localUriString = savedUri?.toString()
+                        )
+                    )
+                    _transferProgress.value = TransferProgress(cleanName, finalSize, finalSize, isUpload = false, isComplete = true, bytesPerSec = finalSpd)
                     scope.launch {
                         delay(1200)
                         _transferProgress.value = null
@@ -344,8 +604,8 @@ class PhoneShareServer(context: Context) {
         fileName: String,
         input: java.io.InputStream,
         onProgress: (Long) -> Unit
-    ) {
-        val buf = ByteArray(32768)
+    ): Uri? {
+        val buf = ByteArray(65536)
         var done = 0L
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
@@ -364,13 +624,15 @@ class PhoneShareServer(context: Context) {
                     onProgress(done)
                 }
             }
+            return outUri
         } else {
             @Suppress("DEPRECATION")
             val dir = File(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
                 "GptRemote"
             ).apply { mkdirs() }
-            FileOutputStream(File(dir, fileName)).use { out ->
+            val outFile = File(dir, fileName)
+            FileOutputStream(outFile).use { out ->
                 while (true) {
                     val n = input.read(buf)
                     if (n <= 0) break
@@ -379,6 +641,9 @@ class PhoneShareServer(context: Context) {
                     onProgress(done)
                 }
             }
+            return runCatching {
+                FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", outFile)
+            }.getOrNull()
         }
     }
 
@@ -443,6 +708,8 @@ class PhoneShareServer(context: Context) {
         acceptJob?.cancel()
         runCatching { serverSocket?.close() }
         serverSocket = null
+        runCatching { hotspotReservation?.close() }
+        hotspotReservation = null
     }
 
     private class BoundedInputStream(

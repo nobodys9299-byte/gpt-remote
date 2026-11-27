@@ -2,8 +2,14 @@ package com.gptremote.mitv.data
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
 import com.gptremote.mitv.bluetooth.BluetoothHidManager
 import com.gptremote.mitv.haptic.HapticManager
 import com.gptremote.mitv.haptic.HapticStrength
@@ -17,9 +23,12 @@ import com.gptremote.mitv.model.ProductType
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
 import com.gptremote.mitv.model.SavedDevice
+import com.gptremote.mitv.model.TransferHistoryItem
 import com.gptremote.mitv.model.TransferProgress
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
+import java.io.File
+import java.util.Locale
 import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.wifi.AndroidTvNsdDiscovery
 import com.gptremote.mitv.wifi.DiscoveredSmartBulb
@@ -64,7 +73,7 @@ class RemoteRepository(context: Context) {
     private val wifiTvClient = WifiTvRemoteClient(certManager)
     private val smartTvWsClient = SmartTvWebSocketClient(appContext)
     private val wifiPcClient = WifiPcRemoteClient()
-    private val smartBulbClient = SmartBulbClient()
+    private val smartBulbClient = SmartBulbClient(appContext)
     private val phoneShareServer = PhoneShareServer(appContext)
 
     private val activeTransport = MutableStateFlow(TransportMode.BLUETOOTH_HID)
@@ -116,7 +125,8 @@ class RemoteRepository(context: Context) {
         val isCastingPhone: Boolean,
         val files: List<SharedPcFile>,
         val isTransferring: Boolean,
-        val transferProgress: TransferProgress?
+        val transferProgress: TransferProgress?,
+        val pcHistory: List<TransferHistoryItem>
     )
 
     private data class PhoneShareFlows(
@@ -124,7 +134,20 @@ class RemoteRepository(context: Context) {
         val hostedFiles: List<SharedPcFile>,
         val peerName: String?,
         val peerFiles: List<SharedPcFile>,
-        val phoneProgress: TransferProgress?
+        val phoneProgress: TransferProgress?,
+        val phoneHistory: List<TransferHistoryItem>,
+        val hotspotSsid: String?,
+        val hotspotPassword: String?,
+        val hotspotError: String?
+    )
+
+    private data class TvCompanionFlows(
+        val discoveredTvs: List<TvDevice.WifiPc>,
+        val connectedTv: TvDevice.WifiPc?,
+        val tvFiles: List<SharedPcFile>,
+        val tvProgress: TransferProgress?,
+        val tvHistory: List<TransferHistoryItem>,
+        val castTargetKind: String?
     )
 
     private val coreFlows = combine(
@@ -202,7 +225,8 @@ class RemoteRepository(context: Context) {
         ScreenCastService.isCasting,
         wifiPcClient.sharedFiles,
         wifiPcClient.isTransferringFile,
-        wifiPcClient.transferProgress
+        wifiPcClient.transferProgress,
+        wifiPcClient.pcTransferHistory
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         MediaShareFlows(
@@ -211,7 +235,8 @@ class RemoteRepository(context: Context) {
             isCastingPhone = values[2] as Boolean,
             files = values[3] as List<SharedPcFile>,
             isTransferring = values[4] as Boolean,
-            transferProgress = values[5] as TransferProgress?
+            transferProgress = values[5] as TransferProgress?,
+            pcHistory = values[6] as List<TransferHistoryItem>
         )
     }
 
@@ -220,9 +245,43 @@ class RemoteRepository(context: Context) {
         phoneShareServer.hostedFiles,
         phoneShareServer.peerName,
         phoneShareServer.peerFiles,
-        phoneShareServer.transferProgress
-    ) { qr, hosted, peer, peerFiles, progress ->
-        PhoneShareFlows(qr, hosted, peer, peerFiles, progress)
+        phoneShareServer.transferProgress,
+        phoneShareServer.transferHistory,
+        phoneShareServer.hotspotSsid,
+        phoneShareServer.hotspotPassword,
+        phoneShareServer.hotspotError
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        PhoneShareFlows(
+            hostQrUrl = values[0] as String?,
+            hostedFiles = values[1] as List<SharedPcFile>,
+            peerName = values[2] as String?,
+            peerFiles = values[3] as List<SharedPcFile>,
+            phoneProgress = values[4] as TransferProgress?,
+            phoneHistory = values[5] as List<TransferHistoryItem>,
+            hotspotSsid = values[6] as String?,
+            hotspotPassword = values[7] as String?,
+            hotspotError = values[8] as String?
+        )
+    }
+
+    private val tvCompanionFlows = combine(
+        wifiPcClient.discoveredTvCompanions,
+        wifiPcClient.connectedTvCompanion,
+        wifiPcClient.tvSharedFiles,
+        wifiPcClient.tvTransferProgress,
+        wifiPcClient.tvTransferHistory,
+        ScreenCastService.castTargetKind
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        TvCompanionFlows(
+            discoveredTvs = values[0] as List<TvDevice.WifiPc>,
+            connectedTv = values[1] as TvDevice.WifiPc?,
+            tvFiles = values[2] as List<SharedPcFile>,
+            tvProgress = values[3] as TransferProgress?,
+            tvHistory = values[4] as List<TransferHistoryItem>,
+            castTargetKind = values[5] as String?
+        )
     }
 
     val uiState: StateFlow<RemoteUiState> = combine(
@@ -230,8 +289,15 @@ class RemoteRepository(context: Context) {
         discoveryFlows,
         flagsFlows,
         mediaShareFlows,
-        phoneShareFlows
-    ) { core, disc, flags, media, phone ->
+        phoneShareFlows,
+        tvCompanionFlows
+    ) { values ->
+        val core = values[0] as CoreFlows
+        val disc = values[1] as DiscoveryFlows
+        val flags = values[2] as FlagsFlows
+        val media = values[3] as MediaShareFlows
+        val phone = values[4] as PhoneShareFlows
+        val tv = values[5] as TvCompanionFlows
         val effectiveStatus = when {
             core.btStatus is ConnectionStatus.Connected -> core.btStatus
             core.wifiTvStatus is ConnectionStatus.Connected -> core.wifiTvStatus
@@ -281,10 +347,11 @@ class RemoteRepository(context: Context) {
             isScanningWifiPc = flags.wifiPcScanning,
             pcScreenBitmap = media.pcScreen,
             isMirroringPc = media.isMirroringPc,
-            isCastingPhoneScreen = media.isCastingPhone,
+            isCastingPhoneScreen = media.isCastingPhone && tv.castTargetKind != "tv",
             sharedPcFiles = media.files,
             isTransferringFile = media.isTransferring,
             transferProgress = media.transferProgress,
+            pcTransferHistory = media.pcHistory,
             smartBulbs = disc.bulbs,
             isScanningBulbs = disc.isScanningBulbs,
             connectedBulb = disc.connectedBulb,
@@ -293,6 +360,16 @@ class RemoteRepository(context: Context) {
             peerPhoneName = phone.peerName,
             peerPhoneFiles = phone.peerFiles,
             phoneTransferProgress = phone.phoneProgress,
+            phoneTransferHistory = phone.phoneHistory,
+            phoneHotspotSsid = phone.hotspotSsid,
+            phoneHotspotPassword = phone.hotspotPassword,
+            phoneHotspotError = phone.hotspotError,
+            discoveredTvCompanions = tv.discoveredTvs,
+            connectedTvCompanion = tv.connectedTv,
+            tvCompanionFiles = tv.tvFiles,
+            tvTransferProgress = tv.tvProgress,
+            tvTransferHistory = tv.tvHistory,
+            isCastingToTv = media.isCastingPhone && tv.castTargetKind == "tv",
             lastStatusBanner = flags.banner
         )
     }.stateIn(
@@ -312,7 +389,9 @@ class RemoteRepository(context: Context) {
             if (connected != null) {
                 savedStore.saveOrUpdateFromConnection(connected)
                 irActive.value = false
-            } else if (state.status is ConnectionStatus.Disconnected || state.status is ConnectionStatus.Error) {
+            } else if ((state.status is ConnectionStatus.Disconnected || state.status is ConnectionStatus.Error) &&
+                state.connectedTvCompanion == null
+            ) {
                 connectedBrandId.value = null
             }
         }.launchIn(scope)
@@ -339,19 +418,35 @@ class RemoteRepository(context: Context) {
         phoneShareServer.startHostIfNeeded()
     }
 
-    fun addLocalFileToPhoneShare(uri: Uri) {
+    fun startLocalHotspot() {
         haptics.click()
-        phoneShareServer.addFileToShare(uri)
-        statusBanner.value = "File ready for QR download."
+        phoneShareServer.startLocalHotspot()
+    }
+
+    fun stopLocalHotspot() {
+        haptics.click()
+        phoneShareServer.stopLocalHotspot()
+    }
+
+    fun addLocalFileToPhoneShare(uri: Uri) = addLocalFilesToPhoneShare(listOf(uri))
+
+    fun addLocalFilesToPhoneShare(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        haptics.click()
+        phoneShareServer.addFilesToShare(uris)
+        statusBanner.value = "${uris.size} file(s) ready for QR download."
     }
 
     fun refreshPeerPhoneFiles() {
         phoneShareServer.refreshPeerFiles { err -> statusBanner.value = err }
     }
 
-    fun sendFileToPeerPhone(uri: Uri) {
+    fun sendFileToPeerPhone(uri: Uri) = sendFilesToPeerPhone(listOf(uri))
+
+    fun sendFilesToPeerPhone(uris: List<Uri>) {
+        if (uris.isEmpty()) return
         haptics.click()
-        phoneShareServer.sendFileToPeer(uri) { msg -> statusBanner.value = msg }
+        phoneShareServer.sendFilesToPeer(uris) { msg -> statusBanner.value = msg }
     }
 
     fun downloadFileFromPeerPhone(fileName: String) {
@@ -367,25 +462,36 @@ class RemoteRepository(context: Context) {
         if (scheme == "gptremote" && parsed != null) {
             val ip = parsed.getQueryParameter("host")?.trim().orEmpty()
             val port = parsed.getQueryParameter("port")?.toIntOrNull()
+            val token = parsed.getQueryParameter("token")?.trim().orEmpty()
             val name = parsed.getQueryParameter("name")?.trim().orEmpty().ifBlank { ip }
             if (ip.isNotBlank()) {
-                return if (hostType == "phone") {
-                    phoneShareServer.connectPeer(ip, port ?: PhoneShareServer.DEFAULT_PORT, name) { err ->
-                        statusBanner.value = err
+                return when (hostType) {
+                    "phone" -> {
+                        phoneShareServer.connectPeer(ip, port ?: PhoneShareServer.DEFAULT_PORT, name) { err ->
+                            statusBanner.value = err
+                        }
+                        statusBanner.value = "Connected to phone $name ($ip)"
+                        "phone"
                     }
-                    statusBanner.value = "Connected to phone $name ($ip)"
-                    "phone"
-                } else {
-                    connectedBrandId.value = selectedBrand.value?.id ?: "pc_windows"
-                    connectWifiPc(
-                        TvDevice.WifiPc(
-                            id = "$ip:${port ?: WifiPcRemoteClient.DEFAULT_PORT}",
-                            name = name,
-                            host = ip,
-                            port = port ?: WifiPcRemoteClient.DEFAULT_PORT
+                    "tv" -> {
+                        connectedBrandId.value = selectedBrand.value?.id ?: "tv_xiaomi"
+                        wifiPcClient.connectTvCompanion(ip, name, token) { msg ->
+                            statusBanner.value = msg
+                        }
+                        "tv"
+                    }
+                    else -> {
+                        connectedBrandId.value = selectedBrand.value?.id ?: "pc_windows"
+                        connectWifiPc(
+                            TvDevice.WifiPc(
+                                id = "$ip:${port ?: WifiPcRemoteClient.DEFAULT_PORT}",
+                                name = name,
+                                host = ip,
+                                port = port ?: WifiPcRemoteClient.DEFAULT_PORT
+                            )
                         )
-                    )
-                    "pc"
+                        "pc"
+                    }
                 }
             }
         }
@@ -435,6 +541,8 @@ class RemoteRepository(context: Context) {
     }
 
     fun setBluetoothPcProfile(enabled: Boolean) = bluetoothHid.setPcProfile(enabled)
+
+    fun allowBluetoothIncomingPairing() = bluetoothHid.allowIncomingPairing()
 
     fun startBluetoothScan() {
         activeTransport.value = TransportMode.BLUETOOTH_HID
@@ -608,9 +716,51 @@ class RemoteRepository(context: Context) {
         wifiTvClient.disconnect()
         smartTvWsClient.disconnect()
         wifiPcClient.disconnect()
+        wifiPcClient.disconnectTvCompanion()
         smartBulbClient.disconnect()
         connectedBrandId.value = null
         irActive.value = false
+    }
+
+    fun startTvCompanionScan() {
+        wifiPcClient.startDiscovery()
+    }
+
+    fun connectTvCompanion(host: String, name: String, token: String) {
+        haptics.click()
+        connectedBrandId.value = selectedBrand.value?.id ?: "tv_xiaomi"
+        wifiPcClient.connectTvCompanion(host, name, token) { msg -> statusBanner.value = msg }
+    }
+
+    fun disconnectTvCompanion() {
+        ScreenCastService.stop(appContext)
+        wifiPcClient.disconnectTvCompanion()
+    }
+
+    fun refreshTvCompanionFiles() {
+        wifiPcClient.refreshTvFiles { err -> statusBanner.value = err }
+    }
+
+    fun uploadFilesToTv(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        haptics.click()
+        wifiPcClient.uploadFilesToTv(appContext, uris) { msg -> statusBanner.value = msg }
+    }
+
+    fun downloadFileFromTv(fileName: String) {
+        haptics.click()
+        wifiPcClient.downloadFileFromTv(appContext, fileName) { msg -> statusBanner.value = msg }
+    }
+
+    fun getConnectedTvCompanionHost(): String? = wifiPcClient.getConnectedTvCompanionHostAndToken()?.first
+
+    fun startPhoneCastToTv(resultCode: Int, data: Intent) {
+        val pair = wifiPcClient.getConnectedTvCompanionHostAndToken()
+        if (pair == null) {
+            statusBanner.value = "Connect to GPT Remote TV Companion first to cast phone screen."
+            return
+        }
+        ScreenCastService.start(appContext, resultCode, data, pair.first, pair.second, "TV")
     }
 
     fun startPcScreenMirror() {
@@ -647,15 +797,134 @@ class RemoteRepository(context: Context) {
         wifiPcClient.refreshSharedFiles { err -> statusBanner.value = err }
     }
 
-    fun uploadFileToPc(uri: Uri) {
+    fun uploadFileToPc(uri: Uri) = uploadFilesToPc(listOf(uri))
+
+    fun uploadFilesToPc(uris: List<Uri>) {
+        if (uris.isEmpty()) return
         haptics.click()
-        wifiPcClient.uploadFile(appContext, uri) { msg -> statusBanner.value = msg }
+        wifiPcClient.uploadFiles(appContext, uris) { msg -> statusBanner.value = msg }
     }
 
     fun downloadFileFromPc(fileName: String) {
         haptics.click()
         wifiPcClient.downloadFile(appContext, fileName) { msg -> statusBanner.value = msg }
     }
+
+    fun queryInstalledAppsForShare(): List<ShareableAppInfo> {
+        val pm = appContext.packageManager
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val activities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.queryIntentActivities(launcherIntent, PackageManager.ResolveInfoFlags.of(0L))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(launcherIntent, 0)
+        }
+        val seenPkgs = HashSet<String>()
+        val result = ArrayList<ShareableAppInfo>()
+        for (ri in activities) {
+            val ai = ri.activityInfo?.applicationInfo ?: continue
+            val pkg = ai.packageName ?: continue
+            if (!seenPkgs.add(pkg)) continue
+            val src = ai.sourceDir ?: continue
+            val apkFile = File(src)
+            if (!apkFile.exists() || !apkFile.canRead()) continue
+            val label = runCatching { ri.loadLabel(pm).toString() }.getOrDefault(pkg).trim().ifBlank { pkg }
+            result += ShareableAppInfo(
+                packageName = pkg,
+                label = label,
+                apkPath = src,
+                sizeBytes = apkFile.length()
+            )
+        }
+        return result.sortedBy { it.label.lowercase(Locale.US) }
+    }
+
+    fun stageAppsAsUris(apps: List<ShareableAppInfo>): List<Uri> {
+        val shareDir = File(appContext.cacheDir, "apk_share").apply { mkdirs() }
+        return apps.mapNotNull { app ->
+            runCatching {
+                val cleanName = app.label.replace(Regex("[^A-Za-z0-9._-]"), "_").trim('_').ifBlank { app.packageName }
+                val outFile = File(shareDir, "$cleanName.apk")
+                File(app.apkPath).inputStream().use { inp ->
+                    outFile.outputStream().use { out -> inp.copyTo(out) }
+                }
+                FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", outFile)
+            }.getOrNull()
+        }
+    }
+
+    fun openTransferredFile(activityContext: Context, uriString: String?, fileName: String) {
+        var targetUri = uriString?.takeIf { it.isNotBlank() }?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        if (targetUri == null) {
+            targetUri = findDownloadedFileUri(fileName)
+        }
+        if (targetUri == null) {
+            statusBanner.value = "File saved in Downloads/GptRemote/$fileName (open with your Files app)."
+            return
+        }
+        val ext = fileName.substringAfterLast('.', "").lowercase(Locale.US)
+        val mime = when {
+            ext == "apk" -> "application/vnd.android.package-archive"
+            ext.isNotBlank() -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+            else -> null
+        } ?: appContext.contentResolver.getType(targetUri) ?: "*/*"
+
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(targetUri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching {
+            activityContext.startActivity(intent)
+        }.onFailure {
+            val fallback = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(targetUri, "*/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching {
+                activityContext.startActivity(Intent.createChooser(fallback, "Open $fileName"))
+            }.onFailure {
+                statusBanner.value = "No app found on phone to open $fileName."
+            }
+        }
+    }
+
+    private fun findDownloadedFileUri(fileName: String): Uri? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                appContext.contentResolver.query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    arrayOf(MediaStore.Downloads._ID),
+                    "${MediaStore.Downloads.DISPLAY_NAME} = ?",
+                    arrayOf(fileName),
+                    "${MediaStore.Downloads.DATE_MODIFIED} DESC"
+                )?.use { c ->
+                    if (c.moveToFirst()) {
+                        val id = c.getLong(0)
+                        return Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id.toString())
+                    }
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val f = File(
+                File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "GptRemote"),
+                fileName
+            )
+            if (f.exists()) {
+                return runCatching {
+                    FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", f)
+                }.getOrNull()
+            }
+        }
+        return null
+    }
+
+    data class ShareableAppInfo(
+        val packageName: String,
+        val label: String,
+        val apkPath: String,
+        val sizeBytes: Long
+    )
 
     fun sendButton(button: RemoteButton, strongHaptic: Boolean = false) {
         if (strongHaptic) haptics.heavyClick() else haptics.click()

@@ -538,8 +538,9 @@ fun ConnectProductSheet(
                 }
 
                 ConnectTab.WIFI_SMART_BULB -> {
+                    var showAdvancedIp by remember { mutableStateOf(false) }
                     Text(
-                        text = "Auto-discovers Philips WiZ & Mi/Yeelight bulbs on local Wi-Fi. For Wipro / Syska bulbs without LAN IP, connect via Bluetooth/IR or check bulb IP in your router.",
+                        text = "Auto-discovers Wi-Fi (Philips WiZ, Mi/Yeelight, Tuya/Wipro/Syska LAN) and Bluetooth LE smart bulbs nearby.",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
@@ -554,42 +555,57 @@ fun ConnectProductSheet(
                             Icon(Icons.Rounded.Lightbulb, contentDescription = null, modifier = Modifier.size(18.dp))
                         }
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(if (uiState.isScanningBulbs) "Scanning Wi-Fi Bulbs..." else "Auto-Discover Smart Bulbs")
+                        Text(if (uiState.isScanningBulbs) "Scanning Wi-Fi & BLE Bulbs..." else "Auto-Discover Smart Bulbs")
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+
+                    TextButton(
+                        onClick = { showAdvancedIp = !showAdvancedIp },
+                        modifier = Modifier.align(Alignment.Start)
                     ) {
-                        OutlinedTextField(
-                            value = manualIp,
-                            onValueChange = { manualIp = it },
-                            label = { Text("Optional Bulb IP") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f)
+                        Text(
+                            text = if (showAdvancedIp) "Hide Manual IP" else "Advanced: Enter Bulb IP Manually",
+                            color = WifiBlue,
+                            fontSize = 12.sp
                         )
-                        Button(
-                            onClick = {
-                                onConnectManualBulb(manualIp)
-                                onDismiss()
-                            },
-                            enabled = manualIp.isNotBlank(),
-                            colors = ButtonDefaults.buttonColors(containerColor = MiOrange)
+                    }
+
+                    if (showAdvancedIp) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Go")
+                            OutlinedTextField(
+                                value = manualIp,
+                                onValueChange = { manualIp = it },
+                                label = { Text("Bulb IP Address") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Button(
+                                onClick = {
+                                    onConnectManualBulb(manualIp)
+                                    onDismiss()
+                                },
+                                enabled = manualIp.isNotBlank(),
+                                colors = ButtonDefaults.buttonColors(containerColor = MiOrange)
+                            ) {
+                                Text("Go")
+                            }
                         }
                     }
+
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(140.dp),
+                            .height(170.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(uiState.smartBulbs, key = { it.host }) { bulb ->
                             val isSelected = uiState.connectedBulb?.host == bulb.host
                             ConnectRow(
                                 title = bulb.name,
-                                subtitle = "${bulb.host} • ${bulb.protocol.name}",
+                                subtitle = "${bulb.host} • ${if (bulb.isBle) "Bluetooth LE" else bulb.protocol.name}",
                                 isConnected = isSelected,
                                 accent = MiOrange,
                                 isPc = false,

@@ -186,8 +186,8 @@ fun HomeHubScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                val connected = uiState.status as? ConnectionStatus.Connected
-                if (connected != null) {
+                if (uiState.isConnected && uiState.connectedDeviceName != null) {
+                    val activeName = uiState.connectedDeviceName ?: "Device"
                     item(span = { GridItemSpan(2) }) {
                         Row(
                             modifier = Modifier
@@ -206,7 +206,7 @@ fun HomeHubScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Connected: ${connected.device.name}",
+                                    text = "Connected: $activeName",
                                     color = ConnectedGreen,
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold,
@@ -318,7 +318,7 @@ private fun ProductCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    val (icon, accent) = productVisuals(product)
+    val (icon, gradientStart, gradientEnd) = productVisualsGradient(product)
     val activeAccent = MiOrange
 
     Column(
@@ -338,15 +338,24 @@ private fun ProductCard(
     ) {
         Box(
             modifier = Modifier
-                .size(46.dp)
-                .clip(CircleShape)
-                .background(accent.copy(alpha = 0.16f)),
+                .size(50.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(gradientStart, gradientEnd)
+                    )
+                )
+                .border(
+                    width = 1.dp,
+                    color = Color.White.copy(alpha = 0.25f),
+                    shape = RoundedCornerShape(16.dp)
+                ),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = product.title,
-                tint = accent,
+                tint = Color.White,
                 modifier = Modifier.size(26.dp)
             )
         }
@@ -372,18 +381,24 @@ private fun ProductCard(
 }
 
 @Composable
-fun productVisuals(product: ProductType): Pair<ImageVector, Color> = when (product) {
-    ProductType.SMART_TV -> Icons.Rounded.Tv to MiOrange
-    ProductType.PC_LAPTOP -> Icons.Rounded.Laptop to WifiBlue
-    ProductType.AC -> Icons.Rounded.AcUnit to Color(0xFF60A5FA)
-    ProductType.FRIDGE -> Icons.Rounded.Kitchen to Color(0xFF34D399)
-    ProductType.WASHING_MACHINE -> Icons.Rounded.LocalLaundryService to Color(0xFFA78BFA)
-    ProductType.SET_TOP_BOX -> Icons.Rounded.Router to Color(0xFFFBBF24)
-    ProductType.SOUNDBAR -> Icons.Rounded.Speaker to Color(0xFFF472B6)
-    ProductType.PROJECTOR -> Icons.Rounded.Videocam to Color(0xFFFB923C)
-    ProductType.CEILING_FAN -> Icons.Rounded.Air to Color(0xFF2DD4BF)
-    ProductType.SMART_BULB -> Icons.Rounded.Lightbulb to Color(0xFFFDE047)
-    ProductType.PHONE_TO_PHONE -> Icons.Rounded.PhonelinkSetup to Color(0xFF22D3EE)
+fun productVisuals(product: ProductType): Pair<ImageVector, Color> {
+    val (icon, start, _) = productVisualsGradient(product)
+    return icon to start
+}
+
+@Composable
+private fun productVisualsGradient(product: ProductType): Triple<ImageVector, Color, Color> = when (product) {
+    ProductType.SMART_TV -> Triple(Icons.Rounded.Tv, Color(0xFFFF6B00), Color(0xFFDC2626))
+    ProductType.PC_LAPTOP -> Triple(Icons.Rounded.Laptop, Color(0xFF38BDF8), Color(0xFF2563EB))
+    ProductType.AC -> Triple(Icons.Rounded.AcUnit, Color(0xFF60A5FA), Color(0xFF0284C7))
+    ProductType.FRIDGE -> Triple(Icons.Rounded.Kitchen, Color(0xFF34D399), Color(0xFF059669))
+    ProductType.WASHING_MACHINE -> Triple(Icons.Rounded.LocalLaundryService, Color(0xFFA78BFA), Color(0xFF7C3AED))
+    ProductType.SET_TOP_BOX -> Triple(Icons.Rounded.Router, Color(0xFFFBBF24), Color(0xFFD97706))
+    ProductType.SOUNDBAR -> Triple(Icons.Rounded.Speaker, Color(0xFFF472B6), Color(0xFFDB2777))
+    ProductType.PROJECTOR -> Triple(Icons.Rounded.Videocam, Color(0xFFFB923C), Color(0xFFEA580C))
+    ProductType.CEILING_FAN -> Triple(Icons.Rounded.Air, Color(0xFF2DD4BF), Color(0xFF0D9488))
+    ProductType.SMART_BULB -> Triple(Icons.Rounded.Lightbulb, Color(0xFFFACC15), Color(0xFFEAB308))
+    ProductType.PHONE_TO_PHONE -> Triple(Icons.Rounded.PhonelinkSetup, Color(0xFF22D3EE), Color(0xFF0891B2))
 }
 
 private const val PRODUCT_ORDER_PREFS = "gpt_product_order"

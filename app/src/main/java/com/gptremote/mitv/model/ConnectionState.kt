@@ -11,7 +11,18 @@ data class TransferProgress(
     val bytesDone: Long,
     val totalBytes: Long,
     val isUpload: Boolean,
-    val isComplete: Boolean = false
+    val isComplete: Boolean = false,
+    val bytesPerSec: Long = 0L
+)
+
+data class TransferHistoryItem(
+    val id: String,
+    val fileName: String,
+    val sizeBytes: Long,
+    val isSent: Boolean,
+    val bytesPerSec: Long,
+    val timestampMs: Long,
+    val localUriString: String? = null
 )
 
 sealed interface ConnectionStatus {
@@ -48,6 +59,7 @@ data class RemoteUiState(
     val sharedPcFiles: List<SharedPcFile> = emptyList(),
     val isTransferringFile: Boolean = false,
     val transferProgress: TransferProgress? = null,
+    val pcTransferHistory: List<TransferHistoryItem> = emptyList(),
     val smartBulbs: List<DiscoveredSmartBulb> = emptyList(),
     val isScanningBulbs: Boolean = false,
     val connectedBulb: DiscoveredSmartBulb? = null,
@@ -56,18 +68,67 @@ data class RemoteUiState(
     val peerPhoneName: String? = null,
     val peerPhoneFiles: List<SharedPcFile> = emptyList(),
     val phoneTransferProgress: TransferProgress? = null,
+    val phoneTransferHistory: List<TransferHistoryItem> = emptyList(),
+    val phoneHotspotSsid: String? = null,
+    val phoneHotspotPassword: String? = null,
+    val phoneHotspotError: String? = null,
+    val discoveredTvCompanions: List<TvDevice.WifiPc> = emptyList(),
+    val connectedTvCompanion: TvDevice.WifiPc? = null,
+    val tvCompanionFiles: List<SharedPcFile> = emptyList(),
+    val tvTransferProgress: TransferProgress? = null,
+    val tvTransferHistory: List<TransferHistoryItem> = emptyList(),
+    val isCastingToTv: Boolean = false,
     val lastStatusBanner: String? = null
 ) {
     val isConnected: Boolean
-        get() = status is ConnectionStatus.Connected
+        get() = status is ConnectionStatus.Connected ||
+            connectedTvCompanion != null ||
+            connectedBulb != null ||
+            peerPhoneName != null
 
     val connectedDeviceName: String?
         get() = (status as? ConnectionStatus.Connected)?.device?.name
+            ?: connectedTvCompanion?.name
+            ?: connectedBulb?.name
+            ?: peerPhoneName
 
     val connectedCategory: DeviceCategory
         get() = (status as? ConnectionStatus.Connected)?.device?.category ?: DeviceCategory.ANDROID_TV
 
+    val connectedBrandOption: BrandOption?
+        get() {
+            if (connectedTvCompanion != null) {
+                return ProductCatalog.brandsFor(ProductType.SMART_TV)
+                    .firstOrNull { it.id == connectedBrandId }
+                    ?: ProductCatalog.brandsFor(ProductType.SMART_TV).first()
+            }
+            if (connectedBulb != null) {
+                return ProductCatalog.brandsFor(ProductType.SMART_BULB).firstOrNull()
+            }
+            if (peerPhoneName != null) {
+                return ProductCatalog.brandsFor(ProductType.PHONE_TO_PHONE).firstOrNull()
+            }
+            val dev = (status as? ConnectionStatus.Connected)?.device ?: return null
+            if (dev.category == DeviceCategory.LAPTOP_PC) {
+                return ProductCatalog.brandsFor(ProductType.PC_LAPTOP)
+                    .firstOrNull { it.id == connectedBrandId }
+                    ?: ProductCatalog.brandsFor(ProductType.PC_LAPTOP).first()
+            }
+            val explicit = connectedBrandId?.let { id ->
+                ProductType.entries.firstNotNullOfOrNull { pt ->
+                    ProductCatalog.brandsFor(pt).firstOrNull { it.id == id }
+                }
+            }
+            if (explicit != null) return explicit
+            return ProductCatalog.brandsFor(ProductType.SMART_TV).firstOrNull()
+        }
+
     fun isConnectedForBrand(brand: BrandOption): Boolean {
+        if (brand.productType == ProductType.SMART_BULB) return connectedBulb != null
+        if (brand.productType == ProductType.PHONE_TO_PHONE) return peerPhoneName != null
+        if (brand.productType == ProductType.SMART_TV && connectedTvCompanion != null) {
+            return connectedBrandId == null || connectedBrandId == brand.id
+        }
         val dev = (status as? ConnectionStatus.Connected)?.device ?: return false
         return when (brand.productType) {
             ProductType.PC_LAPTOP -> dev.category == DeviceCategory.LAPTOP_PC
@@ -78,8 +139,6 @@ data class RemoteUiState(
                 dev.category == DeviceCategory.ANDROID_TV &&
                     (connectedBrandId == null || connectedBrandId == brand.id)
             }
-            ProductType.SMART_BULB -> connectedBulb != null
-            ProductType.PHONE_TO_PHONE -> peerPhoneName != null
             else -> connectedBrandId == brand.id
         }
     }

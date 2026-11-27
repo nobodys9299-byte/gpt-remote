@@ -40,6 +40,7 @@ class ScreenCastService : Service() {
     private var handlerThread: HandlerThread? = null
     private var lastFrameSentMs: Long = 0L
     private var targetUrl: String? = null
+    private var authToken: String = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -59,10 +60,14 @@ class ScreenCastService : Service() {
             intent?.getParcelableExtra(EXTRA_DATA_INTENT)
         }
         val pcHost = intent?.getStringExtra(EXTRA_PC_HOST) ?: return START_NOT_STICKY
+        val authToken = intent.getStringExtra(EXTRA_AUTH_TOKEN).orEmpty()
+        val targetLabel = intent.getStringExtra(EXTRA_TARGET_LABEL).orEmpty().ifBlank { "PC" }
+        this.authToken = authToken
+        _castTargetKind.value = targetLabel.lowercase()
         targetUrl = "http://$pcHost:58768/phone-frame"
 
         ensureChannel()
-        val notification = buildNotification(pcHost)
+        val notification = buildNotification("$targetLabel ($pcHost)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -161,6 +166,9 @@ class ScreenCastService : Service() {
                 connectTimeout = 800
                 readTimeout = 800
                 doOutput = true
+                if (authToken.isNotBlank()) {
+                    setRequestProperty("X-Auth-Token", authToken)
+                }
                 setFixedLengthStreamingMode(jpeg.size)
             }
             conn.outputStream.use { it.write(jpeg) }
@@ -171,6 +179,7 @@ class ScreenCastService : Service() {
 
     private fun stopProjection() {
         _isCasting.value = false
+        _castTargetKind.value = null
         runCatching { virtualDisplay?.release() }
         virtualDisplay = null
         runCatching { imageReader?.close() }
@@ -218,15 +227,29 @@ class ScreenCastService : Service() {
         private const val EXTRA_RESULT_CODE = "result_code"
         private const val EXTRA_DATA_INTENT = "data_intent"
         private const val EXTRA_PC_HOST = "pc_host"
+        private const val EXTRA_AUTH_TOKEN = "auth_token"
+        private const val EXTRA_TARGET_LABEL = "target_label"
 
         private val _isCasting = MutableStateFlow(false)
         val isCasting: StateFlow<Boolean> = _isCasting.asStateFlow()
 
-        fun start(context: Context, resultCode: Int, data: Intent, pcHost: String) {
+        private val _castTargetKind = MutableStateFlow<String?>(null)
+        val castTargetKind: StateFlow<String?> = _castTargetKind.asStateFlow()
+
+        fun start(
+            context: Context,
+            resultCode: Int,
+            data: Intent,
+            host: String,
+            authToken: String = "",
+            targetLabel: String = "PC",
+        ) {
             val intent = Intent(context, ScreenCastService::class.java).apply {
                 putExtra(EXTRA_RESULT_CODE, resultCode)
                 putExtra(EXTRA_DATA_INTENT, data)
-                putExtra(EXTRA_PC_HOST, pcHost)
+                putExtra(EXTRA_PC_HOST, host)
+                putExtra(EXTRA_AUTH_TOKEN, authToken)
+                putExtra(EXTRA_TARGET_LABEL, targetLabel)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

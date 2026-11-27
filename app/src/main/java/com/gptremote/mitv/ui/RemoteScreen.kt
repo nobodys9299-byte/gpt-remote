@@ -105,6 +105,7 @@ import com.gptremote.mitv.model.ProductCatalog
 import com.gptremote.mitv.model.ProductType
 import com.gptremote.mitv.model.RemoteButton
 import com.gptremote.mitv.model.RemoteUiState
+import com.gptremote.mitv.model.TransferHistoryItem
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
 import com.gptremote.mitv.ui.components.AppLogoBadge
@@ -118,6 +119,7 @@ import com.gptremote.mitv.ui.components.PhoneSharePanel
 import com.gptremote.mitv.ui.components.QrScannerDialog
 import com.gptremote.mitv.ui.components.SettingsSheet
 import com.gptremote.mitv.ui.components.TouchpadControl
+import com.gptremote.mitv.ui.components.TvCompanionSheetDialog
 import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.ui.theme.ConnectedGreen
 import com.gptremote.mitv.ui.theme.MiOrange
@@ -171,12 +173,29 @@ fun RemoteScreen(
     onStopPhoneCast: () -> Unit,
     onRefreshPcFiles: () -> Unit,
     onPickFileToSend: () -> Unit,
+    onShareAppsToPc: () -> Unit,
     onDownloadPcFile: (SharedPcFile) -> Unit,
     onStartPhoneShareHost: () -> Unit,
+    onStartLocalHotspot: () -> Unit,
+    onStopLocalHotspot: () -> Unit,
+    onOpenHotspotSettings: () -> Unit,
     onPickHostFileToShare: () -> Unit,
+    onShareHostApps: () -> Unit,
     onRefreshPeerPhoneFiles: () -> Unit,
     onPickFileForPeerPhone: () -> Unit,
+    onShareAppsToPeerPhone: () -> Unit,
     onDownloadFromPeerPhone: (SharedPcFile) -> Unit,
+    onOpenHistoryFile: (TransferHistoryItem) -> Unit,
+    onScanTvCompanion: () -> Unit,
+    onConnectTvManual: (host: String, token: String) -> Unit,
+    onSelectTvCompanion: (host: String, name: String, token: String) -> Unit,
+    onDisconnectTv: () -> Unit,
+    onRefreshTvFiles: () -> Unit,
+    onPickFilesForTv: () -> Unit,
+    onShareAppsToTv: () -> Unit,
+    onDownloadTvFile: (SharedPcFile) -> Unit,
+    onStartPhoneCastToTv: () -> Unit,
+    onOpenSystemCastSettings: () -> Unit,
     onButtonPress: (RemoteButton, Boolean) -> Unit,
     onApplianceAction: (String) -> Unit,
     onLaunchApp: (LaunchableApp) -> Unit,
@@ -193,6 +212,7 @@ fun RemoteScreen(
     var showKeyboardSheet by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showPhoneQrScanner by remember { mutableStateOf(false) }
+    var showTvCompanionModal by remember { mutableStateOf(false) }
     var bulbPower by remember { mutableStateOf(true) }
 
     val statusError = (uiState.status as? ConnectionStatus.Error)?.message
@@ -210,10 +230,30 @@ fun RemoteScreen(
         }
     }
 
+    if (showTvCompanionModal) {
+        TvCompanionSheetDialog(
+            uiState = uiState,
+            onScanTvCompanion = onScanTvCompanion,
+            onScanTvQr = { showPhoneQrScanner = true },
+            onConnectTvManual = onConnectTvManual,
+            onSelectTvCompanion = onSelectTvCompanion,
+            onDisconnectTv = onDisconnectTv,
+            onRefreshTvFiles = onRefreshTvFiles,
+            onSendFilesToTv = onPickFilesForTv,
+            onSendAppsToTv = onShareAppsToTv,
+            onDownloadTvFile = onDownloadTvFile,
+            onStartPhoneCastToTv = onStartPhoneCastToTv,
+            onStopPhoneCast = onStopPhoneCast,
+            onOpenSystemCastSettings = onOpenSystemCastSettings,
+            onOpenHistoryFile = onOpenHistoryFile,
+            onDismiss = { showTvCompanionModal = false }
+        )
+    }
+
     if (showPhoneQrScanner) {
         QrScannerDialog(
-            title = "Scan Phone or PC QR",
-            subtitle = "Point camera at GPT Remote QR code",
+            title = "Scan Device QR Code",
+            subtitle = "Point camera at Phone Share, PC, or Smart TV QR code",
             onScanned = { payload ->
                 showPhoneQrScanner = false
                 onQrScanned(payload)
@@ -277,7 +317,8 @@ fun RemoteScreen(
                     onMouseMove = onMouseMove,
                     onMouseClick = onMouseClick,
                     onLaunchApp = onLaunchApp,
-                    onOpenKeyboard = { showKeyboardSheet = true }
+                    onOpenKeyboard = { showKeyboardSheet = true },
+                    onOpenTvCompanion = { showTvCompanionModal = true }
                 )
 
                 ProductType.PC_LAPTOP -> PcRemoteBody(
@@ -295,7 +336,9 @@ fun RemoteScreen(
                     onStopPhoneCast = onStopPhoneCast,
                     onRefreshPcFiles = onRefreshPcFiles,
                     onPickFileToSend = onPickFileToSend,
+                    onShareAppsToPc = onShareAppsToPc,
                     onDownloadPcFile = onDownloadPcFile,
+                    onOpenHistoryFile = onOpenHistoryFile,
                     onOpenConnect = { showConnectSheet = true }
                 )
 
@@ -342,11 +385,17 @@ fun RemoteScreen(
                 ProductType.PHONE_TO_PHONE -> PhoneSharePanel(
                     uiState = uiState,
                     onStartHost = onStartPhoneShareHost,
-                    onAddHostFile = onPickHostFileToShare,
+                    onStartLocalHotspot = onStartLocalHotspot,
+                    onStopLocalHotspot = onStopLocalHotspot,
+                    onOpenHotspotSettings = onOpenHotspotSettings,
+                    onAddHostFiles = onPickHostFileToShare,
+                    onShareHostApps = onShareHostApps,
                     onScanPeerQr = { showPhoneQrScanner = true },
                     onRefreshPeerFiles = onRefreshPeerPhoneFiles,
-                    onSendToPeer = onPickFileForPeerPhone,
-                    onDownloadFromPeer = onDownloadFromPeerPhone
+                    onSendFilesToPeer = onPickFileForPeerPhone,
+                    onSendAppsToPeer = onShareAppsToPeerPhone,
+                    onDownloadFromPeer = onDownloadFromPeerPhone,
+                    onOpenHistoryFile = onOpenHistoryFile
                 )
             }
         }
@@ -539,7 +588,8 @@ private fun TvRemoteBody(
     onMouseMove: (Int, Int, Int) -> Unit,
     onMouseClick: (MouseButton) -> Unit,
     onLaunchApp: (LaunchableApp) -> Unit,
-    onOpenKeyboard: () -> Unit
+    onOpenKeyboard: () -> Unit,
+    onOpenTvCompanion: () -> Unit
 ) {
     val tabs = remember(brand) {
         buildList {
@@ -610,6 +660,23 @@ private fun TvRemoteBody(
                     onButtonPress(RemoteButton.SETTINGS, false)
                 }
             }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                QuickShortcutButton(
+                    icon = Icons.Rounded.Folder,
+                    label = if (uiState.connectedTvCompanion != null) "TV Share (Live)" else "File Share TV",
+                    modifier = Modifier.weight(1f),
+                    onClick = onOpenTvCompanion
+                )
+                QuickShortcutButton(
+                    icon = Icons.Rounded.Cast,
+                    label = if (uiState.isCastingToTv) "Casting TV" else "Screen Cast TV",
+                    modifier = Modifier.weight(1f),
+                    onClick = onOpenTvCompanion
+                )
+            }
         }
 
         RemoteSubTab.TOUCHPAD -> {
@@ -619,7 +686,7 @@ private fun TvRemoteBody(
                 onMouseMove = onMouseMove,
                 onMouseClick = onMouseClick,
                 onButtonFallback = { btn -> onButtonPress(btn, false) },
-                showClickButtons = false
+                showClickButtons = true
             )
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -635,6 +702,9 @@ private fun TvRemoteBody(
                     onOpenKeyboard()
                 }
             }
+            if (brand.supportsAppLaunch) {
+                QuickAppStrip(apps = ProductCatalog.tvApps.take(4), onLaunch = onLaunchApp)
+            }
         }
 
         RemoteSubTab.APPS -> {
@@ -646,6 +716,40 @@ private fun TvRemoteBody(
         }
 
         RemoteSubTab.SCREEN, RemoteSubTab.FILES -> Unit
+    }
+}
+
+@Composable
+private fun QuickAppStrip(
+    apps: List<LaunchableApp>,
+    onLaunch: (LaunchableApp) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        apps.forEach { app ->
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(RemoteSurfaceElevated)
+                    .border(1.dp, RemoteBorder, RoundedCornerShape(14.dp))
+                    .clickable { onLaunch(app) }
+                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                AppLogoBadge(app = app, modifier = Modifier.size(34.dp))
+                Text(
+                    text = app.name,
+                    color = TextSecondary,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
     }
 }
 
@@ -665,16 +769,18 @@ private fun PcRemoteBody(
     onStopPhoneCast: () -> Unit,
     onRefreshPcFiles: () -> Unit,
     onPickFileToSend: () -> Unit,
+    onShareAppsToPc: () -> Unit,
     onDownloadPcFile: (SharedPcFile) -> Unit,
+    onOpenHistoryFile: (TransferHistoryItem) -> Unit,
     onOpenConnect: () -> Unit
 ) {
-    // 4 crisp tabs — Keys tab removed & merged into Apps per video walkthrough
+    // PC tab order: Touchpad | Apps | Screen | Files
     var selectedTab by remember { mutableStateOf(RemoteSubTab.TOUCHPAD) }
     val pcTabs = listOf(
         RemoteSubTab.TOUCHPAD,
+        RemoteSubTab.APPS,
         RemoteSubTab.SCREEN,
-        RemoteSubTab.FILES,
-        RemoteSubTab.APPS
+        RemoteSubTab.FILES
     )
 
     SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
@@ -745,8 +851,10 @@ private fun PcRemoteBody(
             PcFileSharePanel(
                 uiState = uiState,
                 onRefreshFiles = onRefreshPcFiles,
-                onPickFileToSend = onPickFileToSend,
+                onPickFilesToSend = onPickFileToSend,
+                onShareAppsToPc = onShareAppsToPc,
                 onDownloadFile = onDownloadPcFile,
+                onOpenHistoryFile = onOpenHistoryFile,
                 onOpenConnect = onOpenConnect
             )
         }
@@ -1302,8 +1410,11 @@ private fun ProjectorRemoteBody(
                 onMouseMove = onMouseMove,
                 onMouseClick = onMouseClick,
                 onButtonFallback = { btn -> onButtonPress(btn, false) },
-                showClickButtons = false
+                showClickButtons = true
             )
+            if (brand.supportsAppLaunch) {
+                QuickAppStrip(apps = ProductCatalog.tvApps.take(4), onLaunch = onLaunchApp)
+            }
         }
 
         RemoteSubTab.APPS -> {

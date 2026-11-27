@@ -1,8 +1,13 @@
 package com.gptremote.mitv.wifi
 
 import com.gptremote.mitv.ir.IrBlasterManager
+import com.gptremote.mitv.model.ConnectionStatus
+import com.gptremote.mitv.model.DeviceCategory
 import com.gptremote.mitv.model.ProductCatalog
 import com.gptremote.mitv.model.ProductType
+import com.gptremote.mitv.model.RemoteUiState
+import com.gptremote.mitv.model.TransferHistoryItem
+import com.gptremote.mitv.model.TransferProgress
 import com.gptremote.mitv.model.TvDevice
 import com.gptremote.mitv.ui.theme.AppAccentTheme
 import com.gptremote.mitv.wifi.TvCertificateManager.Companion.toUnsignedBigEndianBytes
@@ -107,5 +112,41 @@ class ProtoWireTest {
         )
         assertEquals(32, digest.size)
         assertTrue(digest.any { it != 0.toByte() })
+    }
+
+    @Test
+    fun remoteUiStateResolvesConnectedBrandAndTransferFields() {
+        val phoneBrand = ProductCatalog.brandsFor(ProductType.PHONE_TO_PHONE).first()
+        val miTvBrand = ProductCatalog.brandsFor(ProductType.SMART_TV).first { it.id == "tv_xiaomi" }
+        val tvDevice = TvDevice.BluetoothTv(
+            id = "EC:FA:5C:8F:67:40",
+            name = "MiTV-AXS02",
+            isBonded = true,
+            category = DeviceCategory.ANDROID_TV
+        )
+        // Even if user browsed Phone Share last, connectedBrandOption must resolve the connected Smart TV
+        val stateWithTv = RemoteUiState(
+            status = ConnectionStatus.Connected(tvDevice),
+            selectedBrand = phoneBrand,
+            connectedBrandId = miTvBrand.id
+        )
+        assertEquals("tv_xiaomi", stateWithTv.connectedBrandOption?.id)
+        assertTrue(stateWithTv.isConnected)
+        assertEquals("MiTV-AXS02", stateWithTv.connectedDeviceName)
+
+        val pcDevice = TvDevice.WifiPc("10.0.0.5:58765", "Desktop", "10.0.0.5")
+        val stateWithPc = RemoteUiState(
+            status = ConnectionStatus.Connected(pcDevice),
+            selectedBrand = phoneBrand,
+            connectedBrandId = null
+        )
+        assertEquals(ProductType.PC_LAPTOP, stateWithPc.connectedBrandOption?.productType)
+
+        val prog = TransferProgress("movie.mp4", 1024L, 2048L, isUpload = true, bytesPerSec = 512_000L)
+        assertEquals(512_000L, prog.bytesPerSec)
+        val hist = TransferHistoryItem("1", "movie.mp4", 2048L, isSent = true, bytesPerSec = 512_000L, timestampMs = 1L)
+        assertEquals("movie.mp4", hist.fileName)
+        assertTrue(BulbProtocol.entries.contains(BulbProtocol.TUYA_LAN))
+        assertTrue(BulbProtocol.entries.contains(BulbProtocol.BLE_LIGHT))
     }
 }

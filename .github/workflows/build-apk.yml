@@ -29,17 +29,21 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Run unit tests and build debug APK
-        run: ./gradlew testDebugUnitTest assembleDebug --no-daemon
+      - name: Run unit tests and build debug APKs
+        run: ./gradlew testDebugUnitTest :app:assembleDebug :tv-app:assembleDebug --no-daemon
 
-      - name: Prepare APK for download
-        run: cp app/build/outputs/apk/debug/app-debug.apk GptRemote-debug.apk
+      - name: Prepare APKs for download
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk GptRemote-debug.apk
+          cp tv-app/build/outputs/apk/debug/tv-app-debug.apk GptRemoteTV-debug.apk
 
-      - name: Upload Android APK artifact
+      - name: Upload Android APKs artifact
         uses: actions/upload-artifact@v4
         with:
           name: GptRemote-debug-apk
-          path: GptRemote-debug.apk
+          path: |
+            GptRemote-debug.apk
+            GptRemoteTV-debug.apk
 
   build-pc-exe:
     runs-on: windows-latest
@@ -101,11 +105,13 @@ jobs:
           body: |
             Automated build from commit `${{ github.sha }}`.
 
-            - **Android App:** Download `GptRemote-debug.apk` (Android 9.0+).
+            - **Android Phone App:** Download `GptRemote-debug.apk` (Android 9.0+).
+            - **Android TV Companion App:** Download `GptRemoteTV-debug.apk` (install on Android TV / Google TV for Wi-Fi File Share, APK install, & Screen Cast).
             - **Windows PC Installer:** Download `GptRemotePC-Setup.exe` (installs desktop app, tray mode, screen share, two-way file sharing, and firewall rules).
             - **Windows Portable App:** Download `GptRemotePC.exe`.
           files: |
             release-assets/GptRemote-debug.apk
+            release-assets/GptRemoteTV-debug.apk
             release-assets/GptRemotePC-Setup.exe
             release-assets/GptRemotePC.exe
           overwrite_files: true

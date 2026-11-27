@@ -9,10 +9,13 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
 import com.gptremote.mitv.model.ConnectionStatus
 import com.gptremote.mitv.model.MouseButton
 import com.gptremote.mitv.model.RemoteButton
+import com.gptremote.mitv.model.TransferHistoryItem
 import com.gptremote.mitv.model.TransferProgress
+import kotlin.math.max
 import com.gptremote.mitv.model.TransportMode
 import com.gptremote.mitv.model.TvDevice
 import kotlinx.coroutines.CoroutineScope
@@ -94,6 +97,32 @@ class WifiPcRemoteClient {
     private val _transferProgress = MutableStateFlow<TransferProgress?>(null)
     val transferProgress: StateFlow<TransferProgress?> = _transferProgress.asStateFlow()
 
+    private val _pcTransferHistory = MutableStateFlow<List<TransferHistoryItem>>(emptyList())
+    val pcTransferHistory: StateFlow<List<TransferHistoryItem>> = _pcTransferHistory.asStateFlow()
+
+    private val _discoveredTvCompanions = MutableStateFlow<List<TvDevice.WifiPc>>(emptyList())
+    val discoveredTvCompanions: StateFlow<List<TvDevice.WifiPc>> = _discoveredTvCompanions.asStateFlow()
+
+    private val _connectedTvCompanion = MutableStateFlow<TvDevice.WifiPc?>(null)
+    val connectedTvCompanion: StateFlow<TvDevice.WifiPc?> = _connectedTvCompanion.asStateFlow()
+
+    private val _tvSharedFiles = MutableStateFlow<List<SharedPcFile>>(emptyList())
+    val tvSharedFiles: StateFlow<List<SharedPcFile>> = _tvSharedFiles.asStateFlow()
+
+    private val _tvTransferProgress = MutableStateFlow<TransferProgress?>(null)
+    val tvTransferProgress: StateFlow<TransferProgress?> = _tvTransferProgress.asStateFlow()
+
+    private val _tvTransferHistory = MutableStateFlow<List<TransferHistoryItem>>(emptyList())
+    val tvTransferHistory: StateFlow<List<TransferHistoryItem>> = _tvTransferHistory.asStateFlow()
+
+    private fun appendPcHistory(item: TransferHistoryItem) {
+        _pcTransferHistory.value = listOf(item) + _pcTransferHistory.value.take(99)
+    }
+
+    private fun appendTvHistory(item: TransferHistoryItem) {
+        _tvTransferHistory.value = listOf(item) + _tvTransferHistory.value.take(99)
+    }
+
     private var socket: Socket? = null
     private var writer: BufferedWriter? = null
     private var activeDevice: TvDevice.WifiPc? = null
@@ -162,8 +191,10 @@ class WifiPcRemoteClient {
         scanJob = CoroutineScope(Dispatchers.IO).launch {
             _isScanning.value = true
             val found = ConcurrentHashMap<String, TvDevice.WifiPc>()
+            val foundTvs = ConcurrentHashMap<String, TvDevice.WifiPc>()
             fun publishFound() {
                 _discoveredPcs.value = found.values.sortedBy { it.name.lowercase() }
+                _discoveredTvCompanions.value = foundTvs.values.sortedBy { it.name.lowercase() }
             }
 
             try {
@@ -191,16 +222,23 @@ class WifiPcRemoteClient {
                                 if (attempt == 0) delay(250)
                             }
 
-                            val deadline = System.currentTimeMillis() + 2200L
-                            val buf = ByteArray(1024)
+                            val deadline = System.currentTimeMillis() + 2400L
+                            val buf = ByteArray(1536)
                             while (isActive && System.currentTimeMillis() < deadline) {
                                 try {
                                     val resp = DatagramPacket(buf, buf.size)
                                     udpSocket.receive(resp)
                                     val text = String(resp.data, 0, resp.length, Charsets.UTF_8)
                                     val json = JSONObject(text)
-                                    if (json.optString("type") == "announce") {
-                                        val host = resp.address.hostAddress ?: continue
+                                    val host = json.optString("host").takeIf { it.isNotBlank() }
+                                        ?: resp.address.hostAddress ?: continue
+                                    if (json.optString("kind") == "tv" || json.optString("service") == "gpt_remote_tv") {
+                                        val port = json.optInt("tcp_port", DEFAULT_PORT)
+                                        val name = json.optString("name", "Android TV ($host)")
+                                        val token = json.optString("token")
+                                        foundTvs["$host:$port"] = TvDevice.WifiPc("$host:$port", name, host, port, token)
+                                        publishFound()
+                                    } else if (json.optString("type") == "announce") {
                                         val port = json.optInt("port", DEFAULT_PORT)
                                         val name = json.optString("name", "Laptop ($host)")
                                         val os = json.optString("os", "Desktop")
@@ -214,6 +252,40 @@ class WifiPcRemoteClient {
                         } catch (_: Exception) {
                         } finally {
                             runCatching { udpSocket?.close() }
+                        }
+                    }
+
+                    val beaconJob = launch {
+                        var beaconSock: DatagramSocket? = null
+                        try {
+                            beaconSock = DatagramSocket(TV_BEACON_PORT).apply {
+                                reuseAddress = true
+                                broadcast = true
+                                soTimeout = 500
+                            }
+                            val deadline = System.currentTimeMillis() + 2400L
+                            val buf = ByteArray(1536)
+                            while (isActive && System.currentTimeMillis() < deadline) {
+                                try {
+                                    val resp = DatagramPacket(buf, buf.size)
+                                    beaconSock.receive(resp)
+                                    val text = String(resp.data, 0, resp.length, Charsets.UTF_8)
+                                    val json = JSONObject(text)
+                                    if (json.optString("kind") == "tv" || json.optString("service") == "gpt_remote_tv") {
+                                        val host = json.optString("host").takeIf { it.isNotBlank() }
+                                            ?: resp.address.hostAddress ?: continue
+                                        val port = json.optInt("tcp_port", DEFAULT_PORT)
+                                        val name = json.optString("name", "Android TV ($host)")
+                                        val token = json.optString("token")
+                                        foundTvs["$host:$port"] = TvDevice.WifiPc("$host:$port", name, host, port, token)
+                                        publishFound()
+                                    }
+                                } catch (_: SocketTimeoutException) {
+                                }
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            runCatching { beaconSock?.close() }
                         }
                     }
 
@@ -238,6 +310,7 @@ class WifiPcRemoteClient {
                     }
 
                     udpJob.join()
+                    beaconJob.join()
                     tcpSweepJob.join()
                 }
             } finally {
@@ -281,10 +354,11 @@ class WifiPcRemoteClient {
             s.connect(InetSocketAddress(host, port), 600)
             s.soTimeout = 450
             val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
-            val line = runCatching { reader.readLine() }.getOrNull()
-            val json = line?.let { runCatching { JSONObject(it) }.getOrNull() }
-            val name = json?.optString("name")?.takeIf { it.isNotBlank() } ?: "PC ($host)"
-            val os = json?.optString("os")?.takeIf { it.isNotBlank() } ?: "Desktop"
+            val line = runCatching { reader.readLine() }.getOrNull() ?: return null
+            val json = runCatching { JSONObject(line) }.getOrNull() ?: return null
+            if (json.optString("type") != "announce" || json.optString("kind") == "tv") return null
+            val name = json.optString("name").takeIf { it.isNotBlank() } ?: "PC ($host)"
+            val os = json.optString("os").takeIf { it.isNotBlank() } ?: "Desktop"
             TvDevice.WifiPc("$host:$port", name, host, port, os)
         } catch (_: Exception) {
             null
@@ -436,71 +510,111 @@ class WifiPcRemoteClient {
         }
     }
 
-    fun uploadFile(context: Context, uri: Uri, onComplete: (String) -> Unit) {
+    fun uploadFile(context: Context, uri: Uri, onComplete: (String) -> Unit) =
+        uploadFiles(context, listOf(uri), onComplete)
+
+    fun uploadFiles(context: Context, uris: List<Uri>, onComplete: (String) -> Unit) {
         val host = activeDevice?.host
         if (host == null) {
             onComplete("Connect to your PC via Wi-Fi first.")
             return
         }
+        if (uris.isEmpty()) return
         CoroutineScope(Dispatchers.IO).launch {
             _isTransferringFile.value = true
+            var count = 0
+            var lastSaved = ""
             try {
                 val resolver = context.contentResolver
-                val filename = resolveFileName(context, uri)
-                val size = resolveFileSize(context, uri)
-                _transferProgress.value = TransferProgress(filename, 0L, size.coerceAtLeast(0L), isUpload = true)
-                val encodedName = URLEncoder.encode(filename, "UTF-8").replace("+", "%20")
+                for (uri in uris) {
+                    val filename = resolveFileName(context, uri)
+                    val size = resolveFileSize(context, uri)
+                    val startedMs = System.currentTimeMillis()
+                    var lastEmit = startedMs
+                    _transferProgress.value = TransferProgress(
+                        fileName = filename,
+                        bytesDone = 0L,
+                        totalBytes = size.coerceAtLeast(0L),
+                        isUpload = true,
+                        bytesPerSec = 0L
+                    )
+                    val encodedName = URLEncoder.encode(filename, "UTF-8").replace("+", "%20")
 
-                val conn = (URL("http://$host:$FILE_HTTP_PORT/upload").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 5000
-                    readTimeout = 60_000
-                    doOutput = true
-                    setRequestProperty("X-Filename", encodedName)
-                    if (size > 0) {
-                        setFixedLengthStreamingMode(size)
-                    } else {
-                        setChunkedStreamingMode(65536)
-                    }
-                }
-
-                var sent = 0L
-                val buf = ByteArray(32768)
-                resolver.openInputStream(uri)?.use { input ->
-                    conn.outputStream.use { out ->
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n <= 0) break
-                            out.write(buf, 0, n)
-                            sent += n
-                            _transferProgress.value = TransferProgress(
-                                fileName = filename,
-                                bytesDone = sent,
-                                totalBytes = maxOf(size, sent),
-                                isUpload = true
-                            )
+                    val conn = (URL("http://$host:$FILE_HTTP_PORT/upload").openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        connectTimeout = 5000
+                        readTimeout = 60_000
+                        doOutput = true
+                        setRequestProperty("X-Filename", encodedName)
+                        if (size > 0) {
+                            setFixedLengthStreamingMode(size)
+                        } else {
+                            setChunkedStreamingMode(65536)
                         }
-                        out.flush()
                     }
-                } ?: throw IllegalStateException("Cannot read selected file")
 
-                val code = conn.responseCode
-                val resp = conn.inputStream.bufferedReader().use { it.readText() }
-                conn.disconnect()
-                if (code !in 200..299) {
-                    throw IllegalStateException("Upload failed (HTTP $code)")
+                    var sent = 0L
+                    val buf = ByteArray(65536)
+                    resolver.openInputStream(uri)?.use { input ->
+                        conn.outputStream.use { out ->
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                sent += n
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmit >= 160L || (size > 0 && sent >= size)) {
+                                    lastEmit = now
+                                    val spd = (sent * 1000L) / max(1L, now - startedMs)
+                                    _transferProgress.value = TransferProgress(
+                                        fileName = filename,
+                                        bytesDone = sent,
+                                        totalBytes = maxOf(size, sent),
+                                        isUpload = true,
+                                        bytesPerSec = spd
+                                    )
+                                }
+                            }
+                            out.flush()
+                        }
+                    } ?: throw IllegalStateException("Cannot read selected file $filename")
+
+                    val code = conn.responseCode
+                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                    conn.disconnect()
+                    if (code !in 200..299) {
+                        throw IllegalStateException("Upload failed (HTTP $code)")
+                    }
+                    val savedAs = runCatching { JSONObject(resp).optString("savedAs", filename) }.getOrDefault(filename)
+                    lastSaved = savedAs
+                    val finalSpd = (sent * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
+                    _transferProgress.value = TransferProgress(
+                        fileName = savedAs,
+                        bytesDone = maxOf(size, sent),
+                        totalBytes = maxOf(size, sent),
+                        isUpload = true,
+                        isComplete = true,
+                        bytesPerSec = finalSpd
+                    )
+                    appendPcHistory(
+                        TransferHistoryItem(
+                            id = "pc_up_${System.nanoTime()}",
+                            fileName = savedAs,
+                            sizeBytes = maxOf(size, sent),
+                            isSent = true,
+                            bytesPerSec = finalSpd,
+                            timestampMs = System.currentTimeMillis(),
+                            localUriString = uri.toString()
+                        )
+                    )
+                    count++
                 }
-                val savedAs = runCatching { JSONObject(resp).optString("savedAs", filename) }.getOrDefault(filename)
-                _transferProgress.value = TransferProgress(
-                    fileName = savedAs,
-                    bytesDone = maxOf(size, sent),
-                    totalBytes = maxOf(size, sent),
-                    isUpload = true,
-                    isComplete = true
-                )
                 refreshSharedFiles()
-                onComplete("Sent '$savedAs' to PC (Downloads/GptRemote).")
-                delay(1400)
+                onComplete(
+                    if (count == 1) "Sent '$lastSaved' to PC (Downloads/GptRemote)."
+                    else "Sent $count file(s) to PC (Downloads/GptRemote)."
+                )
+                delay(1200)
             } catch (e: Exception) {
                 onComplete("File send failed: ${e.message ?: "error"}")
             } finally {
@@ -528,10 +642,13 @@ class WifiPcRemoteClient {
                     throw IllegalStateException("HTTP ${conn.responseCode}")
                 }
                 val total = conn.contentLengthLong.coerceAtLeast(0L)
-                _transferProgress.value = TransferProgress(fileName, 0L, total, isUpload = false)
+                val startedMs = System.currentTimeMillis()
+                var lastEmit = startedMs
+                _transferProgress.value = TransferProgress(fileName, 0L, total, isUpload = false, bytesPerSec = 0L)
 
-                val buf = ByteArray(32768)
+                val buf = ByteArray(65536)
                 var done = 0L
+                var savedUriStr: String? = null
                 conn.inputStream.use { input ->
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         val values = ContentValues().apply {
@@ -541,13 +658,19 @@ class WifiPcRemoteClient {
                         val resolver = context.contentResolver
                         val outUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                             ?: throw IllegalStateException("Could not create Download entry")
+                        savedUriStr = outUri.toString()
                         resolver.openOutputStream(outUri)?.use { out ->
                             while (true) {
                                 val n = input.read(buf)
                                 if (n <= 0) break
                                 out.write(buf, 0, n)
                                 done += n
-                                _transferProgress.value = TransferProgress(fileName, done, maxOf(total, done), isUpload = false)
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmit >= 160L || (total > 0 && done >= total)) {
+                                    lastEmit = now
+                                    val spd = (done * 1000L) / max(1L, now - startedMs)
+                                    _transferProgress.value = TransferProgress(fileName, done, maxOf(total, done), isUpload = false, bytesPerSec = spd)
+                                }
                             }
                         }
                     } else {
@@ -556,32 +679,317 @@ class WifiPcRemoteClient {
                             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
                             "GptRemote"
                         ).apply { mkdirs() }
-                        FileOutputStream(File(dir, fileName)).use { out ->
+                        val outFile = File(dir, fileName)
+                        savedUriStr = runCatching {
+                            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outFile).toString()
+                        }.getOrNull()
+                        FileOutputStream(outFile).use { out ->
                             while (true) {
                                 val n = input.read(buf)
                                 if (n <= 0) break
                                 out.write(buf, 0, n)
                                 done += n
-                                _transferProgress.value = TransferProgress(fileName, done, maxOf(total, done), isUpload = false)
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmit >= 160L || (total > 0 && done >= total)) {
+                                    lastEmit = now
+                                    val spd = (done * 1000L) / max(1L, now - startedMs)
+                                    _transferProgress.value = TransferProgress(fileName, done, maxOf(total, done), isUpload = false, bytesPerSec = spd)
+                                }
                             }
                         }
                     }
                 }
                 conn.disconnect()
+                val finalSize = maxOf(total, done)
+                val finalSpd = (finalSize * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
                 _transferProgress.value = TransferProgress(
                     fileName = fileName,
-                    bytesDone = maxOf(total, done),
-                    totalBytes = maxOf(total, done),
+                    bytesDone = finalSize,
+                    totalBytes = finalSize,
                     isUpload = false,
-                    isComplete = true
+                    isComplete = true,
+                    bytesPerSec = finalSpd
+                )
+                appendPcHistory(
+                    TransferHistoryItem(
+                        id = "pc_dl_${System.nanoTime()}",
+                        fileName = fileName,
+                        sizeBytes = finalSize,
+                        isSent = false,
+                        bytesPerSec = finalSpd,
+                        timestampMs = System.currentTimeMillis(),
+                        localUriString = savedUriStr
+                    )
                 )
                 onComplete("Saved '$fileName' to Downloads/GptRemote.")
-                delay(1400)
+                delay(1200)
             } catch (e: Exception) {
                 onComplete("Download failed: ${e.message ?: "error"}")
             } finally {
                 _transferProgress.value = null
                 _isTransferringFile.value = false
+            }
+        }
+    }
+
+    fun getConnectedTvCompanionHostAndToken(): Pair<String, String>? {
+        val tv = _connectedTvCompanion.value ?: return null
+        return tv.host to tv.osName
+    }
+
+    fun connectTvCompanion(host: String, name: String, token: String, onStatus: (String) -> Unit) {
+        val cleanHost = host.trim()
+        if (cleanHost.isEmpty()) return
+        val dev = TvDevice.WifiPc(
+            id = "$cleanHost:$DEFAULT_PORT",
+            name = name.ifBlank { "Android TV ($cleanHost)" },
+            host = cleanHost,
+            port = DEFAULT_PORT,
+            osName = token.trim()
+        )
+        _connectedTvCompanion.value = dev
+        onStatus("Connected to TV Companion ${dev.name}")
+        refreshTvFiles(onStatus)
+    }
+
+    fun disconnectTvCompanion() {
+        _connectedTvCompanion.value = null
+        _tvSharedFiles.value = emptyList()
+        _tvTransferProgress.value = null
+    }
+
+    fun refreshTvFiles(onError: (String) -> Unit = {}) {
+        val tv = _connectedTvCompanion.value ?: return
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val conn = (URL("http://${tv.host}:$FILE_HTTP_PORT/files").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    if (tv.osName.isNotBlank()) setRequestProperty("X-Auth-Token", tv.osName)
+                }
+                if (conn.responseCode == 401) throw IllegalStateException("Wrong TV Pair Code — scan TV QR or check code")
+                if (conn.responseCode !in 200..299) throw IllegalStateException("HTTP ${conn.responseCode}")
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                conn.disconnect()
+                val arr = JSONObject(body).getJSONArray("files")
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val item = arr.getJSONObject(i)
+                        add(
+                            SharedPcFile(
+                                name = item.getString("name"),
+                                sizeBytes = item.optLong("size", 0L),
+                                modifiedMs = item.optLong("mtime", 0L)
+                            )
+                        )
+                    }
+                }
+            }.onSuccess { list ->
+                _tvSharedFiles.value = list
+            }.onFailure { err ->
+                onError("TV Companion error: ${err.message ?: "open GPT Remote TV on TV"}")
+            }
+        }
+    }
+
+    fun uploadFilesToTv(context: Context, uris: List<Uri>, onComplete: (String) -> Unit) {
+        val tv = _connectedTvCompanion.value
+        if (tv == null) {
+            onComplete("Connect to GPT Remote TV first (Scan TV or Scan QR).")
+            return
+        }
+        if (uris.isEmpty()) return
+        CoroutineScope(Dispatchers.IO).launch {
+            var count = 0
+            var lastName = ""
+            try {
+                val resolver = context.contentResolver
+                for (uri in uris) {
+                    val filename = resolveFileName(context, uri)
+                    lastName = filename
+                    val size = resolveFileSize(context, uri)
+                    val startedMs = System.currentTimeMillis()
+                    var lastEmit = startedMs
+                    _tvTransferProgress.value = TransferProgress(filename, 0L, size.coerceAtLeast(0L), isUpload = true)
+
+                    val encodedName = URLEncoder.encode(filename, "UTF-8").replace("+", "%20")
+                    val conn = (URL("http://${tv.host}:$FILE_HTTP_PORT/upload?name=$encodedName&size=$size").openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        connectTimeout = 5000
+                        readTimeout = 90_000
+                        doOutput = true
+                        setRequestProperty("X-Filename", encodedName)
+                        if (tv.osName.isNotBlank()) setRequestProperty("X-Auth-Token", tv.osName)
+                        if (size > 0) setFixedLengthStreamingMode(size) else setChunkedStreamingMode(65536)
+                    }
+
+                    var sent = 0L
+                    val buf = ByteArray(65536)
+                    resolver.openInputStream(uri)?.use { input ->
+                        conn.outputStream.use { out ->
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                sent += n
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmit >= 160L || (size > 0 && sent >= size)) {
+                                    lastEmit = now
+                                    val spd = (sent * 1000L) / max(1L, now - startedMs)
+                                    _tvTransferProgress.value = TransferProgress(
+                                        fileName = filename,
+                                        bytesDone = sent,
+                                        totalBytes = maxOf(size, sent),
+                                        isUpload = true,
+                                        bytesPerSec = spd
+                                    )
+                                }
+                            }
+                            out.flush()
+                        }
+                    } ?: throw IllegalStateException("Cannot read $filename")
+
+                    val code = conn.responseCode
+                    conn.disconnect()
+                    if (code !in 200..299) throw IllegalStateException("TV HTTP $code")
+
+                    val finalSpd = (sent * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
+                    _tvTransferProgress.value = TransferProgress(
+                        fileName = filename,
+                        bytesDone = maxOf(size, sent),
+                        totalBytes = maxOf(size, sent),
+                        isUpload = true,
+                        isComplete = true,
+                        bytesPerSec = finalSpd
+                    )
+                    appendTvHistory(
+                        TransferHistoryItem(
+                            id = "tv_up_${System.nanoTime()}",
+                            fileName = filename,
+                            sizeBytes = maxOf(size, sent),
+                            isSent = true,
+                            bytesPerSec = finalSpd,
+                            timestampMs = System.currentTimeMillis(),
+                            localUriString = uri.toString()
+                        )
+                    )
+                    count++
+                }
+                refreshTvFiles()
+                onComplete(
+                    if (count == 1) "Sent '$lastName' to ${tv.name}"
+                    else "Sent $count file(s) to ${tv.name}"
+                )
+                delay(1200)
+            } catch (e: Exception) {
+                onComplete("TV transfer failed: ${e.message ?: "error"}")
+            } finally {
+                _tvTransferProgress.value = null
+            }
+        }
+    }
+
+    fun downloadFileFromTv(context: Context, fileName: String, onComplete: (String) -> Unit) {
+        val tv = _connectedTvCompanion.value
+        if (tv == null) {
+            onComplete("Connect to GPT Remote TV first.")
+            return
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val encoded = URLEncoder.encode(fileName, "UTF-8")
+                val conn = (URL("http://${tv.host}:$FILE_HTTP_PORT/download?name=$encoded").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 5000
+                    readTimeout = 60_000
+                    if (tv.osName.isNotBlank()) setRequestProperty("X-Auth-Token", tv.osName)
+                }
+                if (conn.responseCode !in 200..299) throw IllegalStateException("HTTP ${conn.responseCode}")
+                val total = conn.contentLengthLong.coerceAtLeast(0L)
+                val startedMs = System.currentTimeMillis()
+                var lastEmit = startedMs
+                _tvTransferProgress.value = TransferProgress(fileName, 0L, total, isUpload = false)
+
+                val buf = ByteArray(65536)
+                var done = 0L
+                var savedUriStr: String? = null
+                conn.inputStream.use { input ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val values = ContentValues().apply {
+                            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/GptRemote")
+                        }
+                        val resolver = context.contentResolver
+                        val outUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                            ?: throw IllegalStateException("Could not create Download entry")
+                        savedUriStr = outUri.toString()
+                        resolver.openOutputStream(outUri)?.use { out ->
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                done += n
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmit >= 160L || (total > 0 && done >= total)) {
+                                    lastEmit = now
+                                    val spd = (done * 1000L) / max(1L, now - startedMs)
+                                    _tvTransferProgress.value = TransferProgress(fileName, done, maxOf(total, done), isUpload = false, bytesPerSec = spd)
+                                }
+                            }
+                        }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val dir = File(
+                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                            "GptRemote"
+                        ).apply { mkdirs() }
+                        val outFile = File(dir, fileName)
+                        savedUriStr = runCatching {
+                            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outFile).toString()
+                        }.getOrNull()
+                        FileOutputStream(outFile).use { out ->
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                done += n
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmit >= 160L || (total > 0 && done >= total)) {
+                                    lastEmit = now
+                                    val spd = (done * 1000L) / max(1L, now - startedMs)
+                                    _tvTransferProgress.value = TransferProgress(fileName, done, maxOf(total, done), isUpload = false, bytesPerSec = spd)
+                                }
+                            }
+                        }
+                    }
+                }
+                conn.disconnect()
+                val finalSize = maxOf(total, done)
+                val finalSpd = (finalSize * 1000L) / max(1L, System.currentTimeMillis() - startedMs)
+                _tvTransferProgress.value = TransferProgress(
+                    fileName = fileName,
+                    bytesDone = finalSize,
+                    totalBytes = finalSize,
+                    isUpload = false,
+                    isComplete = true,
+                    bytesPerSec = finalSpd
+                )
+                appendTvHistory(
+                    TransferHistoryItem(
+                        id = "tv_dl_${System.nanoTime()}",
+                        fileName = fileName,
+                        sizeBytes = finalSize,
+                        isSent = false,
+                        bytesPerSec = finalSpd,
+                        timestampMs = System.currentTimeMillis(),
+                        localUriString = savedUriStr
+                    )
+                )
+                onComplete("Downloaded '$fileName' from TV to Downloads/GptRemote.")
+                delay(1200)
+            } catch (e: Exception) {
+                onComplete("TV download failed: ${e.message ?: "error"}")
+            } finally {
+                _tvTransferProgress.value = null
             }
         }
     }
@@ -690,6 +1098,7 @@ class WifiPcRemoteClient {
     companion object {
         const val DEFAULT_PORT = 58765
         const val DISCOVERY_PORT = 58766
+        const val TV_BEACON_PORT = 58769
         const val SCREEN_PORT = 58767
         const val FILE_HTTP_PORT = 58768
         const val DISCOVER_MAGIC = "GPT_REMOTE_DISCOVER_V1"

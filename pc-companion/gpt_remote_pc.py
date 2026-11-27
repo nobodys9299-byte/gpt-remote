@@ -389,6 +389,15 @@ def get_local_ips() -> list[str]:
     return ips
 
 
+def format_speed(bps: float) -> str:
+    if bps <= 0:
+        return "0 KB/s"
+    kbps = bps / 1024.0
+    if kbps < 1024.0:
+        return f"{kbps:.0f} KB/s"
+    return f"{kbps / 1024.0:.2f} MB/s"
+
+
 class RemoteServerState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -399,6 +408,7 @@ class RemoteServerState:
         self.latest_phone_frame_ts: float = 0.0
         self.bind_errors: list[str] = []
         self.transfer_info: dict | None = None
+        self.transfer_history: list[dict] = []
         self.on_change = None
         self.on_files_change = None
         self.on_phone_frame = None
@@ -418,6 +428,7 @@ class RemoteServerState:
         done_bytes: int,
         total_bytes: int,
         active: bool = True,
+        speed_bps: float = 0.0,
     ) -> None:
         with self._lock:
             self.transfer_info = {
@@ -426,10 +437,37 @@ class RemoteServerState:
                 "done": done_bytes,
                 "total": total_bytes,
                 "active": active,
+                "speed_bps": speed_bps,
             }
             cb = self.on_transfer
         if cb:
             cb()
+
+    def record_history(
+        self,
+        kind: str,
+        filename: str,
+        size_bytes: int,
+        path: str,
+        speed_bps: float = 0.0,
+    ) -> None:
+        with self._lock:
+            self.transfer_history.insert(
+                0,
+                {
+                    "kind": kind,
+                    "filename": filename,
+                    "size": size_bytes,
+                    "path": path,
+                    "speed_bps": speed_bps,
+                    "ts": time.strftime("%H:%M"),
+                },
+            )
+            if len(self.transfer_history) > 100:
+                del self.transfer_history[100:]
+            cb_files = self.on_files_change
+        if cb_files:
+            cb_files()
 
     def add_client(self, addr_str: str) -> None:
         with self._lock:
@@ -714,7 +752,8 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 self.end_headers()
                 sent = 0
                 last_notify = 0
-                state.update_transfer("Sending to Phone", safe_name, 0, size, True)
+                start_ts = time.monotonic()
+                state.update_transfer("Sending to Phone", safe_name, 0, size, True, 0.0)
                 try:
                     with open(full, "rb") as fh:
                         while True:
@@ -725,9 +764,13 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                             sent += len(chunk)
                             if sent - last_notify >= 131072 or sent == size:
                                 last_notify = sent
-                                state.update_transfer("Sending to Phone", safe_name, sent, size, True)
+                                spd = sent / max(0.001, time.monotonic() - start_ts)
+                                state.update_transfer("Sending to Phone", safe_name, sent, size, True, spd)
                 finally:
-                    state.update_transfer("Sent to Phone", safe_name, sent, size, False)
+                    final_spd = sent / max(0.001, time.monotonic() - start_ts)
+                    state.update_transfer("Sent to Phone", safe_name, sent, size, False, final_spd)
+                    if sent > 0:
+                        state.record_history("sent", safe_name, sent, full, final_spd)
             else:
                 self.send_error(404)
 
@@ -741,7 +784,8 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                 remaining = length
                 received = 0
                 last_notify = 0
-                state.update_transfer("Receiving from Phone", safe_name, 0, length, True)
+                start_ts = time.monotonic()
+                state.update_transfer("Receiving from Phone", safe_name, 0, length, True, 0.0)
                 try:
                     with open(dest, "wb") as out:
                         while remaining > 0:
@@ -753,9 +797,14 @@ def file_http_server_loop(state: RemoteServerState, stop_event: threading.Event)
                             received += len(chunk)
                             if received - last_notify >= 131072 or remaining == 0:
                                 last_notify = received
-                                state.update_transfer("Receiving from Phone", safe_name, received, length, True)
+                                spd = received / max(0.001, time.monotonic() - start_ts)
+                                state.update_transfer("Receiving from Phone", safe_name, received, length, True, spd)
                 finally:
-                    state.update_transfer("Received from Phone", os.path.basename(dest), received, length, False)
+                    final_spd = received / max(0.001, time.monotonic() - start_ts)
+                    saved_name = os.path.basename(dest)
+                    state.update_transfer("Received from Phone", saved_name, received, length, False, final_spd)
+                    if received > 0:
+                        state.record_history("received", saved_name, received, dest, final_spd)
                 state.notify_files_changed()
                 resp = json.dumps({"ok": True, "savedAs": os.path.basename(dest)}).encode("utf-8")
                 self.send_response(200)
@@ -1332,25 +1381,39 @@ def run_windows_desktop_app(
         pct = int(round(frac * 100))
         done_mb = done / (1024.0 * 1024.0)
         tot_mb = total / (1024.0 * 1024.0)
+        speed_txt = format_speed(info.get("speed_bps", 0.0))
         transfer_title_var.set(f"{info['direction']}: {info['filename']}")
         transfer_pct_var.set(f"{pct}%")
         transfer_pct_lbl.configure(fg=ORANGE if info["active"] else GREEN)
-        transfer_detail_var.set(f"{done_mb:.2f} MB / {tot_mb:.2f} MB")
+        transfer_detail_var.set(f"{done_mb:.2f} MB / {tot_mb:.2f} MB   •   {speed_txt}")
         draw_progress_bar(frac, info["active"])
 
     prog_canvas.bind("<Configure>", lambda _e: refresh_transfer())
 
-    # ---- Right Bottom: Two-Way File Share Hub ----
+    # ---- Right Bottom: Two-Way File Share & History Hub ----
     file_card = tk.Frame(right_col, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
     file_card.pack(fill="both", expand=True)
 
     file_hdr = tk.Frame(file_card, bg=CARD)
-    file_hdr.pack(fill="x", padx=16, pady=(14, 4))
-    tk.Label(file_hdr, text="Shared Files Folder", bg=CARD, fg=TXT, font=("Segoe UI", 12, "bold")).pack(
+    file_hdr.pack(fill="x", padx=16, pady=(14, 6))
+    tk.Label(file_hdr, text="Shared Files & History", bg=CARD, fg=TXT, font=("Segoe UI", 12, "bold")).pack(
         side="left"
     )
     btn_row = tk.Frame(file_hdr, bg=CARD)
     btn_row.pack(side="right")
+
+    history_mode = tk.StringVar(value="all")
+    visible_paths: list[str] = []
+
+    tab_row = tk.Frame(file_card, bg=CARD)
+    tab_row.pack(fill="x", padx=16, pady=(0, 8))
+
+    tab_all_btn = tk.Button(tab_row, text="All Files", relief="flat", font=("Segoe UI", 8, "bold"), padx=10, pady=4, cursor="hand2")
+    tab_sent_btn = tk.Button(tab_row, text="Sent", relief="flat", font=("Segoe UI", 8, "bold"), padx=10, pady=4, cursor="hand2")
+    tab_recv_btn = tk.Button(tab_row, text="Received", relief="flat", font=("Segoe UI", 8, "bold"), padx=10, pady=4, cursor="hand2")
+    tab_all_btn.pack(side="left", padx=(0, 6))
+    tab_sent_btn.pack(side="left", padx=(0, 6))
+    tab_recv_btn.pack(side="left")
 
     files_listbox = tk.Listbox(
         file_card,
@@ -1363,22 +1426,85 @@ def run_windows_desktop_app(
         font=("Segoe UI", 9),
     )
 
+    def format_size_short(sz: int) -> str:
+        if sz >= 1024 * 1024:
+            return f"{sz / (1024.0 * 1024.0):.1f} MB"
+        return f"{max(1, sz // 1024)} KB"
+
     def refresh_files():
         files_listbox.delete(0, tk.END)
+        visible_paths.clear()
         os.makedirs(state.shared_dir, exist_ok=True)
-        entries = sorted(
-            e for e in os.listdir(state.shared_dir) if os.path.isfile(os.path.join(state.shared_dir, e))
+        mode = history_mode.get()
+
+        sent_count = sum(1 for h in state.transfer_history if h["kind"] == "sent")
+        recv_count = sum(1 for h in state.transfer_history if h["kind"] == "received")
+        tab_all_btn.configure(
+            bg=ORANGE if mode == "all" else ELEV,
+            fg="#FFFFFF" if mode == "all" else SUB,
         )
-        if not entries:
-            files_listbox.insert(tk.END, "  (Folder empty — click + Share File or send from phone)")
+        tab_sent_btn.configure(
+            text=f"Sent ({sent_count})",
+            bg=ORANGE if mode == "sent" else ELEV,
+            fg="#FFFFFF" if mode == "sent" else SUB,
+        )
+        tab_recv_btn.configure(
+            text=f"Received ({recv_count})",
+            bg=ORANGE if mode == "received" else ELEV,
+            fg="#FFFFFF" if mode == "received" else SUB,
+        )
+
+        if mode == "all":
+            entries = sorted(
+                e for e in os.listdir(state.shared_dir) if os.path.isfile(os.path.join(state.shared_dir, e))
+            )
+            if not entries:
+                files_listbox.insert(tk.END, "  (Folder empty — click + Share File or send from phone)")
+            else:
+                for e in entries:
+                    full = os.path.join(state.shared_dir, e)
+                    sz = os.path.getsize(full)
+                    visible_paths.append(full)
+                    files_listbox.insert(tk.END, f"  {e}    ({format_size_short(sz)})")
         else:
-            for e in entries:
-                sz = os.path.getsize(os.path.join(state.shared_dir, e))
-                if sz >= 1024 * 1024:
-                    size_txt = f"{sz / (1024.0 * 1024.0):.1f} MB"
-                else:
-                    size_txt = f"{max(1, sz // 1024)} KB"
-                files_listbox.insert(tk.END, f"  {e}    ({size_txt})")
+            items = [h for h in state.transfer_history if h["kind"] == mode]
+            if not items:
+                label = "sent to phone" if mode == "sent" else "received from phone"
+                files_listbox.insert(tk.END, f"  (No files {label} in this session yet)")
+            else:
+                for h in items:
+                    spd = format_speed(h.get("speed_bps", 0.0))
+                    visible_paths.append(h["path"])
+                    files_listbox.insert(
+                        tk.END,
+                        f"  [{h['ts']}]  {h['filename']}    ({format_size_short(h['size'])} • {spd})",
+                    )
+
+    def set_history_mode(mode: str):
+        history_mode.set(mode)
+        refresh_files()
+
+    tab_all_btn.configure(command=lambda: set_history_mode("all"))
+    tab_sent_btn.configure(command=lambda: set_history_mode("sent"))
+    tab_recv_btn.configure(command=lambda: set_history_mode("received"))
+
+    def open_selected_file(_event=None):
+        sel = files_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if 0 <= idx < len(visible_paths):
+            path = visible_paths[idx]
+            if os.path.exists(path):
+                try:
+                    os.startfile(path)
+                except Exception as exc:
+                    messagebox.showerror("Open File", f"Could not open file: {exc}")
+            else:
+                messagebox.showwarning("File Missing", f"File no longer exists:\n{path}")
+
+    files_listbox.bind("<Double-Button-1>", open_selected_file)
+    files_listbox.bind("<Return>", open_selected_file)
 
     def add_files_to_share():
         picked = filedialog.askopenfilenames(title="Select file(s) to share with phone")
@@ -1386,9 +1512,12 @@ def run_windows_desktop_app(
             name = os.path.basename(src)
             total_sz = max(1, os.path.getsize(src))
             dest = unique_target_path(state.shared_dir, sanitize_filename(name))
-            state.update_transfer("Adding to Share", name, 0, total_sz, True)
+            t0 = time.monotonic()
+            state.update_transfer("Adding to Share", name, 0, total_sz, True, 0.0)
             shutil.copy2(src, dest)
-            state.update_transfer("Ready to Download", os.path.basename(dest), total_sz, total_sz, False)
+            spd = total_sz / max(0.001, time.monotonic() - t0)
+            saved = os.path.basename(dest)
+            state.update_transfer("Ready for Phone", saved, total_sz, total_sz, False, spd)
         refresh_files()
 
     def open_shared_folder():
@@ -1405,10 +1534,24 @@ def run_windows_desktop_app(
         activeforeground="#FFFFFF",
         relief="flat",
         font=("Segoe UI", 9, "bold"),
-        padx=12,
+        padx=10,
         pady=5,
         cursor="hand2",
-    ).pack(side="left", padx=(0, 8))
+    ).pack(side="left", padx=(0, 6))
+    tk.Button(
+        btn_row,
+        text="Open File",
+        command=open_selected_file,
+        bg=ELEV,
+        fg=BLUE,
+        activebackground=BORDER,
+        activeforeground=BLUE,
+        relief="flat",
+        font=("Segoe UI", 9, "bold"),
+        padx=10,
+        pady=5,
+        cursor="hand2",
+    ).pack(side="left", padx=(0, 6))
     tk.Button(
         btn_row,
         text="Open Folder",
@@ -1426,7 +1569,7 @@ def run_windows_desktop_app(
 
     tk.Label(
         file_card,
-        text=f"Path: {state.shared_dir}",
+        text=f"Path: {state.shared_dir}   •   Double-click any file to open",
         bg=CARD,
         fg=SUB,
         font=("Segoe UI", 8),

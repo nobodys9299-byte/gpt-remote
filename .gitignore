@@ -5,6 +5,7 @@
 .DS_Store
 /build
 /app/build
+/tv-app/build
 /captures
 .externalNativeBuild
 .cxx

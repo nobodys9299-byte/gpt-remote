@@ -1,6 +1,7 @@
 package com.gptremote.mitv.ui
 
 import android.app.Application
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
@@ -39,6 +40,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     fun setAccentTheme(theme: AppAccentTheme) = repository.setAccentTheme(theme)
 
     fun setBluetoothPcProfile(enabled: Boolean) = repository.setBluetoothPcProfile(enabled)
+
+    fun allowBluetoothIncomingPairing() = repository.allowBluetoothIncomingPairing()
 
     fun startBluetoothScan() = repository.startBluetoothScan()
 
@@ -91,11 +94,19 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun startPhoneShareHost() = repository.startPhoneShareHost()
 
+    fun startLocalHotspot() = repository.startLocalHotspot()
+
+    fun stopLocalHotspot() = repository.stopLocalHotspot()
+
     fun addLocalFileToPhoneShare(uri: Uri) = repository.addLocalFileToPhoneShare(uri)
+
+    fun addLocalFilesToPhoneShare(uris: List<Uri>) = repository.addLocalFilesToPhoneShare(uris)
 
     fun refreshPeerPhoneFiles() = repository.refreshPeerPhoneFiles()
 
     fun sendFileToPeerPhone(uri: Uri) = repository.sendFileToPeerPhone(uri)
+
+    fun sendFilesToPeerPhone(uris: List<Uri>) = repository.sendFilesToPeerPhone(uris)
 
     fun downloadFileFromPeerPhone(fileName: String) = repository.downloadFileFromPeerPhone(fileName)
 
@@ -109,7 +120,35 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun uploadFileToPc(uri: Uri) = repository.uploadFileToPc(uri)
 
+    fun uploadFilesToPc(uris: List<Uri>) = repository.uploadFilesToPc(uris)
+
     fun downloadFileFromPc(fileName: String) = repository.downloadFileFromPc(fileName)
+
+    fun startTvCompanionScan() = repository.startTvCompanionScan()
+
+    fun connectTvCompanion(host: String, name: String, token: String) =
+        repository.connectTvCompanion(host, name, token)
+
+    fun disconnectTvCompanion() = repository.disconnectTvCompanion()
+
+    fun refreshTvCompanionFiles() = repository.refreshTvCompanionFiles()
+
+    fun uploadFilesToTv(uris: List<Uri>) = repository.uploadFilesToTv(uris)
+
+    fun downloadFileFromTv(fileName: String) = repository.downloadFileFromTv(fileName)
+
+    fun getConnectedTvCompanionHost(): String? = repository.getConnectedTvCompanionHost()
+
+    fun startPhoneCastToTv(resultCode: Int, data: Intent) = repository.startPhoneCastToTv(resultCode, data)
+
+    fun queryInstalledAppsForShare(): List<RemoteRepository.ShareableAppInfo> =
+        repository.queryInstalledAppsForShare()
+
+    fun stageAppsAsUris(apps: List<RemoteRepository.ShareableAppInfo>): List<Uri> =
+        repository.stageAppsAsUris(apps)
+
+    fun openTransferredFile(activityContext: Context, uriString: String?, fileName: String) =
+        repository.openTransferredFile(activityContext, uriString, fileName)
 
     fun pressButton(button: RemoteButton, strongHaptic: Boolean = false) =
         repository.sendButton(button, strongHaptic)
