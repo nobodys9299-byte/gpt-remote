@@ -641,8 +641,13 @@ fun ConnectProductSheet(
                                 isPc = false,
                                 onClick = {
                                     manualIp = bulb.host
-                                    if (bulb.deviceId.isNotBlank()) tuyaDeviceId = bulb.deviceId
-                                    onSelectBulb(bulb)
+                                    val devId = if (bulb.deviceId.isNotBlank()) bulb.deviceId else tuyaDeviceId.trim()
+                                    if (tuyaLocalKey.isNotBlank() || devId.isNotBlank()) {
+                                        val spec = "${bulb.host}|$devId|${tuyaLocalKey.trim()}"
+                                        onConnectManualBulb(spec)
+                                    } else {
+                                        onSelectBulb(bulb)
+                                    }
                                     onDismiss()
                                 }
                             )
