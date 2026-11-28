@@ -391,7 +391,8 @@ class MainActivity : ComponentActivity() {
                             onClearBanner = viewModel::clearBanner,
                             onSignInGoogleHome = { viewModel.signInGoogleHome() },
                             onRefreshGoogleHome = viewModel::refreshGoogleHomeLights,
-                            onDisconnectGoogleHome = viewModel::disconnectGoogleHome
+                            onDisconnectGoogleHome = viewModel::disconnectGoogleHome,
+                            onSyncTuya = { id, secret, endpoint -> viewModel.syncTuyaCloud(id, secret, endpoint) }
                         )
                     }
 
@@ -571,7 +572,8 @@ class MainActivity : ComponentActivity() {
                             onDisconnectSession = viewModel::disconnectSession,
                             onSignInGoogleHome = { viewModel.signInGoogleHome() },
                             onRefreshGoogleHome = viewModel::refreshGoogleHomeLights,
-                            onDisconnectGoogleHome = viewModel::disconnectGoogleHome
+                            onDisconnectGoogleHome = viewModel::disconnectGoogleHome,
+                            onSyncTuya = { id, secret, endpoint -> viewModel.syncTuyaCloud(id, secret, endpoint) }
                         )
                     }
                 }

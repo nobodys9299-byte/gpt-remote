@@ -244,7 +244,8 @@ fun RemoteScreen(
     onDisconnectSession: (ActiveSessionItem) -> Unit = {},
     onSignInGoogleHome: () -> Unit = {},
     onRefreshGoogleHome: () -> Unit = {},
-    onDisconnectGoogleHome: () -> Unit = {}
+    onDisconnectGoogleHome: () -> Unit = {},
+    onSyncTuya: ((clientId: String, clientSecret: String, endpoint: String) -> Unit)? = null
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     var showConnectSheet by remember { mutableStateOf(false) }
@@ -518,6 +519,13 @@ fun RemoteScreen(
             onSignInGoogleHome = onSignInGoogleHome,
             onRefreshGoogleHome = onRefreshGoogleHome,
             onDisconnectGoogleHome = onDisconnectGoogleHome,
+            tuyaStatus = uiState.tuyaStatus,
+            tuyaIsSyncing = uiState.tuyaIsSyncing,
+            tuyaClientId = uiState.tuyaClientId,
+            tuyaClientSecret = uiState.tuyaClientSecret,
+            tuyaEndpoint = uiState.tuyaEndpoint,
+            tuyaSyncedCount = uiState.tuyaSyncedCount,
+            onSyncTuya = onSyncTuya,
             onDismiss = { showSettingsSheet = false }
         )
     }

@@ -77,6 +77,15 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun selectBulb(bulb: DiscoveredSmartBulb) = repository.selectBulb(bulb)
 
+    val tuyaCloudClient = repository.tuyaCloudClient
+
+    fun syncTuyaCloud(clientId: String, clientSecret: String, endpoint: String = com.gptremote.mitv.wifi.TuyaCloudClient.DEFAULT_ENDPOINT, onComplete: ((Result<Int>) -> Unit)? = null) {
+        viewModelScope.launch {
+            val res = repository.syncTuyaCloud(clientId, clientSecret, endpoint)
+            onComplete?.invoke(res)
+        }
+    }
+
     fun connectManualBulb(host: String) = repository.connectManualBulb(host)
 
     fun setBulbState(

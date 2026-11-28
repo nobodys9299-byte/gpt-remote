@@ -43,6 +43,7 @@ import com.gptremote.mitv.wifi.PhoneShareServer
 import com.gptremote.mitv.wifi.ScreenCastService
 import com.gptremote.mitv.wifi.SharedPcFile
 import com.gptremote.mitv.wifi.GoogleHomeClient
+import com.gptremote.mitv.wifi.TuyaCloudClient
 import com.gptremote.mitv.wifi.SmartBulbClient
 import com.gptremote.mitv.wifi.SmartTvProtocol
 import com.gptremote.mitv.wifi.SmartTvWebSocketClient
@@ -82,6 +83,7 @@ class RemoteRepository(context: Context) {
     private val smartTvWsClient = SmartTvWebSocketClient(appContext)
     private val wifiPcClient = WifiPcRemoteClient()
     val googleHomeClient = GoogleHomeClient(appContext)
+    val tuyaCloudClient = TuyaCloudClient(appContext)
     private val smartBulbClient = SmartBulbClient(appContext, googleHomeClient)
     private val phoneShareServer = PhoneShareServer(appContext)
     private val dlnaMediaCaster = DlnaMediaCaster()
@@ -177,6 +179,15 @@ class RemoteRepository(context: Context) {
         val accountHint: String?,
         val lightCount: Int,
         val lights: List<DiscoveredSmartBulb>
+    )
+
+    private data class TuyaCloudFlows(
+        val status: String,
+        val isSyncing: Boolean,
+        val syncedCount: Int,
+        val clientId: String,
+        val clientSecret: String,
+        val endpoint: String
     )
 
     private val coreFlows = combine(
@@ -325,6 +336,21 @@ class RemoteRepository(context: Context) {
         )
     }
 
+    private val tuyaCloudFlows = combine(
+        tuyaCloudClient.statusText,
+        tuyaCloudClient.isSyncing,
+        tuyaCloudClient.syncedDevices
+    ) { status, syncing, devices ->
+        TuyaCloudFlows(
+            status = status,
+            isSyncing = syncing,
+            syncedCount = devices.count { it.localKey.length == 16 },
+            clientId = tuyaCloudClient.getClientId(),
+            clientSecret = tuyaCloudClient.getClientSecret(),
+            endpoint = tuyaCloudClient.getEndpoint()
+        )
+    }
+
     private val tvCompanionFlows = combine(
         wifiPcClient.discoveredTvCompanions,
         wifiPcClient.connectedTvCompanion,
@@ -354,7 +380,8 @@ class RemoteRepository(context: Context) {
         phoneShareFlows,
         tvCompanionFlows,
         dlnaFlows,
-        googleHomeFlows
+        googleHomeFlows,
+        tuyaCloudFlows
     ) { values ->
         val core = values[0] as CoreFlows
         val disc = values[1] as DiscoveryFlows
@@ -364,6 +391,7 @@ class RemoteRepository(context: Context) {
         val tv = values[5] as TvCompanionFlows
         val dlna = values[6] as DlnaFlows
         val gHome = values[7] as GoogleHomeFlows
+        val tuya = values[8] as TuyaCloudFlows
         val effectiveStatus = when (core.transport) {
             TransportMode.BLUETOOTH_HID -> when {
                 core.btStatus !is ConnectionStatus.Disconnected -> core.btStatus
@@ -439,6 +467,12 @@ class RemoteRepository(context: Context) {
             googleHomeStatus = gHome.status,
             googleHomeAccountEmail = gHome.accountHint,
             googleHomeDevicesCount = gHome.lightCount,
+            tuyaStatus = tuya.status,
+            tuyaIsSyncing = tuya.isSyncing,
+            tuyaClientId = tuya.clientId,
+            tuyaClientSecret = tuya.clientSecret,
+            tuyaEndpoint = tuya.endpoint,
+            tuyaSyncedCount = tuya.syncedCount,
             phoneHostQrUrl = phone.hostQrUrl,
             phoneHostSharedFiles = phone.hostedFiles,
             peerPhoneName = phone.peerName,
@@ -749,6 +783,24 @@ class RemoteRepository(context: Context) {
         haptics.click()
         smartBulbClient.selectManualBulb(clean, selectedBrand.value?.id ?: "bulb_wiz")
         statusBanner.value = "Bulb ready at $clean"
+    }
+
+    suspend fun syncTuyaCloud(clientId: String, clientSecret: String, endpoint: String = TuyaCloudClient.DEFAULT_ENDPOINT): Result<Int> {
+        haptics.click()
+        tuyaCloudClient.saveConfig(clientId, clientSecret, endpoint)
+        statusBanner.value = "Connecting to Tuya Cloud..."
+        return tuyaCloudClient.syncBulbs().fold(
+            onSuccess = { list ->
+                statusBanner.value = "Synced ${list.size} Tuya bulb(s) with LocalKeys!"
+                smartBulbClient.scanBulbs()
+                Result.success(list.size)
+            },
+            onFailure = { err ->
+                val msg = err.message ?: "Tuya sync failed"
+                statusBanner.value = msg
+                Result.failure(err)
+            }
+        )
     }
 
     fun setBulbState(

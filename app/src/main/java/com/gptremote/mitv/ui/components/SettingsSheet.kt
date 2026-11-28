@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
@@ -34,10 +35,12 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import com.gptremote.mitv.ui.theme.WifiBlue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -83,6 +86,14 @@ fun SettingsSheet(
     onSignInGoogleHome: (() -> Unit)? = null,
     onRefreshGoogleHome: (() -> Unit)? = null,
     onDisconnectGoogleHome: (() -> Unit)? = null,
+    // Tuya Cloud Auto-Sync
+    tuyaStatus: String = "Not configured",
+    tuyaIsSyncing: Boolean = false,
+    tuyaClientId: String = "hw98dtuj3hkfapvtappg",
+    tuyaClientSecret: String = "",
+    tuyaEndpoint: String = "https://openapi.tuyain.com",
+    tuyaSyncedCount: Int = 0,
+    onSyncTuya: ((clientId: String, clientSecret: String, endpoint: String) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     var showMyQrDialog by remember { mutableStateOf(false) }
@@ -363,6 +374,89 @@ fun SettingsSheet(
                         Icon(Icons.Rounded.Lightbulb, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Sign In with Google Home", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            // Tuya Cloud Auto-Sync card
+            var editClientId by remember { mutableStateOf(tuyaClientId) }
+            var editSecret by remember { mutableStateOf(tuyaClientSecret) }
+            var editEndpoint by remember { mutableStateOf(tuyaEndpoint) }
+            var showTuyaExpanded by remember { mutableStateOf(false) }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(RemoteSurfaceElevated)
+                    .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "⚡ Tuya Cloud Auto-Sync",
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = if (tuyaSyncedCount > 0) "$tuyaSyncedCount bulb(s) synced • $tuyaStatus"
+                                   else tuyaStatus,
+                            color = if (tuyaSyncedCount > 0) ConnectedGreen else TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
+                    androidx.compose.material3.TextButton(onClick = { showTuyaExpanded = !showTuyaExpanded }) {
+                        Text(if (showTuyaExpanded) "Hide" else "Setup", color = WifiBlue, fontSize = 12.sp)
+                    }
+                }
+                if (showTuyaExpanded) {
+                    Text(
+                        text = "Enter your Tuya IoT Platform credentials once. The app will automatically fetch LocalKeys for all your Wipro/Tuya bulbs — no manual copy-paste needed for future bulbs.",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+                    OutlinedTextField(
+                        value = editClientId,
+                        onValueChange = { editClientId = it },
+                        label = { Text("Client ID (Access ID)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = editSecret,
+                        onValueChange = { editSecret = it },
+                        label = { Text("Client Secret") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = editEndpoint,
+                        onValueChange = { editEndpoint = it },
+                        label = { Text("API Endpoint") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        onClick = { onSyncTuya?.invoke(editClientId.trim(), editSecret.trim(), editEndpoint.trim()) },
+                        enabled = editClientId.isNotBlank() && editSecret.isNotBlank() && !tuyaIsSyncing,
+                        modifier = Modifier.fillMaxWidth().height(44.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        if (tuyaIsSyncing) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = androidx.compose.ui.graphics.Color.White)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Syncing from Tuya Cloud...")
+                        } else {
+                            Text("🔄 Auto-Sync All Bulbs Now", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
