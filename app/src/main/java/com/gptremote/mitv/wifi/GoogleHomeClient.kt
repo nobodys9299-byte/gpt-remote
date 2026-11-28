@@ -218,15 +218,17 @@ class GoogleHomeClient(context: Context) {
     private suspend fun refreshLightsInternal(): Int {
         val homeClient = client ?: return 0
         return runCatching {
-            val structures = withTimeoutOrNull(3000L) { homeClient.structures().list() }.orEmpty()
+            runCatching { withTimeoutOrNull(4000L) { homeClient.syncLinkedDevices() } }
+            val structures = withTimeoutOrNull(4000L) { homeClient.structures().list() }.orEmpty()
             if (structures.isNotEmpty()) {
                 _accountHint.value = structures.joinToString(", ") { it.name.ifBlank { "Home" } }
             }
-            val devices = withTimeoutOrNull(5000L) { homeClient.devices(true).list() }.orEmpty()
+            // filterToSupported = false so partner cloud-to-cloud bulbs (like Wipro, Tuya) are not filtered out
+            val devices = withTimeoutOrNull(7000L) { homeClient.devices(false).list() }.orEmpty()
             val foundList = mutableListOf<DiscoveredSmartBulb>()
             handles.clear()
             for (dev in devices) {
-                val typesSet = withTimeoutOrNull(1400L) { dev.types().firstOrNull() }.orEmpty()
+                val typesSet = withTimeoutOrNull(3500L) { dev.types().firstOrNull() }.orEmpty()
                 val match = extractLightHandle(dev, typesSet)
                 if (match != null) {
                     val devId = dev.id.id
@@ -269,19 +271,34 @@ class GoogleHomeClient(context: Context) {
                 matchedType = t
             }
         }
-        val t = matchedType ?: types.firstOrNull { it.trait(OnOff) != null } ?: return null
-        val onOff = t.trait(OnOff)
-        val level = t.trait(LevelControl)
-        val color = t.trait(ColorControl)
-        val extColor = t.trait(ExtendedColorControl)
-        if (onOff == null && level == null && color == null && extColor == null) return null
-        return LightHandle(
-            device = device,
-            onOff = onOff,
-            levelControl = level,
-            colorControl = color,
-            extendedColorControl = extColor
-        )
+        val t = matchedType ?: types.firstOrNull { it.trait(OnOff) != null } ?: types.firstOrNull()
+        if (t != null) {
+            val onOff = t.trait(OnOff)
+            val level = t.trait(LevelControl)
+            val color = t.trait(ColorControl)
+            val extColor = t.trait(ExtendedColorControl)
+            if (onOff != null || level != null || color != null || extColor != null) {
+                return LightHandle(
+                    device = device,
+                    onOff = onOff,
+                    levelControl = level,
+                    colorControl = color,
+                    extendedColorControl = extColor
+                )
+            }
+        }
+        val nameLower = device.name.lowercase()
+        if (nameLower.contains("light") || nameLower.contains("bulb") || nameLower.contains("lamp") || nameLower.contains("wipro")) {
+            val firstType = types.firstOrNull()
+            return LightHandle(
+                device = device,
+                onOff = firstType?.trait(OnOff),
+                levelControl = firstType?.trait(LevelControl),
+                colorControl = firstType?.trait(ColorControl),
+                extendedColorControl = firstType?.trait(ExtendedColorControl)
+            )
+        }
+        return null
     }
 
     suspend fun applyLightState(
@@ -296,7 +313,21 @@ class GoogleHomeClient(context: Context) {
             refreshLightsInternal()
             handle = handles[deviceId]
         }
-        val target = handle ?: error("Google Home device not ready. Tap Sync in Settings.")
+        var target = handle ?: error("Google Home device not ready. Tap Sync in Settings.")
+        if (target.onOff == null) {
+            val freshTypes = runCatching { withTimeoutOrNull(2500L) { target.device.types().firstOrNull() } }.getOrNull().orEmpty()
+            val freshOnOff = freshTypes.firstNotNullOfOrNull { it.trait(OnOff) }
+            val freshLevel = freshTypes.firstNotNullOfOrNull { it.trait(LevelControl) }
+            val freshColor = freshTypes.firstNotNullOfOrNull { it.trait(ColorControl) }
+            if (freshOnOff != null || freshLevel != null || freshColor != null) {
+                target = target.copy(
+                    onOff = freshOnOff ?: target.onOff,
+                    levelControl = freshLevel ?: target.levelControl,
+                    colorControl = freshColor ?: target.colorControl
+                )
+                handles[deviceId] = target
+            }
+        }
         if (power == true) {
             target.onOff?.on()
         } else if (power == false) {
