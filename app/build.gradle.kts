@@ -46,12 +46,14 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
@@ -72,6 +74,10 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
+
+    // Google Home Android SDK (local Maven repo extracted from Google Home SDK zip)
+    implementation("com.google.android.gms:play-services-home:17.12.0")
+    implementation("com.google.android.gms:play-services-home-types:17.12.0")
 
     testImplementation(libs.junit)
     debugImplementation(libs.androidx.ui.tooling)

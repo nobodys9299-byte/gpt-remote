@@ -23,7 +23,8 @@ data class TransferQueueItem(
     val id: String,
     val fileName: String,
     val sizeBytes: Long,
-    val status: String = "Queued"
+    val status: String = "Queued",
+    val localUriString: String? = null
 )
 
 data class TransferHistoryItem(
@@ -94,6 +95,10 @@ data class RemoteUiState(
     val smartBulbs: List<DiscoveredSmartBulb> = emptyList(),
     val isScanningBulbs: Boolean = false,
     val connectedBulb: DiscoveredSmartBulb? = null,
+    val googleHomeSignedIn: Boolean = false,
+    val googleHomeStatus: String = "Not connected",
+    val googleHomeAccountEmail: String? = null,
+    val googleHomeDevicesCount: Int = 0,
     val phoneHostQrUrl: String? = null,
     val phoneHostSharedFiles: List<SharedPcFile> = emptyList(),
     val peerPhoneName: String? = null,

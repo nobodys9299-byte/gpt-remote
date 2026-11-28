@@ -21,8 +21,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.QrCodeScanner
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -53,6 +55,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.gptremote.mitv.haptic.HapticStrength
 import com.gptremote.mitv.ui.theme.AppAccentTheme
+import com.gptremote.mitv.ui.theme.ConnectedGreen
 import com.gptremote.mitv.ui.theme.LocalAccentSoft
 import com.gptremote.mitv.ui.theme.MiOrange
 import com.gptremote.mitv.ui.theme.RemoteBorder
@@ -73,6 +76,13 @@ fun SettingsSheet(
     onScanQrCode: (() -> Unit)? = null,
     phoneQrPayload: String? = null,
     onRequestHostQr: (() -> Unit)? = null,
+    googleHomeSignedIn: Boolean = false,
+    googleHomeStatus: String = "Not connected",
+    googleHomeAccount: String? = null,
+    googleHomeDevicesCount: Int = 0,
+    onSignInGoogleHome: (() -> Unit)? = null,
+    onRefreshGoogleHome: (() -> Unit)? = null,
+    onDisconnectGoogleHome: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     var showMyQrDialog by remember { mutableStateOf(false) }
@@ -233,6 +243,126 @@ fun SettingsSheet(
                             ),
                             modifier = Modifier.weight(1f)
                         )
+                    }
+                }
+            }
+
+            // Google Home & Smart Lights Sign In
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(RemoteSurfaceElevated)
+                    .border(1.dp, RemoteBorder, RoundedCornerShape(16.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(if (googleHomeSignedIn) ConnectedGreen.copy(alpha = 0.16f) else MiOrange.copy(alpha = 0.16f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Lightbulb,
+                                contentDescription = null,
+                                tint = if (googleHomeSignedIn) ConnectedGreen else MiOrange,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = "Google Home & Smart Lights",
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = if (googleHomeSignedIn) {
+                                    googleHomeAccount?.takeIf { it.isNotBlank() } ?: "Google Account Connected"
+                                } else {
+                                    "Connect Wipro Next, Philips Hue & Smart Bulbs"
+                                },
+                                color = if (googleHomeSignedIn) ConnectedGreen else TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (googleHomeSignedIn) ConnectedGreen.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.08f))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = if (googleHomeSignedIn) "Connected" else "Not Signed In",
+                            color = if (googleHomeSignedIn) ConnectedGreen else TextSecondary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                if (googleHomeSignedIn) {
+                    Text(
+                        text = "$googleHomeStatus • $googleHomeDevicesCount light(s) synced with app",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilledTonalButton(
+                            onClick = { onRefreshGoogleHome?.invoke() },
+                            modifier = Modifier.weight(1f).height(40.dp),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(Icons.Rounded.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Sync Lights", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+
+                        Button(
+                            onClick = { onDisconnectGoogleHome?.invoke() },
+                            modifier = Modifier.weight(1f).height(40.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444).copy(alpha = 0.2f), contentColor = Color(0xFFFCA5A5)),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("Disconnect", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                } else {
+                    Text(
+                        text = "Sign in to grant permission so GPT Remote can control all bulbs connected to your Google Home without third-party bridges.",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+
+                    Button(
+                        onClick = { onSignInGoogleHome?.invoke() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Rounded.Lightbulb, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Sign In with Google Home", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }

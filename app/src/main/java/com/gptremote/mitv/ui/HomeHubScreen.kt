@@ -113,7 +113,10 @@ fun HomeHubScreen(
     onOpenActiveSession: (ActiveSessionItem) -> Unit = { onOpenActiveRemote() },
     onDisconnectSession: (ActiveSessionItem) -> Unit = { onDisconnect() },
     onScanQrCode: () -> Unit = {},
-    onRequestHostQr: () -> Unit = {}
+    onRequestHostQr: () -> Unit = {},
+    onSignInGoogleHome: () -> Unit = {},
+    onRefreshGoogleHome: () -> Unit = {},
+    onDisconnectGoogleHome: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
@@ -227,6 +230,13 @@ fun HomeHubScreen(
             onScanQrCode = onScanQrCode,
             phoneQrPayload = uiState.phoneHostQrUrl,
             onRequestHostQr = onRequestHostQr,
+            googleHomeSignedIn = uiState.googleHomeSignedIn,
+            googleHomeStatus = uiState.googleHomeStatus,
+            googleHomeAccount = uiState.googleHomeAccountEmail,
+            googleHomeDevicesCount = uiState.googleHomeDevicesCount,
+            onSignInGoogleHome = onSignInGoogleHome,
+            onRefreshGoogleHome = onRefreshGoogleHome,
+            onDisconnectGoogleHome = onDisconnectGoogleHome,
             onDismiss = { showSettings = false }
         )
     }

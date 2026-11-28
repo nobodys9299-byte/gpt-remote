@@ -1017,10 +1017,12 @@ class WifiPcRemoteClient {
                     id = "q_${spec.sessionId}_$qIdx",
                     fileName = resolveFileName(context, u),
                     sizeBytes = resolveFileSize(context, u).coerceAtLeast(0L),
-                    status = if (qIdx == 0) "Sending" else "Queued"
+                    status = if (qIdx == 0) "Sending" else "Queued",
+                    localUriString = u.toString()
                 )
             }.toMutableList()
             queueFlow.value = queueItems.toList()
+            TransferKeepAliveService.onTransferStarted(context, "Sending files")
             try {
                 val resolver = context.contentResolver
                 for (idx in spec.startIndex until spec.uris.size) {
@@ -1239,6 +1241,7 @@ class WifiPcRemoteClient {
                                 isSent = true,
                                 bytesPerSec = 0L,
                                 timestampMs = System.currentTimeMillis(),
+                                localUriString = uri.toString(),
                                 statusLabel = "Cancelled"
                             )
                             if (spec.isTv) appendTvHistory(cancelItem) else appendPcHistory(cancelItem)
@@ -1256,6 +1259,7 @@ class WifiPcRemoteClient {
                                 isSent = true,
                                 bytesPerSec = 0L,
                                 timestampMs = System.currentTimeMillis(),
+                                localUriString = uri.toString(),
                                 statusLabel = "Failed"
                             )
                             if (spec.isTv) appendTvHistory(failItem) else appendPcHistory(failItem)
@@ -1294,6 +1298,7 @@ class WifiPcRemoteClient {
                     _isTransferringFile.value = false
                     if (pcTransferJob === coroutineContext[Job]) pcTransferJob = null
                 }
+                TransferKeepAliveService.onTransferFinished(context)
             }
         }
         if (spec.isTv) tvTransferJob = job else pcTransferJob = job
@@ -1305,6 +1310,7 @@ class WifiPcRemoteClient {
         val pauseFlag = if (spec.isTv) tvPausedFlag else pcPausedFlag
         val job = CoroutineScope(Dispatchers.IO).launch {
             if (!spec.isTv) _isTransferringFile.value = true
+            TransferKeepAliveService.onTransferStarted(context, "Downloading ${spec.fileName}")
             var done = if (spec.partFile.exists()) spec.partFile.length() else 0L
             val sid = spec.partFile.nameWithoutExtension
             if (spec.isTv) activeTvSessionId = sid else activePcSessionId = sid
@@ -1449,6 +1455,7 @@ class WifiPcRemoteClient {
                     _isTransferringFile.value = false
                     if (pcTransferJob === coroutineContext[Job]) pcTransferJob = null
                 }
+                TransferKeepAliveService.onTransferFinished(context)
             }
         }
         if (spec.isTv) tvTransferJob = job else pcTransferJob = job

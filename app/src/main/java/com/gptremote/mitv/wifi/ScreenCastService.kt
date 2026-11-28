@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
@@ -28,6 +29,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 /**
  * Streams the phone's screen to the connected GPT Remote PC desktop app over Wi-Fi.
@@ -38,9 +42,15 @@ class ScreenCastService : Service() {
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private var handlerThread: HandlerThread? = null
+    private var captureHandler: Handler? = null
     private var lastFrameSentMs: Long = 0L
     private var targetUrl: String? = null
     private var authToken: String = ""
+    private var lastDisplayWidth: Int = 0
+    private var lastDisplayHeight: Int = 0
+    private val pendingFrame = AtomicReference<ByteArray?>(null)
+    private val uploaderRunning = AtomicBoolean(false)
+    private var uploaderThread: Thread? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -96,6 +106,7 @@ class ScreenCastService : Service() {
         val thread = HandlerThread("GptScreenCast").apply { start() }
         handlerThread = thread
         val handler = Handler(thread.looper)
+        captureHandler = handler
 
         projection.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
@@ -104,10 +115,24 @@ class ScreenCastService : Service() {
             }
         }, handler)
 
+        startUploaderLoop()
+        configureVirtualDisplay(projection, handler)
+        _isCasting.value = true
+    }
+
+    private fun configureVirtualDisplay(projection: MediaProjection, handler: Handler) {
+        runCatching { virtualDisplay?.release() }
+        virtualDisplay = null
+        runCatching { imageReader?.close() }
+        imageReader = null
+
         val metrics = resources.displayMetrics
-        val scale = (720f / metrics.widthPixels.coerceAtLeast(1)).coerceAtMost(1f)
-        val width = (metrics.widthPixels * scale).toInt().coerceAtLeast(360)
-        val height = (metrics.heightPixels * scale).toInt().coerceAtLeast(640)
+        val longSide = maxOf(metrics.widthPixels, metrics.heightPixels).coerceAtLeast(1)
+        val scale = (1440f / longSide).coerceAtMost(1f)
+        val width = ((metrics.widthPixels * scale).toInt() and 1.inv()).coerceAtLeast(360)
+        val height = ((metrics.heightPixels * scale).toInt() and 1.inv()).coerceAtLeast(360)
+        lastDisplayWidth = width
+        lastDisplayHeight = height
         val density = metrics.densityDpi
 
         val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
@@ -117,7 +142,7 @@ class ScreenCastService : Service() {
             val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
             try {
                 val now = System.currentTimeMillis()
-                if (now - lastFrameSentMs < 110L) return@setOnImageAvailableListener
+                if (now - lastFrameSentMs < 45L) return@setOnImageAvailableListener
                 lastFrameSentMs = now
 
                 val plane = img.planes[0]
@@ -131,13 +156,17 @@ class ScreenCastService : Service() {
                     Bitmap.Config.ARGB_8888
                 )
                 rawBmp.copyPixelsFromBuffer(buffer)
-                val cropped = Bitmap.createBitmap(rawBmp, 0, 0, width, height)
-                rawBmp.recycle()
+                val cropped = if (rawBmp.width != width) {
+                    Bitmap.createBitmap(rawBmp, 0, 0, width, height).also { rawBmp.recycle() }
+                } else {
+                    rawBmp
+                }
 
                 val baos = ByteArrayOutputStream()
-                cropped.compress(Bitmap.CompressFormat.JPEG, 55, baos)
+                cropped.compress(Bitmap.CompressFormat.JPEG, 76, baos)
                 cropped.recycle()
-                postFrame(baos.toByteArray())
+                // Conflate: replace any un-sent older frame immediately for low latency
+                pendingFrame.set(baos.toByteArray())
             } catch (_: Exception) {
                 // ignore frame drop
             } finally {
@@ -155,7 +184,43 @@ class ScreenCastService : Service() {
             null,
             handler
         )
-        _isCasting.value = true
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val proj = mediaProjection ?: return
+        val handler = captureHandler ?: return
+        val metrics = resources.displayMetrics
+        val longSide = maxOf(metrics.widthPixels, metrics.heightPixels).coerceAtLeast(1)
+        val scale = (1440f / longSide).coerceAtMost(1f)
+        val newW = ((metrics.widthPixels * scale).toInt() and 1.inv()).coerceAtLeast(360)
+        val newH = ((metrics.heightPixels * scale).toInt() and 1.inv()).coerceAtLeast(360)
+        if (newW != lastDisplayWidth || newH != lastDisplayHeight) {
+            handler.post {
+                if (mediaProjection === proj) {
+                    configureVirtualDisplay(proj, handler)
+                }
+            }
+        }
+    }
+
+    private fun startUploaderLoop() {
+        uploaderRunning.set(true)
+        uploaderThread?.interrupt()
+        uploaderThread = thread(name = "GptCastUploader", isDaemon = true) {
+            while (uploaderRunning.get()) {
+                val frame = pendingFrame.getAndSet(null)
+                if (frame != null) {
+                    postFrame(frame)
+                } else {
+                    try {
+                        Thread.sleep(10L)
+                    } catch (_: InterruptedException) {
+                        if (!uploaderRunning.get()) break
+                    }
+                }
+            }
+        }
     }
 
     private fun postFrame(jpeg: ByteArray) {
@@ -163,8 +228,8 @@ class ScreenCastService : Service() {
         runCatching {
             val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
-                connectTimeout = 800
-                readTimeout = 800
+                connectTimeout = 500
+                readTimeout = 600
                 doOutput = true
                 if (authToken.isNotBlank()) {
                     setRequestProperty("X-Auth-Token", authToken)
@@ -178,6 +243,11 @@ class ScreenCastService : Service() {
     }
 
     private fun stopProjection() {
+        uploaderRunning.set(false)
+        pendingFrame.set(null)
+        uploaderThread?.interrupt()
+        uploaderThread = null
+        captureHandler = null
         _isCasting.value = false
         _castTargetKind.value = null
         runCatching { virtualDisplay?.release() }

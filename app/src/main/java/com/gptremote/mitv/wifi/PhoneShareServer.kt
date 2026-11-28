@@ -595,10 +595,12 @@ class PhoneShareServer(context: Context) {
                     id = "q_${initialSessionId}_$qIdx",
                     fileName = resolveFileName(u),
                     sizeBytes = resolveFileSize(u).coerceAtLeast(0L),
-                    status = if (qIdx == 0) "Sending" else "Queued"
+                    status = if (qIdx == 0) "Sending" else "Queued",
+                    localUriString = u.toString()
                 )
             }.toMutableList()
             _transferQueue.value = queueItems.toList()
+            TransferKeepAliveService.onTransferStarted(appContext, "Sending files to phone")
             try {
                 for (idx in startIndex until uris.size) {
                     val relIdx = idx - startIndex
@@ -803,6 +805,7 @@ class PhoneShareServer(context: Context) {
                                     isSent = true,
                                     bytesPerSec = 0L,
                                     timestampMs = System.currentTimeMillis(),
+                                    localUriString = uri.toString(),
                                     statusLabel = "Cancelled"
                                 )
                             )
@@ -820,6 +823,7 @@ class PhoneShareServer(context: Context) {
                                     isSent = true,
                                     bytesPerSec = 0L,
                                     timestampMs = System.currentTimeMillis(),
+                                    localUriString = uri.toString(),
                                     statusLabel = "Failed"
                                 )
                             )
@@ -851,6 +855,7 @@ class PhoneShareServer(context: Context) {
                 activeConn = null
                 activeSessionId = null
                 if (activeTransferJob === coroutineContext[Job]) activeTransferJob = null
+                TransferKeepAliveService.onTransferFinished(appContext)
             }
         }
         activeTransferJob = job
@@ -877,6 +882,7 @@ class PhoneShareServer(context: Context) {
         }
         activeTransferJob?.cancel()
         val job = scope.launch {
+            TransferKeepAliveService.onTransferStarted(appContext, "Downloading $fileName")
             var doneBytes = if (partFile.exists()) partFile.length() else 0L
             try {
                 val sid = partFile.nameWithoutExtension
@@ -1008,8 +1014,10 @@ class PhoneShareServer(context: Context) {
                 pauseRequested.set(false)
                 pausedDownloadState = null
                 activeConn = null
+                TransferKeepAliveService.onTransferFinished(appContext)
                 activeSessionId = null
                 if (activeTransferJob === coroutineContext[Job]) activeTransferJob = null
+                TransferKeepAliveService.onTransferFinished(appContext)
             }
         }
         activeTransferJob = job
@@ -1307,6 +1315,7 @@ class PhoneShareServer(context: Context) {
                     }
 
                     val buf = ByteArray(TRANSFER_BUF)
+                    TransferKeepAliveService.onTransferStarted(appContext, "Receiving $cleanName")
                     try {
                         RandomAccessFile(partFile, "rw").use { raf ->
                             if (offset > 0L && partFile.exists()) raf.seek(offset) else raf.setLength(0L)
@@ -1339,6 +1348,7 @@ class PhoneShareServer(context: Context) {
                         }
                     } finally {
                         if (activeIncomingSessionId == sid) activeIncomingSessionId = null
+                        TransferKeepAliveService.onTransferFinished(appContext)
                     }
 
                     val overallDone = offset + receivedThisConn
@@ -1366,11 +1376,33 @@ class PhoneShareServer(context: Context) {
 
                     val completed = sid.isEmpty() || totalExpected <= 0L || overallDone >= totalExpected
                     if (!completed) {
-                        _transferProgress.value = TransferProgress(cleanName, overallDone, totalExpected, isUpload = false, isPaused = true, transferId = sid)
-                        val resp = """{"ok":true,"paused":true,"received":$overallDone}""".toByteArray(Charsets.UTF_8)
-                        out.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${resp.size}\r\n\r\n".toByteArray())
-                        out.write(resp)
-                        out.flush()
+                        val isPausedNow = sid.isNotEmpty() && pausedSessions.contains(sid)
+                        if (isPausedNow) {
+                            _transferProgress.value = TransferProgress(cleanName, overallDone, totalExpected, isUpload = false, isPaused = true, transferId = sid)
+                            val resp = """{"ok":true,"paused":true,"received":$overallDone}""".toByteArray(Charsets.UTF_8)
+                            out.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${resp.size}\r\n\r\n".toByteArray())
+                            out.write(resp)
+                            out.flush()
+                        } else {
+                            serverUploadParts.remove(sid)
+                            runCatching { partFile.delete() }
+                            _transferProgress.value = null
+                            appendHistory(
+                                TransferHistoryItem(
+                                    id = "ph_host_fail_${System.nanoTime()}",
+                                    fileName = cleanName,
+                                    sizeBytes = overallDone,
+                                    isSent = false,
+                                    bytesPerSec = 0L,
+                                    timestampMs = System.currentTimeMillis(),
+                                    statusLabel = "Failed"
+                                )
+                            )
+                            val resp = """{"ok":false,"error":"incomplete stream"}""".toByteArray(Charsets.UTF_8)
+                            out.write("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: ${resp.size}\r\n\r\n".toByteArray())
+                            out.write(resp)
+                            out.flush()
+                        }
                         return
                     }
 

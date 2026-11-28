@@ -11,6 +11,7 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -19,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -43,7 +45,8 @@ enum class BulbProtocol {
     PHILIPS_WIZ,
     YEELIGHT,
     TUYA_LAN,
-    BLE_LIGHT
+    BLE_LIGHT,
+    GOOGLE_HOME
 }
 
 data class DiscoveredSmartBulb(
@@ -61,12 +64,16 @@ data class DiscoveredSmartBulb(
  * - Tuya / Wipro / Syska / Havells Smart Bulbs (LAN UDP 6666 / 6667 beacons)
  * - Bluetooth LE Smart Bulbs (BluetoothLeScanner)
  */
-class SmartBulbClient(context: Context) {
+class SmartBulbClient(
+    context: Context,
+    private val googleHomeClient: GoogleHomeClient? = null
+) {
 
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val prefs = appContext.getSharedPreferences("gpt_smart_bulbs", Context.MODE_PRIVATE)
     private val seqCounter = AtomicInteger(1)
+    private var sceneLoopJob: Job? = null
 
     private val _bulbs = MutableStateFlow<List<DiscoveredSmartBulb>>(emptyList())
     val bulbs: StateFlow<List<DiscoveredSmartBulb>> = _bulbs.asStateFlow()
@@ -317,7 +324,33 @@ class SmartBulbClient(context: Context) {
     }
 
     fun disconnect() {
+        sceneLoopJob?.cancel()
+        sceneLoopJob = null
         _connectedBulb.value = null
+    }
+
+    fun stopSceneLoop() {
+        sceneLoopJob?.cancel()
+        sceneLoopJob = null
+    }
+
+    fun startSceneLoop(
+        colors: List<Triple<Int, Int, Int>>,
+        stepDelayMs: Long,
+        onError: (String) -> Unit = {}
+    ) {
+        sceneLoopJob?.cancel()
+        if (colors.isEmpty()) return
+        val intervalMs = stepDelayMs.coerceIn(450L, 6000L)
+        sceneLoopJob = scope.launch {
+            var idx = 0
+            while (isActive && _connectedBulb.value != null) {
+                val c = colors[idx % colors.size]
+                applyStateInternal(power = null, brightness = null, rgb = c, tempKelvin = null, onError = onError)
+                idx++
+                delay(intervalMs)
+            }
+        }
     }
 
     fun setState(
@@ -327,11 +360,37 @@ class SmartBulbClient(context: Context) {
         tempKelvin: Int? = null,
         onError: (String) -> Unit = {}
     ) {
-        val target = _connectedBulb.value ?: return
+        if (power == false || rgb != null || tempKelvin != null) {
+            sceneLoopJob?.cancel()
+            sceneLoopJob = null
+        }
         scope.launch {
-            runCatching {
-                when (target.protocol) {
-                    BulbProtocol.PHILIPS_WIZ -> {
+            applyStateInternal(power, brightness, rgb, tempKelvin, onError)
+        }
+    }
+
+    private suspend fun applyStateInternal(
+        power: Boolean? = null,
+        brightness: Int? = null,
+        rgb: Triple<Int, Int, Int>? = null,
+        tempKelvin: Int? = null,
+        onError: (String) -> Unit = {}
+    ) {
+        val target = _connectedBulb.value ?: return
+        runCatching {
+            when (target.protocol) {
+                BulbProtocol.GOOGLE_HOME -> {
+                    val gh = googleHomeClient
+                        ?: throw IllegalStateException("Google Home client not initialized")
+                    gh.applyLightState(
+                        deviceId = target.deviceId,
+                        power = power,
+                        brightness = brightness,
+                        rgb = rgb,
+                        tempKelvin = tempKelvin
+                    ).getOrThrow()
+                }
+                BulbProtocol.PHILIPS_WIZ -> {
                         val params = JSONObject().apply {
                             power?.let { put("state", it) }
                             brightness?.let { put("dimming", it.coerceIn(10, 100)) }
@@ -383,7 +442,7 @@ class SmartBulbClient(context: Context) {
                             onError(
                                 "Tuya/Wipro bulb detected at ${target.host}$idNote. Local LAN control requires your 16-char Tuya LocalKey — tap Connect -> Wi-Fi Bulb -> Advanced to enter it, or use WiZ / Yeelight / IR LED."
                             )
-                            return@launch
+                            return@runCatching
                         }
                         val dps = JSONObject().apply {
                             power?.let { put("20", it) }
@@ -418,13 +477,12 @@ class SmartBulbClient(context: Context) {
                     }
 
                     BulbProtocol.BLE_LIGHT -> {
-                        onError("BLE light '${target.name}' found. Proprietary BLE-Mesh encryption requires pairing in its vendor app, or use a WiZ / Yeelight / IR light.")
+                        onError("BLE light '${target.name}' found. Sign in with Google Home in Settings to control Wipro/Tuya bulbs over Google Home cloud.")
                     }
                 }
             }.onFailure { err ->
-                onError("Bulb command failed: ${err.message ?: "check Wi-Fi IP"}")
+                onError("Bulb command failed: ${err.message ?: "check connection"}")
             }
-        }
     }
 
     private fun hasBleScanPermission(): Boolean {

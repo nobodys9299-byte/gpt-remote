@@ -133,6 +133,8 @@ import com.gptremote.mitv.ui.theme.WifiBlue
 import com.gptremote.mitv.wifi.DiscoveredDlnaTv
 import com.gptremote.mitv.wifi.HostedMediaItem
 import com.gptremote.mitv.wifi.SharedPcFile
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -406,6 +408,7 @@ fun PcFileSharePanel(
     onShareAppsToPc: () -> Unit,
     onDownloadFile: (SharedPcFile) -> Unit,
     onOpenHistoryFile: (TransferHistoryItem) -> Unit,
+    onResendHistoryFile: (TransferHistoryItem) -> Unit = {},
     onPauseTransfer: () -> Unit = {},
     onResumeTransfer: () -> Unit = {},
     onCancelTransfer: () -> Unit = {},
@@ -481,7 +484,8 @@ fun PcFileSharePanel(
         TransferHistorySection(
             title = "PC Transfer History",
             items = uiState.pcTransferHistory,
-            onOpenItem = onOpenHistoryFile
+            onOpenItem = onOpenHistoryFile,
+            onResendItem = onResendHistoryFile
         )
     }
 }
@@ -502,6 +506,7 @@ fun PhoneSharePanel(
     onSendAppsToPeer: () -> Unit,
     onDownloadFromPeer: (SharedPcFile) -> Unit,
     onOpenHistoryFile: (TransferHistoryItem) -> Unit,
+    onResendHistoryFile: (TransferHistoryItem) -> Unit = {},
     onPauseTransfer: () -> Unit = {},
     onResumeTransfer: () -> Unit = {},
     onCancelTransfer: () -> Unit = {}
@@ -632,13 +637,13 @@ fun PhoneSharePanel(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Tap Receive on the other phone, then scan its QR code",
+                        text = "Connect both phones to the same Wi-Fi or Hotspot first, then open Receive on the other phone and scan its QR code.",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
                     Button(
                         onClick = onScanPeerQr,
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        modifier = Modifier.fillMaxWidth().height(50.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MiOrange),
                         shape = RoundedCornerShape(14.dp)
                     ) {
@@ -646,33 +651,10 @@ fun PhoneSharePanel(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Scan Receiver QR", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = if (uiState.phoneHotspotSsid != null) onStopLocalHotspot else onStartLocalHotspot,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Rounded.WifiTethering, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(if (uiState.phoneHotspotSsid != null) "Hotspot On" else "Hotspot", fontSize = 12.sp)
-                        }
-                        OutlinedButton(
-                            onClick = onOpenHotspotSettings,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Rounded.Wifi, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Wi-Fi Settings", fontSize = 12.sp)
-                        }
-                    }
                 }
             }
         } else {
-            // Receive mode: Show QR + inline Hotspot / Wi-Fi toggle when needed
+            // Receive mode: Show QR with clear same-Wi-Fi/Hotspot note (no cluttered Hotspot/Settings buttons)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -694,7 +676,7 @@ fun PhoneSharePanel(
                 if (qrBitmap != null) {
                     Box(
                         modifier = Modifier
-                            .size(190.dp)
+                            .size(196.dp)
                             .clip(RoundedCornerShape(16.dp))
                             .background(Color.White)
                             .padding(8.dp)
@@ -706,49 +688,16 @@ fun PhoneSharePanel(
                         )
                     }
                     Text(
-                        text = "Scan this QR from the sender phone's Send tab",
+                        text = "Keep both phones on the same Wi-Fi or Hotspot, then scan this QR from the sender phone's Send tab.",
                         color = TextSecondary,
                         fontSize = 11.sp
                     )
                 } else {
                     Text(
-                        text = "Connect to Wi-Fi or turn on Hotspot below to generate your Receive QR",
+                        text = "Connect this phone to Wi-Fi or Personal Hotspot first to generate your Receive QR.",
                         color = Color(0xFFFBBF24),
                         fontSize = 12.sp
                     )
-                }
-                if (uiState.phoneHotspotSsid != null) {
-                    Text(
-                        text = "Hotspot Active: ${uiState.phoneHotspotSsid} • Pass: ${uiState.phoneHotspotPassword.orEmpty()}",
-                        color = ConnectedGreen,
-                        fontSize = 11.sp
-                    )
-                }
-                if (!uiState.phoneHotspotError.isNullOrBlank()) {
-                    Text(uiState.phoneHotspotError, color = Color(0xFFFBBF24), fontSize = 11.sp)
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilledTonalButton(
-                        onClick = if (uiState.phoneHotspotSsid != null) onStopLocalHotspot else onStartLocalHotspot,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Rounded.WifiTethering, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(if (uiState.phoneHotspotSsid != null) "Stop Hotspot" else "Start Hotspot", fontSize = 12.sp)
-                    }
-                    OutlinedButton(
-                        onClick = onOpenHotspotSettings,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Rounded.Wifi, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Wi-Fi Settings", fontSize = 12.sp)
-                    }
                 }
             }
         }
@@ -766,7 +715,8 @@ fun PhoneSharePanel(
         TransferHistorySection(
             title = "Phone Transfer History",
             items = uiState.phoneTransferHistory,
-            onOpenItem = onOpenHistoryFile
+            onOpenItem = onOpenHistoryFile,
+            onResendItem = onResendHistoryFile
         )
     }
 }
@@ -799,16 +749,19 @@ fun TvCompanionSheetDialog(
     onCastMediaDlna: (HostedMediaItem) -> Unit,
     onDlnaPlaybackAction: (String) -> Unit,
     onOpenHistoryFile: (TransferHistoryItem) -> Unit,
+    onResendHistoryFile: (TransferHistoryItem) -> Unit = {},
     onDismiss: () -> Unit
 ) {
-    val modeTab = if (preferNonAndroidTab && uiState.connectedTvCompanion == null) 1 else 0
+    val modeTab = if (preferNonAndroidTab) 1 else 0
     var showManual by remember { mutableStateOf(false) }
     var manualHost by remember { mutableStateOf("") }
     var manualCode by remember { mutableStateOf("") }
     var showBrowserQr by remember { mutableStateOf(false) }
 
-    LaunchedEffect(sheetMode) {
-        onScanTvCompanion()
+    LaunchedEffect(sheetMode, preferNonAndroidTab) {
+        if (!preferNonAndroidTab) {
+            onScanTvCompanion()
+        }
         if (sheetMode == TvSheetMode.FILE_SHARE) onStartTvBrowserHost()
         if (preferNonAndroidTab || sheetMode == TvSheetMode.SCREEN_CAST) onScanDlna()
     }
@@ -1059,7 +1012,8 @@ fun TvCompanionSheetDialog(
                         TransferHistorySection(
                             title = "TV Transfer History",
                             items = uiState.tvTransferHistory,
-                            onOpenItem = onOpenHistoryFile
+                            onOpenItem = onOpenHistoryFile,
+                            onResendItem = onResendHistoryFile
                         )
                     }
                 } else {
@@ -1492,6 +1446,15 @@ fun TransferProgressCard(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(queueItems, key = { it.id }) { q ->
+                            val isActiveRow = q.status == "Sending" || q.status == "Paused"
+                            val qTotal = if (isActiveRow) prog.totalBytes.coerceAtLeast(1L) else q.sizeBytes.coerceAtLeast(1L)
+                            val qDone = when {
+                                q.status == "Sent" -> qTotal
+                                isActiveRow -> prog.bytesDone.coerceIn(0L, qTotal)
+                                else -> 0L
+                            }
+                            val qFrac = (qDone.toFloat() / qTotal).coerceIn(0f, 1f)
+                            val qPct = (qFrac * 100f).roundToInt()
                             val stColor = when (q.status) {
                                 "Sending" -> MiOrange
                                 "Paused" -> Color(0xFFFBBF24)
@@ -1499,39 +1462,65 @@ fun TransferProgressCard(
                                 "Cancelled", "Failed" -> Color(0xFFF87171)
                                 else -> TextSecondary
                             }
-                            Row(
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(12.dp))
                                     .background(RemoteSurface)
                                     .border(1.dp, RemoteBorder, RoundedCornerShape(12.dp))
                                     .padding(horizontal = 12.dp, vertical = 9.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier.weight(1f),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    FileThumbnailBadge(fileName = q.fileName, uriString = null, size = 30.dp)
-                                    Column {
-                                        Text(
-                                            text = q.fileName,
-                                            color = TextPrimary,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(formatFileSize(q.sizeBytes), color = TextSecondary, fontSize = 10.sp)
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        FileThumbnailBadge(fileName = q.fileName, uriString = q.localUriString, size = 32.dp)
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = q.fileName,
+                                                color = TextPrimary,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = if (isActiveRow) {
+                                                    "${formatFileSize(qDone)} / ${formatFileSize(qTotal)}"
+                                                } else {
+                                                    formatFileSize(q.sizeBytes)
+                                                },
+                                                color = TextSecondary,
+                                                fontSize = 10.sp
+                                            )
+                                        }
                                     }
+                                    Text(
+                                        text = when {
+                                            isActiveRow -> "${q.status} • $qPct%"
+                                            q.status == "Sent" -> "Sent • 100%"
+                                            else -> q.status
+                                        },
+                                        color = stColor,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
                                 }
-                                Text(
-                                    text = q.status,
+                                LinearProgressIndicator(
+                                    progress = { qFrac },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(5.dp)
+                                        .clip(RoundedCornerShape(3.dp)),
                                     color = stColor,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold
+                                    trackColor = RemoteSurfaceElevated
                                 )
                             }
                         }
@@ -1654,7 +1643,8 @@ fun TransferProgressCard(
 fun TransferHistorySection(
     title: String,
     items: List<TransferHistoryItem>,
-    onOpenItem: (TransferHistoryItem) -> Unit
+    onOpenItem: (TransferHistoryItem) -> Unit,
+    onResendItem: ((TransferHistoryItem) -> Unit)? = null
 ) {
     if (items.isEmpty()) return
 
@@ -1746,12 +1736,33 @@ fun TransferHistorySection(
                             )
                         }
                     }
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                        contentDescription = "Open ${entry.fileName}",
-                        tint = WifiBlue,
-                        modifier = Modifier.size(18.dp)
-                    )
+                    val canResend = entry.isSent &&
+                        (entry.statusLabel == "Failed" || entry.statusLabel == "Cancelled") &&
+                        !entry.localUriString.isNullOrBlank() &&
+                        onResendItem != null
+                    if (canResend) {
+                        FilledTonalButton(
+                            onClick = { onResendItem?.invoke(entry) },
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "Retry ${entry.fileName}",
+                                tint = MiOrange,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Retry", color = MiOrange, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    } else {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                            contentDescription = "Open ${entry.fileName}",
+                            tint = WifiBlue,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1818,6 +1829,7 @@ private fun FileThumbnailBadge(
     val ext = remember(fileName) { fileName.substringAfterLast('.', "").lowercase(Locale.US) }
     val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic")
     val isVideo = ext in listOf("mp4", "mkv", "mov", "webm", "avi", "m4v")
+    val isApk = ext == "apk"
     val context = LocalContext.current
 
     val thumb by produceState<ImageBitmap?>(
@@ -1825,7 +1837,7 @@ private fun FileThumbnailBadge(
         uriString,
         ext
     ) {
-        if (uriString.isNullOrBlank() || (!isImage && !isVideo)) {
+        if (uriString.isNullOrBlank() || (!isImage && !isVideo && !isApk)) {
             value = null
             return@produceState
         }
@@ -1838,7 +1850,38 @@ private fun FileThumbnailBadge(
             val loaded = runCatching {
                 val uri = Uri.parse(uriString)
                 var bmp: Bitmap? = null
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (isApk) {
+                    val pm = context.packageManager
+                    val directPath = if (uri.scheme == "file") uri.path else null
+                    var tempApk: File? = null
+                    val apkPath = directPath ?: run {
+                        val tmp = File(context.cacheDir, "apk_icon_${System.nanoTime()}.apk")
+                        val copied = context.contentResolver.openInputStream(uri)?.use { inp ->
+                            FileOutputStream(tmp).use { out -> inp.copyTo(out) }
+                            true
+                        } ?: false
+                        if (copied) {
+                            tempApk = tmp
+                            tmp.absolutePath
+                        } else {
+                            runCatching { tmp.delete() }
+                            null
+                        }
+                    }
+                    try {
+                        if (apkPath != null) {
+                            val pkgInfo = pm.getPackageArchiveInfo(apkPath, 0)
+                            pkgInfo?.applicationInfo?.let { ai ->
+                                ai.sourceDir = apkPath
+                                ai.publicSourceDir = apkPath
+                                bmp = ai.loadIcon(pm)?.toBitmap(96, 96)
+                            }
+                        }
+                    } finally {
+                        tempApk?.let { runCatching { it.delete() } }
+                    }
+                }
+                if (bmp == null && (isImage || isVideo) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     bmp = runCatching { context.contentResolver.loadThumbnail(uri, Size(128, 128), null) }.getOrNull()
                 }
                 if (bmp == null && isVideo) {

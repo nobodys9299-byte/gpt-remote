@@ -9,7 +9,10 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
+import android.util.Log
+import java.io.File
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -113,7 +116,26 @@ class MainActivity : ComponentActivity() {
     private val incomingShareUris = MutableStateFlow<List<Uri>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val prevHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e("GPT_REMOTE", "Fatal crash on thread ${thread.name}", throwable)
+            runCatching {
+                val text = "Crash on ${thread.name} at ${System.currentTimeMillis()}:\n${throwable.stackTraceToString()}"
+                File(cacheDir, "gpt_crash.txt").writeText(text)
+                val dlDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "GptRemote")
+                if (dlDir.exists()) {
+                    File(dlDir, "gpt_crash.txt").writeText(text)
+                }
+            }
+            prevHandler?.uncaughtException(thread, throwable)
+        }
+
         super.onCreate(savedInstanceState)
+        runCatching {
+            viewModel.registerActivityResultCaller(this)
+        }.onFailure { err ->
+            Log.w("MainActivity", "Google Home registration skipped: ${err.message}")
+        }
         enableEdgeToEdge()
         handleIncomingIntent(intent)
 
@@ -366,7 +388,10 @@ class MainActivity : ComponentActivity() {
                             onSelectHapticStrength = viewModel::setHapticStrength,
                             onToggleSound = viewModel::setSoundEnabled,
                             onSelectAccentTheme = viewModel::setAccentTheme,
-                            onClearBanner = viewModel::clearBanner
+                            onClearBanner = viewModel::clearBanner,
+                            onSignInGoogleHome = { viewModel.signInGoogleHome() },
+                            onRefreshGoogleHome = viewModel::refreshGoogleHomeLights,
+                            onDisconnectGoogleHome = viewModel::disconnectGoogleHome
                         )
                     }
 
@@ -543,7 +568,10 @@ class MainActivity : ComponentActivity() {
                                 val brand = viewModel.openActiveSession(session)
                                 route = AppRoute.Remote(brand)
                             },
-                            onDisconnectSession = viewModel::disconnectSession
+                            onDisconnectSession = viewModel::disconnectSession,
+                            onSignInGoogleHome = { viewModel.signInGoogleHome() },
+                            onRefreshGoogleHome = viewModel::refreshGoogleHomeLights,
+                            onDisconnectGoogleHome = viewModel::disconnectGoogleHome
                         )
                     }
                 }

@@ -42,6 +42,7 @@ import com.gptremote.mitv.wifi.HostedMediaItem
 import com.gptremote.mitv.wifi.PhoneShareServer
 import com.gptremote.mitv.wifi.ScreenCastService
 import com.gptremote.mitv.wifi.SharedPcFile
+import com.gptremote.mitv.wifi.GoogleHomeClient
 import com.gptremote.mitv.wifi.SmartBulbClient
 import com.gptremote.mitv.wifi.SmartTvProtocol
 import com.gptremote.mitv.wifi.SmartTvWebSocketClient
@@ -80,7 +81,8 @@ class RemoteRepository(context: Context) {
     private val wifiTvClient = WifiTvRemoteClient(certManager)
     private val smartTvWsClient = SmartTvWebSocketClient(appContext)
     private val wifiPcClient = WifiPcRemoteClient()
-    private val smartBulbClient = SmartBulbClient(appContext)
+    val googleHomeClient = GoogleHomeClient(appContext)
+    private val smartBulbClient = SmartBulbClient(appContext, googleHomeClient)
     private val phoneShareServer = PhoneShareServer(appContext)
     private val dlnaMediaCaster = DlnaMediaCaster()
 
@@ -167,6 +169,14 @@ class RemoteRepository(context: Context) {
         val renderers: List<DiscoveredDlnaTv>,
         val isScanning: Boolean,
         val activeRenderer: DiscoveredDlnaTv?
+    )
+
+    private data class GoogleHomeFlows(
+        val signedIn: Boolean,
+        val status: String,
+        val accountHint: String?,
+        val lightCount: Int,
+        val lights: List<DiscoveredSmartBulb>
     )
 
     private val coreFlows = combine(
@@ -300,6 +310,21 @@ class RemoteRepository(context: Context) {
         DlnaFlows(list, scanning, active)
     }
 
+    private val googleHomeFlows = combine(
+        googleHomeClient.isSignedIn,
+        googleHomeClient.statusText,
+        googleHomeClient.accountHint,
+        googleHomeClient.homeLights
+    ) { signedIn, status, hint, lights ->
+        GoogleHomeFlows(
+            signedIn = signedIn,
+            status = status,
+            accountHint = hint,
+            lightCount = lights.size,
+            lights = lights
+        )
+    }
+
     private val tvCompanionFlows = combine(
         wifiPcClient.discoveredTvCompanions,
         wifiPcClient.connectedTvCompanion,
@@ -328,7 +353,8 @@ class RemoteRepository(context: Context) {
         mediaShareFlows,
         phoneShareFlows,
         tvCompanionFlows,
-        dlnaFlows
+        dlnaFlows,
+        googleHomeFlows
     ) { values ->
         val core = values[0] as CoreFlows
         val disc = values[1] as DiscoveryFlows
@@ -337,6 +363,7 @@ class RemoteRepository(context: Context) {
         val phone = values[4] as PhoneShareFlows
         val tv = values[5] as TvCompanionFlows
         val dlna = values[6] as DlnaFlows
+        val gHome = values[7] as GoogleHomeFlows
         val effectiveStatus = when (core.transport) {
             TransportMode.BLUETOOTH_HID -> when {
                 core.btStatus !is ConnectionStatus.Disconnected -> core.btStatus
@@ -405,9 +432,13 @@ class RemoteRepository(context: Context) {
             transferProgress = media.transferProgress,
             pcTransferQueue = media.pcQueue,
             pcTransferHistory = media.pcHistory,
-            smartBulbs = disc.bulbs,
+            smartBulbs = disc.bulbs + gHome.lights,
             isScanningBulbs = disc.isScanningBulbs,
             connectedBulb = disc.connectedBulb,
+            googleHomeSignedIn = gHome.signedIn,
+            googleHomeStatus = gHome.status,
+            googleHomeAccountEmail = gHome.accountHint,
+            googleHomeDevicesCount = gHome.lightCount,
             phoneHostQrUrl = phone.hostQrUrl,
             phoneHostSharedFiles = phone.hostedFiles,
             peerPhoneName = phone.peerName,
@@ -693,6 +724,25 @@ class RemoteRepository(context: Context) {
         statusBanner.value = "Connected to ${bulb.name}"
     }
 
+    fun signInGoogleHome(onComplete: (String) -> Unit) {
+        haptics.click()
+        googleHomeClient.signInAndRequestPermissions { msg ->
+            statusBanner.value = msg
+            onComplete(msg)
+        }
+    }
+
+    fun refreshGoogleHomeLights() {
+        haptics.click()
+        googleHomeClient.refreshLights { msg -> statusBanner.value = msg }
+    }
+
+    fun disconnectGoogleHome() {
+        haptics.click()
+        googleHomeClient.disconnectSession()
+        statusBanner.value = "Google Home disconnected."
+    }
+
     fun connectManualBulb(host: String) {
         val clean = host.trim()
         if (clean.isEmpty()) return
@@ -723,7 +773,7 @@ class RemoteRepository(context: Context) {
         if (brand != null && irBlaster.hasIrEmitter && irFallbackAction != null) {
             irBlaster.sendApplianceCommand(brand, irFallbackAction)
         } else {
-            statusBanner.value = "Open Connect to pair WiZ / Yeelight bulb on local Wi-Fi."
+            statusBanner.value = "Open Connect to pair WiZ / Yeelight / Google Home bulb on local Wi-Fi."
         }
     }
 
@@ -817,6 +867,7 @@ class RemoteRepository(context: Context) {
         wifiPcClient.disconnectTvCompanion()
         phoneShareServer.disconnectPeer()
         smartBulbClient.disconnect()
+        googleHomeClient.disconnectSession()
         connectedBrandId.value = null
         irActive.value = false
         statusBanner.value = "Disconnected from all devices."

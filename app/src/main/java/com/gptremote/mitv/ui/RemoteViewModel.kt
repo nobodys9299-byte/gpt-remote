@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.ComponentActivity
 import androidx.lifecycle.AndroidViewModel
 import com.gptremote.mitv.data.RemoteRepository
 import com.gptremote.mitv.haptic.HapticStrength
@@ -27,6 +28,22 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     private val repository = RemoteRepository(application)
 
     val uiState: StateFlow<RemoteUiState> = repository.uiState
+
+    fun registerActivityResultCaller(activity: ComponentActivity) {
+        repository.googleHomeClient.registerActivityResultCaller(activity)
+    }
+
+    fun signInGoogleHome(onComplete: (String) -> Unit = {}) {
+        repository.signInGoogleHome(onComplete)
+    }
+
+    fun refreshGoogleHomeLights() {
+        repository.refreshGoogleHomeLights()
+    }
+
+    fun disconnectGoogleHome() {
+        repository.disconnectGoogleHome()
+    }
 
     fun hasBluetoothPermissions(): Boolean = repository.bluetoothHid.hasRequiredPermissions()
 

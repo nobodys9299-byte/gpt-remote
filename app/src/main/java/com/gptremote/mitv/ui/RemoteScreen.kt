@@ -241,7 +241,10 @@ fun RemoteScreen(
     onSelectAccentTheme: (AppAccentTheme) -> Unit,
     onClearBanner: () -> Unit,
     onOpenActiveSession: (ActiveSessionItem) -> Unit = {},
-    onDisconnectSession: (ActiveSessionItem) -> Unit = {}
+    onDisconnectSession: (ActiveSessionItem) -> Unit = {},
+    onSignInGoogleHome: () -> Unit = {},
+    onRefreshGoogleHome: () -> Unit = {},
+    onDisconnectGoogleHome: () -> Unit = {}
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     var showConnectSheet by remember { mutableStateOf(false) }
@@ -508,6 +511,13 @@ fun RemoteScreen(
             onScanQrCode = { showPhoneQrScanner = true },
             phoneQrPayload = uiState.phoneHostQrUrl,
             onRequestHostQr = onStartPhoneShareHost,
+            googleHomeSignedIn = uiState.googleHomeSignedIn,
+            googleHomeStatus = uiState.googleHomeStatus,
+            googleHomeAccount = uiState.googleHomeAccountEmail,
+            googleHomeDevicesCount = uiState.googleHomeDevicesCount,
+            onSignInGoogleHome = onSignInGoogleHome,
+            onRefreshGoogleHome = onRefreshGoogleHome,
+            onDisconnectGoogleHome = onDisconnectGoogleHome,
             onDismiss = { showSettingsSheet = false }
         )
     }
